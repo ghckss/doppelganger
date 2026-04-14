@@ -1,0 +1,13 @@
+{
+  "name": "doppelganger-agent-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "poll:slack": "node src/cli.js poll slack-mentions",
+    "poll:github": "node src/cli.js poll github-reviews",
+    "test": "node --test"
+  }
+}
