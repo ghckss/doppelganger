@@ -392,6 +392,59 @@ export function createCodeExecutionDomain({
     }
   }
 
+  async function statusLinesForWorktree(workdir) {
+    const status = await runGit(workdir, ['status', '--porcelain']);
+    return status.split(/\r?\n/).filter(Boolean);
+  }
+
+  async function autoCommitWorktreeIfDirty(taskId, workdir, {
+    action,
+    phase,
+    commitMessage,
+    dirtyErrorMessage
+  }) {
+    const beforeStatusLines = await statusLinesForWorktree(workdir);
+    if (beforeStatusLines.length === 0) {
+      return {
+        autoCommitted: false
+      };
+    }
+
+    try {
+      await runGit(workdir, ['add', '-A']);
+      const stagedFilesOutput = await runGit(workdir, ['diff', '--cached', '--name-only']);
+      const stagedFiles = stagedFilesOutput.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (stagedFiles.length === 0) {
+        throw new Error('변경 파일을 자동 커밋 대상으로 스테이징하지 못했습니다');
+      }
+
+      await runGit(workdir, ['commit', '--no-verify', '-m', commitMessage]);
+      const commitSha = await runGit(workdir, ['rev-parse', '--short', 'HEAD']);
+      const afterStatusLines = await statusLinesForWorktree(workdir);
+      if (afterStatusLines.length > 0) {
+        throw new Error(`${dirtyErrorMessage}: ${afterStatusLines.join(' | ')}`);
+      }
+
+      repo.logExecution(taskId, action, 'success', {
+        response: {
+          phase,
+          commitMessage,
+          commitSha: commitSha.trim(),
+          stagedFiles,
+          statusLinesBefore: beforeStatusLines
+        }
+      });
+
+      return {
+        autoCommitted: true,
+        commitSha: commitSha.trim(),
+        stagedFiles
+      };
+    } catch (error) {
+      throw new Error(`${dirtyErrorMessage}: ${formatExecutionError(error)}`);
+    }
+  }
+
   async function ensureBranch(task, workspace) {
     const currentTask = repo.getTask(task.id);
     const existingBranch = normalizeWhitespace(currentTask.payload?.branchName);
@@ -432,6 +485,53 @@ export function createCodeExecutionDomain({
   async function listCommitSubjects(workdir, baseBranch, previousCount = 0) {
     const commits = await listCommitsSince(workdir, baseBranch);
     return commits.slice(previousCount).map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`);
+  }
+
+  function latestArtifactMetadata(taskId, type) {
+    const latest = repo.listArtifacts(taskId, type).at(-1);
+    const metadata = latest?.metadata;
+    if (!metadata || typeof metadata !== 'object') {
+      return null;
+    }
+    return metadata;
+  }
+
+  function loadStoredPlans(taskId, task) {
+    return {
+      promptPlan: task?.result?.promptPlan || latestArtifactMetadata(taskId, 'prompt_plan'),
+      productPlan: latestArtifactMetadata(taskId, 'product_plan'),
+      designSpec: latestArtifactMetadata(taskId, 'design_spec')
+    };
+  }
+
+  function resolveResumeStartStep(task, plans, resumeFromCheckpoint) {
+    if (!resumeFromCheckpoint) {
+      return 1;
+    }
+
+    const result = task?.result && typeof task.result === 'object' ? task.result : {};
+    const progress = result.executionProgress && typeof result.executionProgress === 'object'
+      ? result.executionProgress
+      : {};
+    const phase = normalizeWhitespace(progress.phase).toLowerCase();
+    const currentStep = Math.max(0, toInteger(progress.currentStep, 0));
+    const reviewRoundsCount = safeArray(result.reviewRounds).length;
+    const hasPromptPlan = Boolean(plans.promptPlan);
+
+    if (phase === 'pr_draft' || currentStep >= CODE_EXECUTION_TOTAL_STEPS - 1) {
+      return 7;
+    }
+    if (phase === 'review' || currentStep >= 4 || reviewRoundsCount > 0) {
+      return 4;
+    }
+    if ((phase === 'coding' || currentStep >= 3) && hasPromptPlan) {
+      return 3;
+    }
+    if (phase === 'planning' || currentStep >= 2) {
+      return 2;
+    }
+
+    return 1;
   }
 
   function storeArtifact(taskId, type, title, data) {
@@ -587,13 +687,19 @@ export function createCodeExecutionDomain({
       sandboxMode: 'workspace-write',
       schema: codingAgentSchema
     });
-
+    const autoCommitResult = await autoCommitWorktreeIfDirty(task.id, workspace.git.root, {
+      action: 'auto_commit_coding_changes',
+      phase: 'coding',
+      commitMessage: 'chore: auto-commit coding agent workspace changes',
+      dirtyErrorMessage: '코딩 에이전트가 작업 트리에 커밋되지 않은 변경을 남겼습니다'
+    });
     await assertCleanWorktree(workspace.git.root, '코딩 에이전트가 작업 트리에 커밋되지 않은 변경을 남겼습니다');
 
     repo.logExecution(task.id, 'run_coding_agent', 'success', {
       response: {
         ...responseWithProvider.parsed,
         agentProvider: agent.provider,
+        autoCommit: autoCommitResult,
         stdout: responseWithProvider.stdout,
         stderr: responseWithProvider.stderr,
         durationMs: responseWithProvider.durationMs
@@ -603,11 +709,11 @@ export function createCodeExecutionDomain({
     return responseWithProvider.parsed;
   }
 
-  async function runReviewLoop(taskId, workspace, plans) {
-    const reviewRounds = [];
+  async function runReviewLoop(taskId, workspace, plans, { existingReviewRounds = [] } = {}) {
+    const reviewRounds = safeArray(existingReviewRounds).map((round) => ({ ...round }));
     let previousCommitCount = (await listCommitsSince(workspace.git.root, workspace.git.baseBranch)).length;
 
-    for (let round = 1; round <= CODE_REVIEW_ROUNDS; round += 1) {
+    for (let round = reviewRounds.length + 1; round <= CODE_REVIEW_ROUNDS; round += 1) {
       const currentTask = repo.getTask(taskId);
       updateExecutionProgress(taskId, `리뷰 라운드 ${round}/${CODE_REVIEW_ROUNDS} 실행 중`, {
         phase: 'review',
@@ -671,7 +777,12 @@ export function createCodeExecutionDomain({
           sandboxMode: 'workspace-write',
           schema: patchAgentSchema
         });
-
+        const autoCommitResult = await autoCommitWorktreeIfDirty(taskId, workspace.git.root, {
+          action: 'auto_commit_patch_changes',
+          phase: 'patch',
+          commitMessage: `fix: auto-commit patch round ${round} changes`,
+          dirtyErrorMessage: `패치 라운드 ${round}에서 커밋되지 않은 변경이 남았습니다`
+        });
         await assertCleanWorktree(workspace.git.root, `패치 라운드 ${round}에서 커밋되지 않은 변경이 남았습니다`);
         const newCommits = await listCommitSubjects(workspace.git.root, workspace.git.baseBranch, previousCommitCount);
         patchData = patchArtifactData(round, patchResponse.parsed, newCommits);
@@ -680,6 +791,7 @@ export function createCodeExecutionDomain({
           response: {
             ...patchData,
             agentProvider: agent.provider,
+            autoCommit: autoCommitResult,
             stdout: patchResponse.stdout,
             stderr: patchResponse.stderr,
             durationMs: patchResponse.durationMs
@@ -703,7 +815,8 @@ export function createCodeExecutionDomain({
     return reviewRounds;
   }
 
-  async function runTask(taskId) {
+  async function runTask(taskId, options = {}) {
+    const resumeFromCheckpoint = Boolean(options.resumeFromCheckpoint);
     if (activeRuns.has(taskId)) {
       return { started: false };
     }
@@ -716,35 +829,78 @@ export function createCodeExecutionDomain({
         throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
       }
 
-      updateExecutionProgress(taskId, '작업 환경을 점검하고 브랜치를 준비하는 중입니다', {
-        phase: 'workspace',
-        label: '작업 환경 점검 및 브랜치 준비',
-        currentStep: 1
-      });
+      const initialPlans = loadStoredPlans(taskId, task);
+      const resumeStartStep = resolveResumeStartStep(task, initialPlans, resumeFromCheckpoint);
+      const resumeApplied = resumeFromCheckpoint && resumeStartStep > 1;
+
+      if (resumeApplied) {
+        updateExecutionProgress(taskId, `${resumeStartStep}단계부터 작업을 재개하는 중입니다`, {
+          phase: 'resume',
+          label: `${resumeStartStep}단계부터 재개`,
+          currentStep: Math.max(1, resumeStartStep - 1)
+        });
+        repo.logExecution(taskId, 'resume_from_checkpoint', 'success', {
+          response: {
+            resumeStartStep
+          }
+        });
+      } else {
+        updateExecutionProgress(taskId, '작업 환경을 점검하고 브랜치를 준비하는 중입니다', {
+          phase: 'workspace',
+          label: '작업 환경 점검 및 브랜치 준비',
+          currentStep: 1
+        });
+      }
 
       const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
       const branchName = await ensureBranch(task, workspace);
-      updateExecutionProgress(taskId, '프롬프트 계획을 만들고 코딩 워크플로를 준비하는 중입니다', {
-        phase: 'planning',
-        label: '프롬프트/기획/디자인 계획 생성',
-        currentStep: 2
-      }, {
-        branch: branchName,
-        baseBranch: workspace.git.baseBranch
-      });
 
-      const latestTask = repo.getTask(taskId);
-      const plans = await runPromptPlanning(latestTask, workspace);
-      updateExecutionProgress(taskId, '코딩 에이전트를 실행하는 중입니다', {
-        phase: 'coding',
-        label: '코딩 에이전트 실행',
-        currentStep: 3
-      }, {
-        promptPlan: plans.promptPlan
-      });
+      let plans = loadStoredPlans(taskId, repo.getTask(taskId));
+      if (resumeStartStep <= 2 || !plans.promptPlan) {
+        updateExecutionProgress(taskId, '프롬프트 계획을 만들고 코딩 워크플로를 준비하는 중입니다', {
+          phase: 'planning',
+          label: '프롬프트/기획/디자인 계획 생성',
+          currentStep: 2
+        }, {
+          branch: branchName,
+          baseBranch: workspace.git.baseBranch
+        });
 
-      const codingResult = await runCodingRound(repo.getTask(taskId), workspace, plans);
-      const reviewRounds = await runReviewLoop(taskId, workspace, plans);
+        const latestTask = repo.getTask(taskId);
+        plans = await runPromptPlanning(latestTask, workspace);
+      } else {
+        updateTaskProgress(taskId, `${resumeStartStep}단계 재개 준비가 완료되었습니다`, {
+          branch: branchName,
+          baseBranch: workspace.git.baseBranch,
+          promptPlan: plans.promptPlan
+        });
+      }
+
+      let codingSummary = normalizeWhitespace(repo.getTask(taskId)?.result?.codingSummary);
+      if (resumeStartStep <= 3) {
+        updateExecutionProgress(taskId, '코딩 에이전트를 실행하는 중입니다', {
+          phase: 'coding',
+          label: '코딩 에이전트 실행',
+          currentStep: 3
+        }, {
+          promptPlan: plans.promptPlan
+        });
+
+        const codingResult = await runCodingRound(repo.getTask(taskId), workspace, plans);
+        codingSummary = normalizeWhitespace(codingResult.summary);
+        updateTaskProgress(taskId, '코딩 결과를 정리하는 중입니다', {
+          codingSummary: codingSummary || null
+        });
+      }
+
+      const existingReviewRounds = resumeStartStep >= 4
+        ? safeArray(repo.getTask(taskId)?.result?.reviewRounds)
+        : [];
+      const reviewRounds = existingReviewRounds.length >= CODE_REVIEW_ROUNDS
+        ? existingReviewRounds
+        : await runReviewLoop(taskId, workspace, plans, {
+            existingReviewRounds
+          });
       const commits = await listCommitsSince(workspace.git.root, workspace.git.baseBranch);
       const commitSummary = commits.map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`);
       updateExecutionProgress(taskId, 'PR 초안을 준비하는 중입니다', {
@@ -752,7 +908,7 @@ export function createCodeExecutionDomain({
         label: 'PR 초안 정리',
         currentStep: CODE_EXECUTION_TOTAL_STEPS - 1
       }, {
-        codingSummary: codingResult.summary,
+        codingSummary: codingSummary || '이전 실행의 코딩 결과를 재사용했습니다.',
         commits,
         reviewRounds
       });
@@ -776,7 +932,7 @@ export function createCodeExecutionDomain({
           baseBranch: workspace.git.baseBranch,
           repoSlug: workspace.git.repoSlug,
           promptPlan: plans.promptPlan,
-          codingSummary: codingResult.summary,
+          codingSummary: codingSummary || '이전 실행의 코딩 결과를 재사용했습니다.',
           commits,
           reviewRounds,
           pullRequest,

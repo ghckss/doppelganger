@@ -124,6 +124,21 @@ A practical setup is often:
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
 7. Use the task detail page to create the PR after review.
 
+### Code execution step map (`executionProgress.currentStep`)
+- `0`: queued (작업 시작 대기)
+- `1`: 작업 환경 점검 + 브랜치 준비
+- `2`: 프롬프트/기획/디자인 계획 생성
+- `3`: 코딩 에이전트 실행
+- `4`: 리뷰/수정 라운드 1
+- `5`: 리뷰/수정 라운드 2
+- `6`: 리뷰/수정 라운드 3
+- `7`: PR 초안 정리
+- `8`: 코드 작업 완료
+
+Resume behavior:
+- `코드 작업 재개`는 항상 1단계부터 다시 시작하지 않습니다.
+- 실패/중단 시점의 체크포인트(`executionProgress.currentStep`, `phase`, 저장된 review rounds/artifacts)를 기준으로 가능한 가장 가까운 단계부터 이어서 실행합니다.
+
 ## Notes
 - 현재 서버는 기존 Node.js 런타임을 유지하고, TypeScript 전환 기반(`server/tsconfig.json`)만 먼저 적용했습니다.
 - 클라이언트는 Next.js 대신 React + Vite로 분리해 서버 도메인 로직과 UI 배포 수명주기를 분리했습니다.

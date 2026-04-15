@@ -39,6 +39,18 @@
     - Slack/GitHub/코드 작업 주요 영역 및 하위 편집 영역은 접기/펼치기 토글을 지원.
     - 상단 데이터 동기화 액션은 도메인별 개별 버튼 대신 `일괄 업데이트` 단일 버튼으로 통합.
     - 10분 주기 자동 `일괄 업데이트` 코드는 주석 처리 상태로 코드에 포함(필요 시 활성화 가능).
+    - `client/src/App.tsx`는 오케스트레이션 중심으로 축소하고, 도메인 패널을 `client/src/components/*Panel.tsx`로 분리.
+    - 공통 UI 클래스/배지/진행바는 `client/src/components/common.tsx`, 화면 파생 상태/포맷 헬퍼는 `client/src/task-view.ts`로 분리.
+    - 초기 진입 시 작업 목록 로드 및 선택 상세 로드를 `App.tsx` 이펙트로 복구.
+    - 코드 작업 생성에서 `기획 단계 실행`, `디자인 단계 실행` 체크박스 기본값은 둘 다 해제(false).
+    - `새로고침`은 목록만이 아니라 선택된 상세까지 함께 다시 조회하도록 변경.
+    - Slack/GitHub/코드 작업 목록과 선택 상세는 `@tanstack/react-query`로 조회/캐시 관리.
+    - Slack/GitHub/코드 작업 목록/상세는 페이지 새로고침 없이 10초 주기 API refetch로 자동 최신화.
+    - 코드 작업 생성 직후 코드 작업 패널/목록 섹션을 자동으로 펼쳐 즉시 진행 상태를 확인 가능하도록 변경.
+    - 코드 작업 상세 액션에 `코드 작업 재개` 버튼을 추가하고, 실패/중단 상태에서 `POST /api/tasks/:id/resume`로 기존 task를 재개 가능.
+    - `코드 작업 재개`는 항상 1단계 재시작이 아니라 마지막 체크포인트(예: 코딩 3단계/리뷰 단계)부터 이어서 실행.
+    - 코딩/패치 에이전트가 변경사항을 커밋하지 않고 종료하면 서버가 자동 커밋(`auto_commit_*`) 후 다음 단계를 계속 진행하도록 보강.
+    - GitHub 리뷰 전송(`POST /pulls/:number/reviews`)에서 `422 Unprocessable Entity` 발생 시, `POST /issues/:number/comments`로 자동 폴백해 전송 실패를 방지.
   - client styling system:
     - 기존 `client/src/styles.css` 기반 스타일을 제거.
     - Tailwind CSS로 전환 (`client/src/index.css`, `tailwind.config.cjs`, `postcss.config.cjs`).

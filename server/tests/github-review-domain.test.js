@@ -395,3 +395,42 @@ test('github review domain restores the latest draft from previous successful ou
   assert.equal(drafts[1].id, fallbackDraft.id);
   assert.equal(drafts[2].id, successDraft.id);
 });
+
+test('github review domain falls back to issue comment when review submission returns 422', async () => {
+  const repo = createRepo();
+  const task = createDraftTask(repo, 77);
+
+  const domain = createGitHubReviewDomain({
+    config: {
+      github: {
+        owner: 'acme',
+        repositories: ['demo']
+      }
+    },
+    repo,
+    githubClient: {
+      submitPullRequestReview: async () => {
+        const error = new Error('Unprocessable Entity');
+        error.status = 422;
+        throw error;
+      },
+      createIssueComment: async () => ({
+        id: 70077,
+        html_url: 'https://github.com/acme/demo/pull/77#issuecomment-70077',
+        created_at: '2026-04-15T00:55:00.000Z'
+      })
+    },
+    llmService: {}
+  });
+
+  const result = await domain.execute(task, {
+    message: '리뷰 코멘트 본문'
+  });
+
+  assert.equal(result.provider, 'github');
+  assert.equal(result.reviewMode, 'issue_comment_fallback');
+  assert.equal(result.response.id, 70077);
+  assert.equal(result.response.fallbackFrom, 'pull_request_review');
+  assert.equal(result.response.fallbackReason, 'Unprocessable Entity');
+  assert.equal(result.response.htmlUrl, 'https://github.com/acme/demo/pull/77#issuecomment-70077');
+});

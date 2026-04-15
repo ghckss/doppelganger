@@ -309,7 +309,7 @@ export class TaskService {
     }
 
     const task = await domain.createTask(input);
-    await domain.start(task.id);
+    await domain.start(task.id, { resumeFromCheckpoint: false });
     return this.getTaskDetail(task.id);
   }
 
@@ -320,7 +320,30 @@ export class TaskService {
     }
 
     const domain = this.domains.code_execution;
-    await domain.start(taskId);
+    const started = await domain.start(taskId, { resumeFromCheckpoint: false });
+    if (started && typeof started === 'object' && started.started === false) {
+      throw new Error('작업이 이미 실행 중입니다');
+    }
+    return this.getTaskDetail(taskId);
+  }
+
+  async resumeCodeExecutionTask(taskId) {
+    const task = assertTask(taskId, this.repo.getTask(taskId));
+    if (task.domain !== 'code_execution') {
+      throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
+    }
+
+    const status = String(task.status || '').toLowerCase();
+    if (!['failed', 'running'].includes(status)) {
+      throw new Error(`재개 가능한 상태가 아닙니다: ${task.status}`);
+    }
+
+    const domain = this.domains.code_execution;
+    const started = await domain.start(taskId, { resumeFromCheckpoint: true });
+    if (started && typeof started === 'object' && started.started === false) {
+      throw new Error('작업이 이미 실행 중입니다');
+    }
+    this.repo.logExecution(taskId, 'resume_code_execution', 'success');
     return this.getTaskDetail(taskId);
   }
 

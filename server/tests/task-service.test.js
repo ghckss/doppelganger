@@ -309,3 +309,99 @@ test('TaskService recovers interrupted background jobs on initialization', () =>
   assert.ok(codeExecutionActions.includes('recover_code_execution_run'));
   assert.ok(slackRecoveryActions.includes('recover_slack_code_review'));
 });
+
+test('TaskService resumes failed code execution tasks', async () => {
+  const repo = createRepo();
+  const task = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    externalId: 'resume-target',
+    title: 'Resume target',
+    status: 'failed',
+    payload: {},
+    result: {
+      executionProgress: {
+        phase: 'failed',
+        label: '실패',
+        currentStep: 3,
+        totalSteps: 8,
+        percent: 38
+      }
+    }
+  });
+
+  let startedTaskId = '';
+  const service = new TaskService({
+    config: {},
+    repo,
+    domains: {
+      code_execution: {
+        start: async (taskId) => {
+          startedTaskId = taskId;
+          return { started: true };
+        }
+      }
+    }
+  });
+
+  const detail = await service.resumeCodeExecutionTask(task.id);
+  assert.equal(startedTaskId, task.id);
+  assert.equal(detail.task.id, task.id);
+
+  const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
+  assert.ok(executionActions.includes('resume_code_execution'));
+});
+
+test('TaskService rejects resume for non-resumable code execution status', async () => {
+  const repo = createRepo();
+  const task = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    externalId: 'resume-reject',
+    title: 'Resume reject',
+    status: 'awaiting_approval',
+    payload: {}
+  });
+
+  const service = new TaskService({
+    config: {},
+    repo,
+    domains: {
+      code_execution: {
+        start: async () => ({ started: true })
+      }
+    }
+  });
+
+  await assert.rejects(
+    service.resumeCodeExecutionTask(task.id),
+    /재개 가능한 상태가 아닙니다/
+  );
+});
+
+test('TaskService reports already-running state when starting code execution task', async () => {
+  const repo = createRepo();
+  const task = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    externalId: 'start-already-running',
+    title: 'Start already running',
+    status: 'running',
+    payload: {}
+  });
+
+  const service = new TaskService({
+    config: {},
+    repo,
+    domains: {
+      code_execution: {
+        start: async () => ({ started: false })
+      }
+    }
+  });
+
+  await assert.rejects(
+    service.startCodeExecutionTask(task.id),
+    /작업이 이미 실행 중입니다/
+  );
+});

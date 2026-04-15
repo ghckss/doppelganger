@@ -444,3 +444,263 @@ test('code execution domain marks progress as failed when coding runner crashes'
   const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
   assert.ok(executionActions.includes('run_code_execution'));
 });
+
+test('code execution domain auto-commits coding changes when agent leaves dirty worktree', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  const claudeCliRunner = {
+    async assertAvailable() {},
+    async runExec({ workdir, schema }) {
+      if (schema.required.includes('findings')) {
+        return {
+          parsed: {
+            summary: 'No issues found.',
+            findings: [],
+            approval: 'approved_with_no_changes',
+            residualRisks: []
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+
+      if (schema.required.includes('resolvedFindingIds')) {
+        throw new Error('Patch step should not run when no findings exist');
+      }
+
+      writeFile(path.join(workdir, 'README.md'), '# Demo\n\nDirty worktree fallback.\n');
+      return {
+        parsed: {
+          summary: 'Implemented without creating a commit.',
+          testsRun: ['npm test'],
+          notes: ['Left unstaged changes intentionally.']
+        },
+        stdout: '',
+        stderr: '',
+        durationMs: 1
+      };
+    }
+  };
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'claude'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {
+        throw new Error('codex should not be selected in this test');
+      },
+      async runExec() {
+        throw new Error('codex should not run in this test');
+      }
+    },
+    claudeCliRunner,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        return {
+          summary: 'Dirty worktree fallback test',
+          goal: 'Auto-commit dirty coding output',
+          taskType: 'feature',
+          successCriteria: [],
+          deliverables: [],
+          constraints: [],
+          relevantContext: []
+        };
+      },
+      async createPullRequestDraft() {
+        return {
+          title: 'Dirty fallback PR',
+          body: 'Auto-commit fallback verification'
+        };
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Verify dirty worktree fallback',
+    agentProvider: 'claude',
+    workdir: workspace.repoDir,
+    baseBranch: 'main',
+    needsPlanning: false,
+    needsDesign: false
+  });
+
+  await domain.start(task.id);
+
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval';
+  }, 'Timed out waiting for fallback auto-commit task to finish');
+
+  const finishedTask = repo.getTask(task.id);
+  assert.equal(finishedTask.status, 'awaiting_approval');
+  assert.ok(Array.isArray(finishedTask.result.commits));
+  assert.ok(finishedTask.result.commits.some((commit) => commit.subject.includes('auto-commit coding agent workspace changes')));
+
+  const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
+  assert.ok(executionActions.includes('auto_commit_coding_changes'));
+});
+
+test('code execution domain resumes from coding checkpoint without rerunning planning', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  let codingCalls = 0;
+  const claudeCliRunner = {
+    async assertAvailable() {},
+    async runExec({ workdir, schema }) {
+      if (schema.required.includes('findings')) {
+        return {
+          parsed: {
+            summary: 'No issues found.',
+            findings: [],
+            approval: 'approved_with_no_changes',
+            residualRisks: []
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+
+      if (schema.required.includes('resolvedFindingIds')) {
+        throw new Error('Patch step should not run when no findings exist');
+      }
+
+      codingCalls += 1;
+      if (codingCalls === 1) {
+        throw new Error('Simulated token expiration during coding step');
+      }
+
+      writeFile(path.join(workdir, 'README.md'), '# Demo\n\nResume from coding checkpoint.\n');
+      run('git', ['add', 'README.md'], workdir);
+      run('git', ['commit', '-m', 'feat: resume coding checkpoint'], workdir);
+
+      return {
+        parsed: {
+          summary: 'Completed coding after resume.',
+          testsRun: ['npm test'],
+          notes: ['Resumed from coding checkpoint.']
+        },
+        stdout: '',
+        stderr: '',
+        durationMs: 1
+      };
+    }
+  };
+
+  let promptPlanCalls = 0;
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'claude'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {
+        throw new Error('codex should not be selected in this test');
+      },
+      async runExec() {
+        throw new Error('codex should not run in this test');
+      }
+    },
+    claudeCliRunner,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        promptPlanCalls += 1;
+        return {
+          summary: 'Resume checkpoint plan',
+          goal: 'Resume from coding step',
+          taskType: 'feature',
+          successCriteria: [],
+          deliverables: [],
+          constraints: [],
+          relevantContext: []
+        };
+      },
+      async createPullRequestDraft() {
+        return {
+          title: 'Resume checkpoint PR',
+          body: 'resume checkpoint validation'
+        };
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Resume from coding checkpoint',
+    agentProvider: 'claude',
+    workdir: workspace.repoDir,
+    baseBranch: 'main',
+    needsPlanning: false,
+    needsDesign: false
+  });
+
+  await domain.start(task.id);
+
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'failed';
+  }, 'Timed out waiting for first failed run');
+
+  const failedTask = repo.getTask(task.id);
+  assert.equal(failedTask.result.executionProgress.currentStep, 3);
+  assert.equal(promptPlanCalls, 1);
+
+  await domain.start(task.id, { resumeFromCheckpoint: true });
+
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval';
+  }, 'Timed out waiting for resumed run');
+
+  const resumedTask = repo.getTask(task.id);
+  assert.equal(resumedTask.status, 'awaiting_approval');
+  assert.equal(promptPlanCalls, 1);
+  assert.match(resumedTask.summary, /PR 생성 준비/);
+
+  const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
+  assert.ok(executionActions.includes('resume_from_checkpoint'));
+});

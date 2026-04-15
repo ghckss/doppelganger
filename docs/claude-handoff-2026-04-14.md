@@ -57,6 +57,14 @@ Recent product decisions already implemented:
 30. Slack/GitHub/코드 작업 패널과 주요 하위 영역(분석/편집/아티팩트/생성/목록)은 접기/펼치기 토글을 지원해야 한다.
 31. Slack 이모지 모드에서는 alias(`eyes`)뿐 아니라 실제 glyph(👀) 미리보기도 노출되어야 한다.
 32. 상단 수동 동기화 액션은 `일괄 업데이트` 단일 버튼을 사용하며, 10분 자동 일괄 업데이트 코드는 주석 블록으로 유지한다.
+33. 클라이언트는 `App.tsx` 단일 파일이 아니라 도메인별 패널 컴포넌트(`SlackPanel/GitHubPanel/CodeExecutionPanel`)와 공통 UI/헬퍼 모듈로 분리된 구조를 유지한다.
+34. GitHub 리뷰 전송에서 `422 Unprocessable Entity`가 발생하면 PR review API 대신 issue comment API로 자동 폴백해 전송을 완료한다.
+35. 코드 작업 생성 UI의 `기획 단계 실행`, `디자인 단계 실행` 체크박스 기본값은 둘 다 해제(false)다.
+36. 코드 작업 진행률 확인을 위해 `새로고침`은 목록+선택 상세를 함께 갱신한다.
+37. Slack/GitHub/코드 작업 목록과 선택 상세는 `@tanstack/react-query`로 관리되며, 페이지 새로고침 없이 10초 주기 API 자동 최신화를 사용한다.
+38. 코드 작업 상세에서는 실패/중단 상태 작업에 `코드 작업 재개` 버튼을 노출하고 `POST /api/tasks/:id/resume`로 재개를 시작한다.
+39. 코드 작업에서 코딩/패치 에이전트가 커밋을 누락하면 서버가 자동 커밋 후 워크플로를 계속 진행한다(실행 로그: `auto_commit_coding_changes`, `auto_commit_patch_changes`).
+40. `코드 작업 재개`는 체크포인트 기반으로 동작하며, 실패 시점 단계(예: 3단계 코딩)부터 이어서 실행하고 이미 완료된 기획/디자인 단계는 재실행하지 않는다.
 
 ## What Is Already Implemented
 
@@ -157,7 +165,7 @@ All tests currently pass:
   - Slack 답변 “초안 다시 생성”은 기본(코드검토 미반영) 생성.
   - 코드검토 완료 시 “코드검토 반영 초안 생성” 버튼 노출.
   - Slack 답변 생성 안내는 Claude 우선, 실패 시 Codex 자동 전환.
-  - 분석 running 상태에서는 task 상세 화면 자동 새로고침(3초).
+  - 분석 running 상태를 포함해 Slack/GitHub/코드 작업 목록/상세는 react-query 10초 주기 자동 새로고침.
 
 ### 6) Code Execution 진행률 UI/상태 추가
 
@@ -295,6 +303,60 @@ All tests currently pass:
 - 헤더의 `Slack 멘션 업데이트`, `GitHub PR 후보 업데이트` 버튼을 제거하고 `일괄 업데이트` 버튼으로 통합.
 - `runBatchUpdate()`에서 `pollSlackMentions()` + `pollGitHubReviews()`를 순차 실행.
 - 10분 주기 자동 `일괄 업데이트`용 `useEffect` 코드를 주석으로 추가(현재 비활성).
+
+### 14) Client 컴포넌트 분리 + 로딩 이펙트 복구
+
+변경 파일:
+
+- `client/src/App.tsx`
+- `client/src/components/common.tsx`
+- `client/src/components/SlackPanel.tsx`
+- `client/src/components/GitHubPanel.tsx`
+- `client/src/components/CodeExecutionPanel.tsx`
+- `client/src/task-view.ts`
+
+주요 변경:
+
+- `App.tsx`에서 도메인별 대형 JSX를 제거하고 상태/데이터 로딩/액션 오케스트레이션만 담당.
+- Slack/GitHub/코드 작업 UI를 각각 독립 컴포넌트로 분리.
+- 공통 UI 스타일/배지/진행바를 `common.tsx`로 분리.
+- 상태 파생/포맷/코드리뷰·진행률 파싱 헬퍼를 `task-view.ts`로 분리.
+- 초기 진입 시 작업 목록 조회와 선택 작업 상세 조회(useEffect) 동작을 복구.
+
+### 15) GitHub 리뷰 전송 422 폴백 처리
+
+변경 파일:
+
+- `server/src/connectors/github-client.js`
+- `server/src/domains/github-review-domain.js`
+- `server/tests/github-review-domain.test.js`
+
+주요 변경:
+
+- GitHub API 오류를 `GitHubApiError`(status/payload/method/path 포함)로 전달.
+- PR review 제출(`POST /pulls/:number/reviews`)이 `422`로 실패하면 issue comment(`POST /issues/:number/comments`)로 자동 폴백.
+- 폴백 성공 시 실행 결과 `reviewMode`를 `issue_comment_fallback`으로 기록.
+- 관련 회귀 테스트 추가:
+  - `github review domain falls back to issue comment when review submission returns 422`
+
+### 16) 코드 작업 진행 상태 가시성 개선
+
+변경 파일:
+
+- `client/src/App.tsx`
+- `client/src/main.tsx`
+- `client/package.json`
+- `client/pnpm-lock.yaml`
+
+주요 변경:
+
+- `새로고침` 버튼이 task list만이 아니라 현재 선택된 task detail도 함께 갱신하도록 변경.
+- `@tanstack/react-query`를 도입해 Slack/GitHub/코드 작업 목록(`GET /api/tasks`)과 선택 상세(`GET /api/tasks/:id`)를 query 단위로 관리.
+- 목록/상세 query에 `refetchInterval: 10000`, `refetchIntervalInBackground: true`를 적용해 10초 주기 API 자동 최신화.
+- 코드 작업 생성 후 `code_execution` task가 생성되면 코드 패널(`panel_code`)과 목록 섹션(`code_tasks`)을 자동으로 펼쳐 진행률을 바로 확인 가능.
+- 코드 작업 상세 액션에 `코드 작업 재개` 버튼을 추가해 실패/중단 상태에서 `POST /api/tasks/:id/resume`로 같은 task를 재개 가능.
+- 재개 실행은 체크포인트(`executionProgress.currentStep`) 기준으로 계획/코딩/리뷰/PR 단계를 이어서 수행하며, 이미 완료된 앞단계를 불필요하게 반복하지 않음.
+- 코딩/패치 단계에서 에이전트가 커밋 누락 시 서버가 자동 커밋 후 진행하며, 실행 로그에 `auto_commit_coding_changes`/`auto_commit_patch_changes`를 남김.
 
 ## Key Files To Read First
 

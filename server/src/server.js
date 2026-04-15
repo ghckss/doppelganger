@@ -365,6 +365,23 @@ export function createHttpServer({ cwd, taskService }) {
         return;
       }
 
+      const resumeCodeTaskMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/resume$/);
+      if (request.method === 'POST' && resumeCodeTaskMatch) {
+        const taskId = decodeURIComponent(resumeCodeTaskMatch[1]);
+        const detail = await taskService.resumeCodeExecutionTask(taskId);
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status
+          });
+          return;
+        }
+        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('코드 작업 재개를 시작했습니다')}`);
+        return;
+      }
+
       const createPrMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/create-pr$/);
       if (request.method === 'POST' && createPrMatch) {
         const taskId = decodeURIComponent(createPrMatch[1]);

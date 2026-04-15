@@ -83,6 +83,12 @@ export function runTask(taskId: string): Promise<{ ok: boolean }> {
   });
 }
 
+export function resumeCodeTask(taskId: string): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/resume`, {
+    method: 'POST'
+  });
+}
+
 export function createPullRequest(taskId: string): Promise<{ ok: boolean }> {
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/create-pr`, {
     method: 'POST'

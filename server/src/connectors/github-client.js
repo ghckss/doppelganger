@@ -1,3 +1,14 @@
+export class GitHubApiError extends Error {
+  constructor(message, { status = 0, payload = null, method = 'GET', path = '' } = {}) {
+    super(message);
+    this.name = 'GitHubApiError';
+    this.status = Number(status) || 0;
+    this.payload = payload;
+    this.method = String(method || 'GET').toUpperCase();
+    this.path = path || '';
+  }
+}
+
 export class GitHubClient {
   constructor(config, fetchImpl = fetch) {
     this.config = config;
@@ -27,7 +38,12 @@ export class GitHubClient {
 
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(payload.message || `GitHub API 호출이 ${response.status}로 실패했습니다`);
+      throw new GitHubApiError(payload.message || `GitHub API 호출이 ${response.status}로 실패했습니다`, {
+        status: response.status,
+        payload,
+        method,
+        path
+      });
     }
 
     return payload;
@@ -93,6 +109,15 @@ export class GitHubClient {
     return this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}/reviews`, {
       method: 'POST',
       body: review
+    });
+  }
+
+  async createIssueComment({ owner, repo, issueNumber, body }) {
+    return this.request(`/repos/${owner}/${repo}/issues/${issueNumber}/comments`, {
+      method: 'POST',
+      body: {
+        body
+      }
     });
   }
 
