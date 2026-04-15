@@ -463,8 +463,8 @@ test('LlmService returns GitHub fallback review when generation mode is fallback
   assert.match(result.summary, /리뷰를 생성했습니다/);
 });
 
-test('LlmService stores raw hovis review output as GitHub review body', async () => {
-  const hovisBody = [
+test('LlmService stores raw external-agent review output as GitHub review body', async () => {
+  const externalReviewBody = [
     '## 요약',
     '- 결제 API 리팩터링에서 실패 응답 메시지 일관성이 일부 약화되었습니다.',
     '',
@@ -473,11 +473,11 @@ test('LlmService stores raw hovis review output as GitHub review body', async ()
   ].join('\n');
 
   const service = new LlmService({
-    getMode: () => 'hovis',
+    getMode: () => 'external',
     isConfigured: () => true,
     createTextResponse: async () => ({
-      text: hovisBody,
-      provider: 'hovis',
+      text: externalReviewBody,
+      provider: 'external_agent',
       agentProvider: ''
     })
   });
@@ -500,12 +500,12 @@ test('LlmService stores raw hovis review output as GitHub review body', async ()
     files: []
   });
 
-  assert.equal(result.provider, 'hovis');
+  assert.equal(result.provider, 'external_agent');
   assert.match(result.reviewBody, /^해당 리뷰는, pr의 diff 만 확인하여 작성된 리뷰입니다\./);
   assert.match(result.reviewBody, /코드 작성자의 판단하에 수정 여부를 결정해주세요\./);
   assert.match(result.reviewBody, /## 요약/);
   assert.match(result.reviewBody, /## 리뷰 의견/);
-  assert.ok(result.reviewBody.includes(hovisBody));
+  assert.ok(result.reviewBody.includes(externalReviewBody));
   assert.match(result.summary, /결제 API 리팩터링/);
   assert.equal(result.approval, 'approved_with_no_changes');
   assert.equal(result.findings.length, 0);

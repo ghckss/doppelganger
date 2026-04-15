@@ -27,9 +27,9 @@ async function main() {
   }
 
   console.log('Usage:');
-  console.log('  node src/cli.js poll slack-mentions');
-  console.log('  node src/cli.js poll github-reviews');
-  console.log('  node src/cli.js serve');
+  console.log('  node server/src/cli.js poll slack-mentions');
+  console.log('  node server/src/cli.js poll github-reviews');
+  console.log('  node server/src/cli.js serve');
   process.exitCode = 1;
 }
 

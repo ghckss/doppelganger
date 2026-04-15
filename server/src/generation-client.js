@@ -1,6 +1,9 @@
 function normalizeGenerationProvider(value, fallback = 'cli') {
   const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'cli' || normalized === 'openai' || normalized === 'fallback' || normalized === 'hovis') {
+  if (normalized === 'hovis') {
+    return 'external';
+  }
+  if (normalized === 'cli' || normalized === 'openai' || normalized === 'fallback' || normalized === 'external') {
     return normalized;
   }
   return fallback;
@@ -15,11 +18,11 @@ function normalizeAgentProvider(value, fallback = 'codex') {
 }
 
 export class GenerationClient {
-  constructor({ config, openaiClient, cliClient, hovisClient }) {
+  constructor({ config, openaiClient, cliClient, externalAgentClient, hovisClient }) {
     this.config = config;
     this.openaiClient = openaiClient;
     this.cliClient = cliClient;
-    this.hovisClient = hovisClient;
+    this.externalAgentClient = externalAgentClient || hovisClient;
   }
 
   getMode(scope = 'default') {
@@ -36,8 +39,8 @@ export class GenerationClient {
     if (mode === 'openai') {
       return Boolean(this.openaiClient?.isConfigured?.());
     }
-    if (mode === 'hovis') {
-      return Boolean(this.hovisClient?.isConfigured?.());
+    if (mode === 'external') {
+      return Boolean(this.externalAgentClient?.isConfigured?.());
     }
     return Boolean(this.cliClient?.isConfigured?.());
   }
@@ -73,20 +76,20 @@ export class GenerationClient {
       };
     }
 
-    if (mode === 'hovis') {
+    if (mode === 'external') {
       if (scope !== 'github_review') {
-        throw new Error(`hovis 공급자는 github_review 스코프에서만 사용할 수 있습니다 (scope: ${scope})`);
+        throw new Error(`외부 에이전트 연결 공급자는 github_review 스코프에서만 사용할 수 있습니다 (scope: ${scope})`);
       }
-      if (!this.hovisClient?.isConfigured?.()) {
-        throw new Error('HOVIS_COMMAND가 설정되지 않았습니다');
+      if (!this.externalAgentClient?.isConfigured?.()) {
+        throw new Error('EXTERNAL_AGENT_COMMAND가 설정되지 않았습니다');
       }
-      const result = await this.hovisClient.createPullRequestReview({
+      const result = await this.externalAgentClient.createPullRequestReview({
         pullRequestUrl,
         scope
       });
       return {
         text: result.text,
-        provider: 'hovis',
+        provider: 'external_agent',
         agentProvider: ''
       };
     }

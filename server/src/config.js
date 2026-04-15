@@ -26,12 +26,20 @@ function parseEnvFile(content) {
 }
 
 function loadEnvFile(cwd) {
-  const envPath = path.join(cwd, '.env');
-  if (!fs.existsSync(envPath)) {
-    return {};
+  const candidatePaths = [
+    path.join(cwd, 'server', '.env'),
+    path.join(cwd, '.env')
+  ];
+
+  for (const envPath of candidatePaths) {
+    if (!fs.existsSync(envPath)) {
+      continue;
+    }
+
+    return parseEnvFile(fs.readFileSync(envPath, 'utf8'));
   }
 
-  return parseEnvFile(fs.readFileSync(envPath, 'utf8'));
+  return {};
 }
 
 function readValue(env, key, fallback = '') {
@@ -222,7 +230,10 @@ function normalizeAgentProviderOptional(value) {
 
 function normalizeGenerationProvider(value, fallback = 'cli') {
   const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'cli' || normalized === 'openai' || normalized === 'fallback' || normalized === 'hovis') {
+  if (normalized === 'hovis') {
+    return 'external';
+  }
+  if (normalized === 'cli' || normalized === 'openai' || normalized === 'fallback' || normalized === 'external') {
     return normalized;
   }
   return fallback;
@@ -273,6 +284,11 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   ]);
   const generationScopeTimeoutSeconds = {};
   const slackCodeKeywordConfig = loadSlackCodeKeywordRules(cwd, mergedEnv);
+  const externalAgentCommand = readValue(
+    mergedEnv,
+    'EXTERNAL_AGENT_COMMAND',
+    readValue(mergedEnv, 'HOVIS_COMMAND', '')
+  );
   const slackTimeout = readOptionalTimeoutSeconds(mergedEnv, 'SLACK_GENERATION_TIMEOUT_SECONDS');
   const githubReviewTimeout = readOptionalTimeoutSeconds(mergedEnv, 'GITHUB_REVIEW_TIMEOUT_SECONDS');
   const codePlanningTimeout = readOptionalTimeoutSeconds(mergedEnv, 'CODE_PLANNING_TIMEOUT_SECONDS');
@@ -292,6 +308,7 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
       host: readValue(mergedEnv, 'APP_HOST', '127.0.0.1'),
       port: readNumber(mergedEnv, 'APP_PORT', 4318),
       baseUrl: readValue(mergedEnv, 'APP_BASE_URL', 'http://127.0.0.1:4318'),
+      corsOrigins: readList(mergedEnv, 'APP_CORS_ORIGINS'),
       encryptionKey: readValue(mergedEnv, 'APP_ENCRYPTION_KEY', ''),
       sessionSecret: readValue(mergedEnv, 'SESSION_SECRET', ''),
       databasePath: path.resolve(cwd, readValue(mergedEnv, 'DATABASE_PATH', '.local/agent.db'))
@@ -320,8 +337,11 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
     claude: {
       command: readValue(mergedEnv, 'CLAUDE_COMMAND', 'claude')
     },
+    externalAgent: {
+      command: externalAgentCommand
+    },
     hovis: {
-      command: readValue(mergedEnv, 'HOVIS_COMMAND', 'hovis')
+      command: externalAgentCommand
     },
     agent: {
       defaultProvider: defaultAgentProvider

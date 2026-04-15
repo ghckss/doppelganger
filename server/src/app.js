@@ -20,7 +20,7 @@ export function createApplication({ cwd = process.cwd() } = {}) {
   const slackClient = new SlackClient(config);
   const openaiClient = new OpenAIClient(config);
   const githubClient = new GitHubClient(config);
-  const hovisReviewClient = new HovisReviewClient(config);
+  const externalAgentReviewClient = new HovisReviewClient(config);
   const workspaceRunner = new WorkspaceRunner(config);
   const codexCliRunner = new CodexCliRunner({ config, workspaceRunner });
   const claudeCliRunner = new ClaudeCliRunner({ config, workspaceRunner });
@@ -29,7 +29,7 @@ export function createApplication({ cwd = process.cwd() } = {}) {
     config,
     openaiClient,
     cliClient: cliGenerationClient,
-    hovisClient: hovisReviewClient
+    externalAgentClient: externalAgentReviewClient
   });
   const llmService = new LlmService(generationClient);
   const codeTaskPlanner = new CodeTaskPlanner(generationClient);

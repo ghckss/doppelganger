@@ -2,6 +2,11 @@
 
 A local agent server for company workflows.
 
+Project layout:
+- `server/`: Node.js API/automation runtime (existing domain logic 유지)
+- `client/`: React + Vite UI (신규 기본 UI)
+- `docs/`: fromm/kiwee 분석 문서 및 운영 문서
+
 Current state:
 - Slack mention handling is implemented end-to-end, including automatic summary and reply-draft generation during polling.
 - Slack mention detail supports optional manual repository analysis for deeper replies, while default polling/drafting does not inspect repositories.
@@ -13,13 +18,27 @@ Current state:
 - SQLite available through Node's built-in `node:sqlite`
 
 ## Setup
-1. Copy `.env.example` to `.env`.
-2. Fill in the service keys you want to use.
-3. Start the server:
+1. Copy `server/.env.example` to `server/.env`.
+2. Fill in the server/service keys you want to use.
+3. Set client API target in `client/.env`:
+   ```bash
+   VITE_SERVER_URL=http://127.0.0.1:4318
+   ```
+   - If client and server origins differ in dev, add allowed origins in `server/.env`:
+     ```bash
+     APP_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+     ```
+4. Start the server:
    ```bash
    npm start
    ```
-4. Open `http://127.0.0.1:4318/tasks`.
+5. Start the client (development):
+   ```bash
+   npm run dev:client
+   ```
+6. Open:
+   - React UI: `http://127.0.0.1:4318/app` (build 기준) 또는 Vite dev URL
+   - Legacy SSR UI: `http://127.0.0.1:4318/tasks`
 
 ## Slack scopes
 Read token should be able to:
@@ -38,7 +57,7 @@ A practical setup is often:
 
 ## Cron example
 ```cron
-*/10 * * * * cd /Users/hwanghochan/workspace/playground/doppelganger && /usr/bin/env node src/cli.js poll slack-mentions >> .local/cron.log 2>&1
+*/10 * * * * cd /Users/hwanghochan/workspace/playground/doppelganger && /usr/bin/env node server/src/cli.js poll slack-mentions >> .local/cron.log 2>&1
 ```
 
 ## Slack manual code review in detail view
@@ -51,19 +70,21 @@ A practical setup is often:
 ## Scripts
 - `npm start`: run the HTTP server
 - `npm run dev`: run the HTTP server with watch mode
+- `npm run dev:client`: run the React client in Vite dev mode
+- `npm run build:client`: build the React client (`client/dist`)
 - `npm run poll:slack`: perform one Slack mention poll
 - `npm run poll:github`: perform one GitHub PR review poll
 - `npm test`: run the test suite
 
 ## Generation providers
-- `GENERATION_PROVIDER=cli|openai|fallback|hovis` (default: `cli`)
+- `GENERATION_PROVIDER=cli|openai|fallback|external` (default: `cli`)
 - `GENERATION_AGENT_PROVIDER=codex|claude` (default: `codex`)
 - Optional per-scope override:
   - `SLACK_GENERATION_PROVIDER`, `SLACK_GENERATION_AGENT_PROVIDER`
   - `GITHUB_REVIEW_PROVIDER`, `GITHUB_REVIEW_AGENT_PROVIDER`
   - `CODE_PLANNING_PROVIDER`, `CODE_PLANNING_AGENT_PROVIDER`
-- `HOVIS_COMMAND` sets the `hovis` CLI executable (default: `hovis`).
-  - 실행 방식은 `hovis pr` 호출 후 PR URL을 stdin으로 전달합니다.
+- `EXTERNAL_AGENT_COMMAND` sets the external-agent review CLI executable.
+  - 실행 방식은 `pr` 서브커맨드를 호출하고 PR URL을 stdin으로 전달합니다.
 - `GENERATION_TIMEOUT_SECONDS` controls CLI generation timeout (default: 90s)
 - `GENERATION_TIMEOUT_SECONDS=0` disables global generation timeout
 - Optional per-scope timeout:
@@ -80,7 +101,7 @@ A practical setup is often:
 3. Choose generation mode:
    - CLI-first: `GENERATION_PROVIDER=cli` (default)
    - OpenAI: `GENERATION_PROVIDER=openai` + `OPENAI_API_KEY`
-   - Hovis for GitHub review only: `GITHUB_REVIEW_PROVIDER=hovis` (+ `HOVIS_COMMAND` if needed)
+   - External agent for GitHub review only: `GITHUB_REVIEW_PROVIDER=external` (+ `EXTERNAL_AGENT_COMMAND` if needed)
 4. Run `npm run poll:github` or click `GitHub PR 후보 가져오기` in the web UI.
 5. The poll will:
    - fetch all open PRs in the configured repositories
@@ -98,12 +119,14 @@ A practical setup is often:
 3. Ensure the selected CLI is available on PATH:
    - Codex: `CODEX_COMMAND` (default `codex`)
    - Claude: `CLAUDE_COMMAND` (default `claude`)
-4. Open `http://127.0.0.1:4318/tasks` and use the project picker in the "Create Code Task" form.
+4. Open `http://127.0.0.1:4318/app` and use the project picker in the "코드 작업 생성" 영역.
 5. Select the agent (`Codex` or `Claude`) per task.
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
 7. Use the task detail page to create the PR after review.
 
 ## Notes
+- 현재 서버는 기존 Node.js 런타임을 유지하고, TypeScript 전환 기반(`server/tsconfig.json`)만 먼저 적용했습니다.
+- 클라이언트는 Next.js 대신 React + Vite로 분리해 서버 도메인 로직과 UI 배포 수명주기를 분리했습니다.
 - `OPENAI_API_KEY` is optional unless the selected generation provider uses OpenAI.
 - Default generation mode is CLI, so quota issues on OpenAI do not block normal usage.
 - If `OPENAI_MODEL` is omitted, the server defaults to `gpt-5.3-codex`.

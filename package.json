@@ -4,10 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "poll:slack": "node src/cli.js poll slack-mentions",
-    "poll:github": "node src/cli.js poll github-reviews",
-    "test": "node --test"
+    "start": "node server/src/index.js",
+    "dev": "node --watch server/src/index.js",
+    "dev:server": "node --watch server/src/index.js",
+    "dev:client": "npm --prefix client run dev",
+    "poll:slack": "node server/src/cli.js poll slack-mentions",
+    "poll:github": "node server/src/cli.js poll github-reviews",
+    "test": "node --test \"server/tests/**/*.test.js\"",
+    "typecheck:server": "node ./node_modules/typescript/bin/tsc -p server/tsconfig.json --noEmit",
+    "build:client": "npm --prefix client run build",
+    "build": "npm run build:client"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
   }
 }

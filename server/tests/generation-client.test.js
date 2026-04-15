@@ -17,13 +17,13 @@ function createConfig(overrides = {}) {
   };
 }
 
-test('GenerationClient routes github_review scope to hovis provider', async () => {
+test('GenerationClient routes github_review scope to external provider', async () => {
   const config = createConfig({
     generation: {
       provider: 'cli',
       defaultAgentProvider: 'codex',
       scopeProviders: {
-        github_review: 'hovis'
+        github_review: 'external'
       },
       scopeAgentProviders: {}
     }
@@ -38,14 +38,14 @@ test('GenerationClient routes github_review scope to hovis provider', async () =
     cliClient: {
       isConfigured: () => true
     },
-    hovisClient: {
+    externalAgentClient: {
       isConfigured: () => true,
       createPullRequestReview: async ({ pullRequestUrl, scope }) => {
         called = true;
         assert.equal(scope, 'github_review');
         assert.equal(pullRequestUrl, 'https://github.com/acme/demo/pull/99');
         return {
-          text: 'hovis review body'
+          text: 'external agent review body'
         };
       }
     }
@@ -59,14 +59,14 @@ test('GenerationClient routes github_review scope to hovis provider', async () =
   });
 
   assert.equal(called, true);
-  assert.equal(result.provider, 'hovis');
-  assert.equal(result.text, 'hovis review body');
+  assert.equal(result.provider, 'external_agent');
+  assert.equal(result.text, 'external agent review body');
 });
 
-test('GenerationClient rejects hovis provider on non-github scopes', async () => {
+test('GenerationClient rejects external provider on non-github scopes', async () => {
   const config = createConfig({
     generation: {
-      provider: 'hovis',
+      provider: 'external',
       defaultAgentProvider: 'codex',
       scopeProviders: {},
       scopeAgentProviders: {}
@@ -80,7 +80,7 @@ test('GenerationClient rejects hovis provider on non-github scopes', async () =>
     cliClient: {
       isConfigured: () => false
     },
-    hovisClient: {
+    externalAgentClient: {
       isConfigured: () => true,
       createPullRequestReview: async () => {
         return {

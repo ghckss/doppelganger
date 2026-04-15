@@ -9,7 +9,7 @@
 
 ## Implementation Changes
 
-- Slack draft pipeline in `src/llm-service.js`
+- Slack draft pipeline in `server/src/llm-service.js`
 - Add thread-understanding helpers to extract topic, confirmed context, unresolved point, latest request, and deadline hints.
 - Build summary from understanding output (1-2 sentences, no label-style listing).
 - Generate fallback reply from understanding output (1-3 practical sentences, not meta-only).
@@ -20,7 +20,7 @@
 - Force model to answer the latest mention directly, in Korean, within 1-3 sentences.
 - Keep category + reaction recommendation, but allow per-thread custom reply text.
 
-- Slack domain metadata in `src/domains/slack-mention-domain.js`
+- Slack domain metadata in `server/src/domains/slack-mention-domain.js`
 - Persist `replyIntent` in draft metadata alongside `replyCategory`, `requestedAction`, and `reactionName`.
 
 - UI behavior
@@ -41,13 +41,13 @@
 
 ## Test Plan
 
-- `tests/llm-service.test.js`
+- `server/tests/llm-service.test.js`
 - Context-aware summary and reply generation for each major category.
 - Distinct responses for similar categories with different thread context.
 - OpenAI path uses `suggestedReply` when valid.
 - OpenAI meta-only reply is rejected and replaced by contextual fallback.
 
-- `tests/slack-mention-domain.test.js`
+- `server/tests/slack-mention-domain.test.js`
 - Generated summary/draft/reaction metadata persists correctly during poll.
 - `replyIntent` is stored in draft metadata.
 - Existing reply execution and reaction flow continue to work.

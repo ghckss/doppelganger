@@ -95,8 +95,8 @@ function translateProvider(provider) {
   if (normalized === 'manual') {
     return '수동';
   }
-  if (normalized === 'hovis') {
-    return 'Hovis';
+  if (normalized === 'hovis' || normalized === 'external' || normalized === 'external_agent') {
+    return '외부 에이전트 연결';
   }
   if (normalized === 'fallback') {
     return '규칙 기반';

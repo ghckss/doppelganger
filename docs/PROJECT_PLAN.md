@@ -7,17 +7,17 @@
 
 ## Architecture
 - Core platform
-  - `connector` layer for Slack, GitHub, OpenAI, and local workspace execution.
+  - `server/`에 `connector` layer(Slack, GitHub, OpenAI, local workspace execution).
   - `task` store backed by SQLite.
   - `approval` and `execution` history shared across domains.
-  - `web` UI for list, detail, review, draft editing, approval, and execution.
+  - `client/` React UI + `server/` API로 list/detail/review/draft/approval/execution 제공.
   - `cron/CLI` entrypoints for polling jobs.
 - Domain workers
   - `slack_mention` is implemented now.
   - `github_review` and `code_execution` are implemented with the same interface and setup checks.
 
 ## Slack Mention Flow
-1. A cron job runs every 10 minutes and calls `node src/cli.js poll slack-mentions`.
+1. A cron job runs every 10 minutes and calls `node server/src/cli.js poll slack-mentions`.
 2. The poller uses Slack search to find fresh direct mentions of the configured user.
 3. Each mention is normalized into a task and the parent thread is stored as artifacts.
 4. The web UI shows one task at a time with thread context, summary, and editable reply draft.

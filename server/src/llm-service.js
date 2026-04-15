@@ -319,7 +319,7 @@ function isGenerationTimeoutError(error) {
   return /(제한 시간을 초과|timeout|timed out)/i.test(String(error?.message || ''));
 }
 
-function buildHovisReviewSummary(reviewBody, pullRequest) {
+function buildExternalAgentReviewSummary(reviewBody, pullRequest) {
   const lines = String(reviewBody || '')
     .split(/\r?\n/)
     .map((line) => normalizeWhitespace(line))
@@ -342,7 +342,7 @@ function buildHovisReviewSummary(reviewBody, pullRequest) {
 
   const repoSlug = pullRequest?.repoSlug || 'unknown';
   const pullNumber = pullRequest?.number ? `#${pullRequest.number}` : '';
-  return `${repoSlug}${pullNumber} hovis 리뷰 결과를 생성했습니다.`;
+  return `${repoSlug}${pullNumber} 외부 에이전트 리뷰 결과를 생성했습니다.`;
 }
 
 function looksLikeRequestMessage(value) {
@@ -1052,7 +1052,7 @@ export class LlmService {
       return buildFallbackGitHubReview({ task, pullRequest, files });
     }
 
-    if (generationMode === 'hovis') {
+    if (generationMode === 'external' || generationMode === 'hovis') {
       try {
         const response = await this.generationClient.createTextResponse({
           instructions: '',
@@ -1063,15 +1063,15 @@ export class LlmService {
         const generated = extractTextResponse(response);
         const reviewBody = String(generated.text || '').trim();
         if (!reviewBody) {
-          throw new Error('hovis 리뷰 결과가 비어 있습니다');
+          throw new Error('외부 에이전트 리뷰 결과가 비어 있습니다');
         }
 
         return {
-          summary: buildHovisReviewSummary(reviewBody, pullRequest),
+          summary: buildExternalAgentReviewSummary(reviewBody, pullRequest),
           approval: 'approved_with_no_changes',
           findings: [],
           reviewBody: prependGitHubReviewDisclaimer(reviewBody),
-          provider: generated.provider || 'hovis',
+          provider: generated.provider || 'external_agent',
           agentProvider: ''
         };
       } catch (error) {

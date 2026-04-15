@@ -67,17 +67,17 @@ export class HovisReviewClient {
   }
 
   isConfigured() {
-    return Boolean(String(this.config.hovis?.command || '').trim());
+    return Boolean(String(this.config.externalAgent?.command || this.config.hovis?.command || '').trim());
   }
 
   async createPullRequestReview({ pullRequestUrl, scope = 'github_review' }) {
-    const command = String(this.config.hovis?.command || '').trim();
+    const command = String(this.config.externalAgent?.command || this.config.hovis?.command || '').trim();
     const normalizedPullRequestUrl = String(pullRequestUrl || '').trim();
     if (!command) {
-      throw new Error('HOVIS_COMMAND가 설정되지 않았습니다');
+      throw new Error('EXTERNAL_AGENT_COMMAND가 설정되지 않았습니다');
     }
     if (!normalizedPullRequestUrl) {
-      throw new Error('PR URL이 없어 hovis 리뷰를 실행할 수 없습니다');
+      throw new Error('PR URL이 없어 외부 에이전트 리뷰를 실행할 수 없습니다');
     }
 
     const cwd = path.resolve(this.config.cwd || process.cwd());
@@ -86,7 +86,7 @@ export class HovisReviewClient {
     const startedAt = Date.now();
     const args = ['pr'];
     logCommandStart({
-      source: `hovis:${scope}`,
+      source: `external-agent:${scope}`,
       command,
       args,
       cwd
@@ -124,7 +124,7 @@ export class HovisReviewClient {
           clearTimeout(timer);
         }
         logCommandEnd({
-          source: `hovis:${scope}`,
+          source: `external-agent:${scope}`,
           command,
           args,
           cwd,
@@ -139,7 +139,7 @@ export class HovisReviewClient {
           clearTimeout(timer);
         }
         logCommandEnd({
-          source: `hovis:${scope}`,
+          source: `external-agent:${scope}`,
           command,
           args,
           cwd,
@@ -154,7 +154,7 @@ export class HovisReviewClient {
           clearTimeout(timer);
         }
         logCommandEnd({
-          source: `hovis:${scope}`,
+          source: `external-agent:${scope}`,
           command,
           args,
           cwd,
@@ -174,17 +174,17 @@ export class HovisReviewClient {
     });
 
     if (result.timedOut) {
-      throw new Error(`hovis 리뷰 CLI 호출이 ${timeoutSeconds}초 제한 시간을 초과했습니다`);
+      throw new Error(`외부 에이전트 리뷰 CLI 호출이 ${timeoutSeconds}초 제한 시간을 초과했습니다`);
     }
 
     if (result.code !== 0) {
       const detail = [result.stderr, result.stdout].filter(Boolean).join('\n');
-      throw new Error(`hovis 리뷰 CLI가 상태 코드 ${result.code}로 종료되었습니다${detail ? `: ${truncateOutput(detail, 600)}` : ''}`);
+      throw new Error(`외부 에이전트 리뷰 CLI가 상태 코드 ${result.code}로 종료되었습니다${detail ? `: ${truncateOutput(detail, 600)}` : ''}`);
     }
 
     const text = String(result.stdout || result.stderr || '').trim();
     if (!text) {
-      throw new Error('hovis 리뷰 CLI 응답이 비어 있습니다');
+      throw new Error('외부 에이전트 리뷰 CLI 응답이 비어 있습니다');
     }
 
     return {
