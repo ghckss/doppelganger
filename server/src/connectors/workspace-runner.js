@@ -6,6 +6,11 @@ import { logCommandEnd, logCommandStart } from '../command-log.js';
 
 const execFileAsync = promisify(execFile);
 
+function isPathInside(root, target) {
+  const relative = path.relative(root, target);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 export class WorkspaceRunner {
   constructor(config) {
     this.config = config;
@@ -16,8 +21,24 @@ export class WorkspaceRunner {
   }
 
   assertAllowed(workdir) {
-    const absolute = path.resolve(workdir);
-    const allowed = this.config.workspace.allowlist.some((candidate) => absolute.startsWith(candidate));
+    const raw = String(workdir || '').trim();
+    if (!raw) {
+      throw new Error('작업공간 경로가 필요합니다');
+    }
+
+    const absolute = path.resolve(raw);
+    const absoluteReal = fs.existsSync(absolute) ? fs.realpathSync(absolute) : absolute;
+    const allowed = this.config.workspace.allowlist.some((candidate) => {
+      const candidateAbsolute = path.resolve(candidate);
+      const candidateReal = fs.existsSync(candidateAbsolute)
+        ? fs.realpathSync(candidateAbsolute)
+        : candidateAbsolute;
+
+      return isPathInside(candidateAbsolute, absolute)
+        || isPathInside(candidateAbsolute, absoluteReal)
+        || isPathInside(candidateReal, absolute)
+        || isPathInside(candidateReal, absoluteReal);
+    });
     if (!allowed) {
       throw new Error(`허용되지 않은 작업공간 경로입니다: ${absolute}`);
     }

@@ -168,9 +168,25 @@ export default function App() {
           return null;
         }
       }));
+      const byTaskId = new Map(detailResults.filter((detail): detail is TaskDetail => Boolean(detail)).map((detail) => [detail.task.id, detail]));
+      const shouldSyncDraftEditors = ['초안 생성', '코드 기반 초안 생성', '초안 저장', '새로고침'].includes(label);
+      if (shouldSyncDraftEditors) {
+        setDraftEditorsByTaskId((current) => {
+          const next = { ...current };
+          let changed = false;
+          for (const taskId of detailTaskIds) {
+            const detail = byTaskId.get(taskId);
+            if (!detail || !detail.domain?.capabilities?.drafting) {
+              continue;
+            }
+            next[detail.task.id] = toDraftEditor(detail);
+            changed = true;
+          }
+          return changed ? next : current;
+        });
+      }
 
       if (resultTaskIds.length > 0) {
-        const byTaskId = new Map(detailResults.filter((detail): detail is TaskDetail => Boolean(detail)).map((detail) => [detail.task.id, detail]));
         const shouldOpenCodePanel = resultTaskIds.some((taskId) => {
           const detail = byTaskId.get(taskId);
           return detail?.task.domain === 'code_execution';

@@ -385,7 +385,10 @@ export function createHttpServer({ cwd, taskService }) {
       const createPrMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/create-pr$/);
       if (request.method === 'POST' && createPrMatch) {
         const taskId = decodeURIComponent(createPrMatch[1]);
-        const detail = await taskService.createCodeExecutionPullRequest(taskId);
+        const body = await parseRequestBody(request);
+        const detail = await taskService.createCodeExecutionPullRequest(taskId, {
+          branchName: body.branchName
+        });
         const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
         if (prefersJson) {
           sendJson(response, 200, {

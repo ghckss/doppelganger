@@ -131,6 +131,61 @@ export function getExecutionProgress(task: Task): ExecutionProgress | null {
   };
 }
 
+export function summarizeExecutionStep(progress: ExecutionProgress): string {
+  const currentStep = Math.max(0, Number(progress.currentStep || 0));
+  const reviewRound = Math.max(0, Number(progress.reviewRound || 0));
+  const reviewTotalRounds = Math.max(0, Number(progress.reviewTotalRounds || 0));
+
+  if (currentStep <= 0) {
+    return '작업 대기 상태입니다. 실행이 시작되면 저장소 점검부터 순차적으로 진행됩니다.';
+  }
+  if (currentStep === 1) {
+    return '저장소 접근 가능 여부, 기준 브랜치, 작업 브랜치 상태를 점검하고 실행 환경을 준비합니다.';
+  }
+  if (currentStep === 2) {
+    return '요청을 구현 가능한 작업 단위로 정리하고, 필요 시 기획/디자인 산출물을 생성합니다.';
+  }
+  if (currentStep === 3) {
+    return '코딩 에이전트가 실제 코드를 수정하고 커밋 단위로 구현을 진행합니다.';
+  }
+  if (currentStep >= 4 && currentStep <= 6) {
+    const roundLabel = reviewRound > 0 && reviewTotalRounds > 0
+      ? `${reviewRound}/${reviewTotalRounds}`
+      : `${currentStep - 3}/3`;
+    return `리뷰 라운드 ${roundLabel} 진행 중입니다. 검토 결과에 따라 수정·재검토를 반복합니다.`;
+  }
+  if (currentStep === 7) {
+    return '커밋/리뷰 결과를 정리해 PR 설명(초안 제목·본문)과 제출 정보를 준비합니다.';
+  }
+  if (currentStep >= 8) {
+    return '코드 작업이 완료되어 PR 생성 또는 후속 승인/전송 단계를 진행할 수 있습니다.';
+  }
+
+  return '작업 진행 정보를 집계 중입니다.';
+}
+
+export function getExecutionStepElapsedSeconds(task: Task, progress: ExecutionProgress | null, nowMs = Date.now()): number | null {
+  if (!progress) {
+    return null;
+  }
+
+  if (String(task.status || '').toLowerCase() !== 'running') {
+    return null;
+  }
+
+  const currentStep = Math.max(0, Number(progress.currentStep || 0));
+  if (currentStep <= 0) {
+    return null;
+  }
+
+  const updatedAtMs = Date.parse(String(task.updated_at || ''));
+  if (!Number.isFinite(updatedAtMs)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor((nowMs - updatedAtMs) / 1000));
+}
+
 export function formatDateTime(value: string): string {
   if (!value) {
     return '-';

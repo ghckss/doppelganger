@@ -46,9 +46,18 @@
     - `새로고침`은 목록만이 아니라 선택된 상세까지 함께 다시 조회하도록 변경.
     - Slack/GitHub/코드 작업 목록과 선택 상세는 `@tanstack/react-query`로 조회/캐시 관리.
     - Slack/GitHub/코드 작업 목록/상세는 페이지 새로고침 없이 10초 주기 API refetch로 자동 최신화.
+    - GitHub PR 초안 생성/저장 후에는 선택 task의 최신 detail을 즉시 에디터 상태에 반영해, 브라우저 전체 새로고침 없이 초안 본문이 갱신되도록 수정.
     - 코드 작업 생성 직후 코드 작업 패널/목록 섹션을 자동으로 펼쳐 즉시 진행 상태를 확인 가능하도록 변경.
     - 코드 작업 상세 액션에 `코드 작업 재개` 버튼을 추가하고, 실패/중단 상태에서 `POST /api/tasks/:id/resume`로 기존 task를 재개 가능.
     - `코드 작업 재개`는 항상 1단계 재시작이 아니라 마지막 체크포인트(예: 코딩 3단계/리뷰 단계)부터 이어서 실행.
+    - 코드 작업 진행 카드에서 `n/8` 단계 표기 아래에 현재 단계 작업 요약(한 줄 설명)을 함께 표시.
+    - 코드 작업 진행 카드 우상단에 현재 단계 경과 시간(초 단위)을 표시.
+    - 코드 작업 진행 카드 하단(단계 설명 행 우측)에 `PR 생성` 버튼을 배치하고, `8/8` 완료 시에만 노출.
+    - `PR 생성` 클릭 시 브랜치명 입력 모달을 띄우고, 입력 브랜치 기준으로 push + PR 생성을 수행.
+    - PR 본문은 대상 저장소의 `.github/PULL_REQUEST_TEMPLATE.md`를 우선 사용하고, 제목은 `[SERVICE_PREFIX/BRANCH_TOKEN] PR_SIMPLE_SUMMARY` 형식으로 생성한다(예: `feature/FROMM-3372` -> `[FRM/FROMM-3372] ...`).
+    - 코드 작업 상세에 `리뷰 라운드 내용` 영역을 추가해, `result.reviewRounds`와 `review_round/patch_round` 아티팩트를 통합 렌더링하여 라운드별 검토/수정 내역을 확인할 수 있도록 했다.
+    - GitHub `Validation Failed: not all refs are readable` 오류 시 `owner:branch` head 형식으로 자동 재시도하고, 기존 PR 존재 시 재사용 처리.
+    - 코드 작업이 완료되면 로컬 작업공간은 기존 브랜치로 자동 복귀하고, 자동 생성 작업 브랜치는 삭제한다. PR 생성 시에는 필요하면 `sourceCommit`으로 브랜치를 복구해 push/PR 처리 후 다시 정리한다.
     - 코딩/패치 에이전트가 변경사항을 커밋하지 않고 종료하면 서버가 자동 커밋(`auto_commit_*`) 후 다음 단계를 계속 진행하도록 보강.
     - GitHub 리뷰 전송(`POST /pulls/:number/reviews`)에서 `422 Unprocessable Entity` 발생 시, `POST /issues/:number/comments`로 자동 폴백해 전송 실패를 방지.
   - client styling system:

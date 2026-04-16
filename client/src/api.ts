@@ -89,9 +89,10 @@ export function resumeCodeTask(taskId: string): Promise<{ ok: boolean }> {
   });
 }
 
-export function createPullRequest(taskId: string): Promise<{ ok: boolean }> {
+export function createPullRequest(taskId: string, input: { branchName?: string } = {}): Promise<{ ok: boolean }> {
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/create-pr`, {
-    method: 'POST'
+    method: 'POST',
+    body: input
   });
 }
 

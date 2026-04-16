@@ -122,7 +122,20 @@ A practical setup is often:
 4. Open `http://127.0.0.1:4318/app` and use the project picker in the "코드 작업 생성" 영역.
 5. Select the agent (`Codex` or `Claude`) per task.
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
-7. Use the task detail page to create the PR after review.
+7. In task detail, `PR 생성` appears only after step `8/8` is complete.
+8. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
+
+### PR creation rules
+- Source template: `<selected repository>/.github/PULL_REQUEST_TEMPLATE.md`
+- PR title format: `[SERVICE_PREFIX/BRANCH_TOKEN] PR_SIMPLE_SUMMARY`
+- `SERVICE_PREFIX` is inferred from repo/project metadata (fallback: `SERVICE`).
+- `BRANCH_TOKEN` is the last segment of the input branch name (e.g. `feature/FROMM-3372` -> `FROMM-3372`).
+- If the template includes placeholders, these are replaced:
+  - `{{PR_SIMPLE_SUMMARY}}`
+  - `{{PR_SUMMARY}}`
+  - `{{DOPPELGANGER_PR_SUMMARY}}`
+- If placeholders are not found, generated summary is appended below the template.
+- If GitHub returns `Validation Failed: not all refs are readable`, PR creation retries with `owner:branch` head format and short backoff.
 
 ### Code execution step map (`executionProgress.currentStep`)
 - `0`: queued (작업 시작 대기)
@@ -138,6 +151,11 @@ A practical setup is often:
 Resume behavior:
 - `코드 작업 재개`는 항상 1단계부터 다시 시작하지 않습니다.
 - 실패/중단 시점의 체크포인트(`executionProgress.currentStep`, `phase`, 저장된 review rounds/artifacts)를 기준으로 가능한 가장 가까운 단계부터 이어서 실행합니다.
+- UI에서는 진행 카드의 `n/8` 표시 아래에 현재 단계에서 수행 중인 작업 요약 한 줄을 함께 표시합니다.
+- UI에서는 진행 카드 우상단에 현재 단계 기준 경과 시간(초 단위, `task.updated_at` 기반)을 표시합니다.
+- UI에서는 코드 작업 상세에 `리뷰 라운드 내용` 영역이 표시되며, `result.reviewRounds`와 `review_round/patch_round` 아티팩트를 합쳐 각 라운드의 검토/수정 내역을 확인할 수 있습니다.
+- 코드 작업 완료 시 로컬 저장소는 `restoreBranch`(기존 브랜치)로 자동 복귀하며, 자동 생성된 작업 브랜치(`doppelganger/...`)는 로컬에서 삭제됩니다.
+- PR 생성 시 작업 브랜치가 이미 삭제된 상태면 `result.sourceCommit` 기준으로 임시 복구해 push/PR 생성 후 다시 정리합니다.
 
 ## Notes
 - 현재 서버는 기존 Node.js 런타임을 유지하고, TypeScript 전환 기반(`server/tsconfig.json`)만 먼저 적용했습니다.

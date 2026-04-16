@@ -132,4 +132,15 @@ export class GitHubClient {
       }
     });
   }
+
+  async updatePullRequest({ owner, repo, pullNumber, title, body, base }) {
+    return this.request(`/repos/${owner}/${repo}/pulls/${pullNumber}`, {
+      method: 'PATCH',
+      body: {
+        title,
+        body,
+        base
+      }
+    });
+  }
 }

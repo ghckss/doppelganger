@@ -347,14 +347,14 @@ export class TaskService {
     return this.getTaskDetail(taskId);
   }
 
-  async createCodeExecutionPullRequest(taskId) {
+  async createCodeExecutionPullRequest(taskId, options = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'code_execution') {
       throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
     }
 
     const domain = this.domains.code_execution;
-    await domain.createPullRequest(taskId);
+    await domain.createPullRequest(taskId, options);
     return this.getTaskDetail(taskId);
   }
 

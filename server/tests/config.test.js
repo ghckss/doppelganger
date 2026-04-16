@@ -33,8 +33,8 @@ test('loadConfig reads .env file and normalizes lists', () => {
   assert.deepEqual(config.github.repositories, ['alpha', 'beta']);
   assert.equal(config.workspace.projectsRoot, path.join(os.homedir(), 'workspace'));
   assert.deepEqual(config.workspace.allowlist, [
-    path.join(cwd, 'repo-a'),
-    path.join(cwd, 'repo-b')
+    path.join(os.homedir(), 'workspace', 'repo-a'),
+    path.join(os.homedir(), 'workspace', 'repo-b')
   ]);
   assert.deepEqual(config.slack.ignoreChannels, ['C123', '#ops-alerts']);
   assert.equal(config.agent.defaultProvider, 'claude');
@@ -50,6 +50,21 @@ test('loadConfig reads .env file and normalizes lists', () => {
   assert.equal(config.generation.scopeTimeoutSeconds.github_review, 180);
   assert.equal(config.generation.scopeTimeoutSeconds.slack, 0);
   assert.equal(config.slack.codeReviewTimeoutSeconds, 240);
+});
+
+test('loadConfig resolves WORKSPACE_ALLOWLIST absolute/relative/tilde entries', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-config-allowlist-'));
+  fs.writeFileSync(path.join(cwd, '.env'), [
+    'WORKSPACE_ALLOWLIST=repo-a,./repo-b,~/repo-c,/tmp/repo-d'
+  ].join('\n'));
+
+  const config = loadConfig({ cwd, env: {} });
+  assert.deepEqual(config.workspace.allowlist, [
+    path.join(os.homedir(), 'workspace', 'repo-a'),
+    path.join(cwd, 'repo-b'),
+    path.join(os.homedir(), 'repo-c'),
+    path.resolve('/tmp/repo-d')
+  ]);
 });
 
 test('loadConfig loads Slack code keyword rules from JSON file', () => {

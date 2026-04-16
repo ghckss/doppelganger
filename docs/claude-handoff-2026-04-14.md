@@ -65,6 +65,13 @@ Recent product decisions already implemented:
 38. 코드 작업 상세에서는 실패/중단 상태 작업에 `코드 작업 재개` 버튼을 노출하고 `POST /api/tasks/:id/resume`로 재개를 시작한다.
 39. 코드 작업에서 코딩/패치 에이전트가 커밋을 누락하면 서버가 자동 커밋 후 워크플로를 계속 진행한다(실행 로그: `auto_commit_coding_changes`, `auto_commit_patch_changes`).
 40. `코드 작업 재개`는 체크포인트 기반으로 동작하며, 실패 시점 단계(예: 3단계 코딩)부터 이어서 실행하고 이미 완료된 기획/디자인 단계는 재실행하지 않는다.
+41. 코드 작업 진행 카드의 `n/8` 표시 아래에는 현재 단계에서 수행 중인 작업 요약 한 줄을 표시한다.
+42. 코드 작업 진행 카드 우상단에는 현재 단계 기준 경과 시간(초 단위)을 표시한다.
+43. 코드 작업의 `PR 생성`은 8단계 완료 후에만 노출되며, 브랜치 입력 모달로 받은 브랜치명을 사용해 push/PR을 만들고 `.github/PULL_REQUEST_TEMPLATE.md` 기반 본문 및 `[SERVICE_PREFIX/BRANCH_TOKEN] PR_SIMPLE_SUMMARY` 제목 규칙을 적용한다(`feature/FROMM-3372` -> `[FRM/FROMM-3372] ...`).
+44. PR 생성 시 GitHub가 `Validation Failed: not all refs are readable`를 반환하면 `owner:branch` head 형식으로 자동 재시도하고, 동일 head/base의 기존 오픈 PR이 있으면 해당 PR을 재사용한다.
+45. 코드 작업 상세에는 `리뷰 라운드 내용` 영역이 있으며, `result.reviewRounds`와 `review_round/patch_round` 아티팩트를 병합해 각 라운드의 발견사항/수정 요약을 표시한다.
+46. 코드 작업 완료 시 로컬 저장소는 기존 브랜치(`restoreBranch`)로 자동 복귀하고 자동 생성된 작업 브랜치는 삭제된다. 이후 PR 생성 시 브랜치가 없으면 `result.sourceCommit`으로 임시 복구 후 push/PR 생성을 수행한다.
+47. GitHub PR 초안 생성/저장 이후에는 선택 task detail을 즉시 재조회해 draft editor 상태를 갱신하므로, 브라우저 하드 새로고침 없이 최신 초안 내용이 보인다.
 
 ## What Is Already Implemented
 
@@ -256,6 +263,25 @@ All tests currently pass:
 주요 변경:
 
 - Slack 상세에서 `초안 저장`, `승인` 버튼 제거.
+
+### 11) 코드 작업 PR 생성 플로우 강화
+
+변경 파일:
+
+- `client/src/components/CodeExecutionPanel.tsx`
+- `client/src/api.ts`
+- `server/src/server.js`
+- `server/src/task-service.js`
+- `server/src/domains/code-execution-domain.js`
+
+주요 변경:
+
+- 코드 작업 진행 카드의 단계 설명 행 우측으로 `PR 생성` 버튼을 이동.
+- `executionProgress.currentStep >= 8`일 때만 `PR 생성` 버튼 노출.
+- 클릭 시 브랜치명을 입력받는 모달을 열고, 입력값을 `POST /api/tasks/:id/create-pr`에 전달.
+- 서버 PR 생성 로직은 `branchName` 옵션을 받아 push head 브랜치로 사용.
+- PR 본문은 대상 저장소의 `.github/PULL_REQUEST_TEMPLATE.md`를 읽어 구성하고, 플레이스홀더(`{{PR_SIMPLE_SUMMARY}}`, `{{PR_SUMMARY}}`, `{{DOPPELGANGER_PR_SUMMARY}}`)를 지원.
+- PR 제목은 `[SERVICE_PREFIX/BRANCH_TOKEN] PR_SIMPLE_SUMMARY` 형식을 사용(브랜치 경로의 마지막 세그먼트 사용).
 - 코드 분석 섹션 하단에만 `코드 검토 실행`, `초안 생성`, `코드 기반 초안 생성` 버튼 노출.
 - 본문(답글 textarea) 하단 우측에 `전송`, `무시` 버튼 배치.
 - `codeReview.enabled=false` 및 분석 비실행 상태에서는 코드 분석 진행 섹션 미노출.

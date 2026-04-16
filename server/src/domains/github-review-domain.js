@@ -71,18 +71,6 @@ function isFallbackProvider(provider) {
   return String(provider || '').startsWith('fallback');
 }
 
-function isUnprocessableGitHubError(error) {
-  if (!error) {
-    return false;
-  }
-
-  if (Number(error.status) === 422) {
-    return true;
-  }
-
-  return /unprocessable entity/i.test(String(error.message || ''));
-}
-
 export function createGitHubReviewDomain({ config, repo, githubClient, llmService }) {
   const resolvedStatuses = new Set(['done', 'ignored']);
 
@@ -198,56 +186,25 @@ export function createGitHubReviewDomain({ config, repo, githubClient, llmServic
       throw new Error('리뷰 본문이 필요합니다');
     }
 
-    try {
-      const response = await githubClient.submitPullRequestReview({
-        owner: payload.owner,
-        repo: payload.repo,
-        pullNumber: payload.pullNumber,
-        review: {
-          body,
-          event: 'COMMENT'
-        }
-      });
+    const response = await githubClient.createIssueComment({
+      owner: payload.owner,
+      repo: payload.repo,
+      issueNumber: payload.pullNumber,
+      body
+    });
 
-      return {
-        provider: 'github',
-        reviewMode: 'comment',
-        approval: task.result?.approval || 'approved_with_no_changes',
-        response: {
-          id: response.id,
-          state: response.state,
-          submittedAt: response.submitted_at,
-          commitId: response.commit_id,
-          htmlUrl: payload.sourceUrl || task.source_url || ''
-        }
-      };
-    } catch (error) {
-      if (!isUnprocessableGitHubError(error)) {
-        throw error;
+    return {
+      provider: 'github',
+      reviewMode: 'issue_comment',
+      approval: task.result?.approval || 'approved_with_no_changes',
+      response: {
+        id: response.id,
+        state: 'COMMENT_POSTED',
+        submittedAt: response.created_at || response.updated_at || '',
+        commitId: '',
+        htmlUrl: response.html_url || payload.sourceUrl || task.source_url || ''
       }
-
-      const fallbackResponse = await githubClient.createIssueComment({
-        owner: payload.owner,
-        repo: payload.repo,
-        issueNumber: payload.pullNumber,
-        body
-      });
-
-      return {
-        provider: 'github',
-        reviewMode: 'issue_comment_fallback',
-        approval: task.result?.approval || 'approved_with_no_changes',
-        response: {
-          id: fallbackResponse.id,
-          state: 'COMMENTED',
-          submittedAt: fallbackResponse.created_at || fallbackResponse.updated_at || '',
-          commitId: '',
-          htmlUrl: fallbackResponse.html_url || payload.sourceUrl || task.source_url || '',
-          fallbackFrom: 'pull_request_review',
-          fallbackReason: String(error.message || 'Unprocessable Entity')
-        }
-      };
-    }
+    };
   }
 
   async function poll() {

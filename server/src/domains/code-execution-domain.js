@@ -134,6 +134,90 @@ function compactStrings(values) {
   return safeArray(values).map((value) => normalizeWhitespace(value)).filter(Boolean);
 }
 
+function toSimpleSummary(value) {
+  const normalized = normalizeWhitespace(value);
+  const withoutConventionalPrefix = normalized.replace(/^[a-z]+(?:\([^)]+\))?(?:!)?:\s*/i, '');
+  const withoutBracketPrefix = withoutConventionalPrefix.replace(/^(?:\[[^\]]+\]\s*)+/, '');
+  return truncateText(withoutBracketPrefix || withoutConventionalPrefix || normalized || '작업 변경사항 반영', 72);
+}
+
+function isGitHubUnprocessableError(error) {
+  if (Number(error?.status) === 422) {
+    return true;
+  }
+  return /unprocessable entity|validation failed/i.test(String(error?.message || ''));
+}
+
+function extractGitHubValidationDetails(error) {
+  const payload = error?.payload && typeof error.payload === 'object'
+    ? error.payload
+    : {};
+  const detailMessages = safeArray(payload.errors)
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        return normalizeWhitespace(entry);
+      }
+
+      if (!entry || typeof entry !== 'object') {
+        return '';
+      }
+
+      const directMessage = normalizeWhitespace(entry.message);
+      if (directMessage) {
+        return directMessage;
+      }
+
+      const parts = [
+        normalizeWhitespace(entry.resource),
+        normalizeWhitespace(entry.field),
+        normalizeWhitespace(entry.code)
+      ].filter(Boolean);
+      return parts.join('/');
+    })
+    .filter(Boolean);
+
+  if (detailMessages.length === 0) {
+    return '';
+  }
+
+  return truncateText(detailMessages.join(' | '), 700);
+}
+
+function isAlreadyExistsPullRequestError(error) {
+  if (!isGitHubUnprocessableError(error)) {
+    return false;
+  }
+
+  const merged = [
+    normalizeWhitespace(error?.message),
+    extractGitHubValidationDetails(error)
+  ].filter(Boolean).join(' | ').toLowerCase();
+  return merged.includes('pull request') && merged.includes('already exists');
+}
+
+function formatPullRequestCreateError(error) {
+  const base = normalizeWhitespace(error?.message || 'PR 생성에 실패했습니다');
+  const details = extractGitHubValidationDetails(error);
+  if (!details || base.includes(details)) {
+    return base;
+  }
+  return `${base}: ${details}`;
+}
+
+function isNotAllRefsReadableError(error) {
+  const combined = [
+    normalizeWhitespace(error?.message),
+    extractGitHubValidationDetails(error)
+  ].filter(Boolean).join(' | ').toLowerCase();
+  return combined.includes('not all refs are readable');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function normalizeAgentProvider(value, fallback = 'codex') {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'codex' || normalized === 'claude') {
@@ -445,12 +529,155 @@ export function createCodeExecutionDomain({
     }
   }
 
+  async function localBranchExists(workdir, branchName) {
+    const normalized = normalizeWhitespace(branchName);
+    if (!normalized) {
+      return false;
+    }
+
+    try {
+      await runGit(workdir, ['rev-parse', '--verify', `refs/heads/${normalized}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function checkoutTaskBranchFromSourceCommit(task, workspace, branchName) {
+    const normalizedBranch = normalizeWhitespace(branchName);
+    if (!normalizedBranch) {
+      throw new Error('작업 브랜치 정보가 없습니다');
+    }
+
+    const branchExists = await localBranchExists(workspace.git.root, normalizedBranch);
+    if (branchExists) {
+      await runGit(workspace.git.root, ['checkout', normalizedBranch]);
+      return {
+        recreatedFromSourceCommit: false,
+        sourceCommit: ''
+      };
+    }
+
+    const sourceCommit = normalizeWhitespace(task?.result?.sourceCommit);
+    if (!sourceCommit) {
+      throw new Error(`작업 브랜치를 찾을 수 없습니다: ${normalizedBranch}`);
+    }
+
+    await runGit(workspace.git.root, ['checkout', '-B', normalizedBranch, sourceCommit]);
+    if (task?.id) {
+      repo.logExecution(task.id, 'restore_task_branch', 'success', {
+        response: {
+          branchName: normalizedBranch,
+          sourceCommit
+        }
+      });
+    }
+    return {
+      recreatedFromSourceCommit: true,
+      sourceCommit
+    };
+  }
+
+  async function cleanupTaskWorkspaceBranch(taskId, workspace, {
+    workBranch,
+    preferredRestoreBranch,
+    deleteWorkBranch
+  } = {}) {
+    const latestTask = repo.getTask(taskId);
+    const payload = latestTask?.payload && typeof latestTask.payload === 'object'
+      ? latestTask.payload
+      : {};
+    const normalizedWorkBranch = normalizeWhitespace(workBranch || payload.branchName);
+    const restoreCandidates = Array.from(new Set([
+      normalizeWhitespace(preferredRestoreBranch),
+      normalizeWhitespace(payload.restoreBranch),
+      normalizeWhitespace(workspace.git.baseBranch)
+    ].filter(Boolean)));
+
+    let restoredBranch = normalizeWhitespace(await runGit(workspace.git.root, ['branch', '--show-current']));
+    let switched = false;
+    let switchError = '';
+
+    for (const candidate of restoreCandidates) {
+      if (!candidate) {
+        continue;
+      }
+      if (candidate === restoredBranch) {
+        restoredBranch = candidate;
+        break;
+      }
+
+      const exists = await localBranchExists(workspace.git.root, candidate);
+      if (!exists) {
+        continue;
+      }
+
+      try {
+        await runGit(workspace.git.root, ['checkout', candidate]);
+        restoredBranch = candidate;
+        switched = true;
+        switchError = '';
+        break;
+      } catch (error) {
+        switchError = formatExecutionError(error);
+      }
+    }
+
+    let deleted = false;
+    let deleteError = '';
+    if (deleteWorkBranch && normalizedWorkBranch && restoredBranch !== normalizedWorkBranch) {
+      const exists = await localBranchExists(workspace.git.root, normalizedWorkBranch);
+      if (exists) {
+        try {
+          await runGit(workspace.git.root, ['branch', '-D', normalizedWorkBranch]);
+          deleted = true;
+        } catch (error) {
+          deleteError = formatExecutionError(error);
+        }
+      }
+    }
+
+    const mergedError = [switchError, deleteError].filter(Boolean).join(' | ');
+    repo.logExecution(taskId, 'cleanup_task_branch', mergedError ? 'failed' : 'success', {
+      response: {
+        workBranch: normalizedWorkBranch || null,
+        restoreBranch: restoredBranch || null,
+        switched,
+        deleted
+      },
+      error: mergedError || null
+    });
+
+    return {
+      restoreBranch: restoredBranch,
+      switched,
+      deleted,
+      error: mergedError
+    };
+  }
+
   async function ensureBranch(task, workspace) {
     const currentTask = repo.getTask(task.id);
     const existingBranch = normalizeWhitespace(currentTask.payload?.branchName);
+    const restoreBranch = normalizeWhitespace(
+      currentTask.payload?.restoreBranch || workspace.git.currentBranch || workspace.git.baseBranch
+    );
+    const branchManaged = Boolean(currentTask.payload?.branchManaged);
     if (existingBranch) {
-      await runGit(workspace.git.root, ['checkout', existingBranch]);
-      return existingBranch;
+      await checkoutTaskBranchFromSourceCommit(currentTask, workspace, existingBranch);
+      if (!normalizeWhitespace(currentTask.payload?.restoreBranch)) {
+        repo.updateTask(task.id, {
+          payload: {
+            ...currentTask.payload,
+            restoreBranch
+          }
+        });
+      }
+      return {
+        branchName: existingBranch,
+        restoreBranch,
+        branchManaged
+      };
     }
 
     if (workspace.git.isDirty) {
@@ -462,10 +689,16 @@ export function createCodeExecutionDomain({
     repo.updateTask(task.id, {
       payload: {
         ...currentTask.payload,
-        branchName
+        branchName,
+        restoreBranch,
+        branchManaged: true
       }
     });
-    return branchName;
+    return {
+      branchName,
+      restoreBranch,
+      branchManaged: true
+    };
   }
 
   async function listCommitsSince(workdir, baseBranch) {
@@ -534,6 +767,180 @@ export function createCodeExecutionDomain({
     return 1;
   }
 
+  function resolveServicePrefix(task, workspace) {
+    const candidates = [
+      normalizeWhitespace(task?.payload?.repoName),
+      normalizeWhitespace(workspace?.git?.name),
+      normalizeWhitespace(task?.payload?.projectId),
+      normalizeWhitespace(task?.payload?.projectName),
+      normalizeWhitespace(task?.payload?.repoSlug)
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      if (/fromm/i.test(candidate)) {
+        return 'FRM';
+      }
+    }
+
+    for (const candidate of candidates) {
+      const tail = candidate.split('/').filter(Boolean).at(-1) || '';
+      const firstToken = tail.split(/[-_]/).filter(Boolean)[0] || tail;
+      const prefix = firstToken.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (prefix) {
+        return prefix;
+      }
+    }
+
+    return 'SERVICE';
+  }
+
+  async function readPullRequestTemplate(workdir) {
+    const templatePaths = [
+      path.join(workdir, '.github', 'PULL_REQUEST_TEMPLATE.md'),
+      path.join(workdir, '.github', 'pull_request_template.md'),
+      path.join(workdir, '.github', 'PULL_REQUEST_TEMPLATE', 'pull_request_template.md')
+    ];
+
+    for (const templatePath of templatePaths) {
+      if (!fs.existsSync(templatePath)) {
+        continue;
+      }
+      return fs.readFileSync(templatePath, 'utf8');
+    }
+
+    return '';
+  }
+
+  function toBranchTitleToken(branchName) {
+    const normalized = normalizeWhitespace(branchName);
+    if (!normalized) {
+      return 'BRANCH';
+    }
+
+    const tokens = normalized.split('/').map((token) => normalizeWhitespace(token)).filter(Boolean);
+    if (tokens.length === 0) {
+      return normalized;
+    }
+
+    return tokens[tokens.length - 1];
+  }
+
+  function buildPullRequestBodyFromTemplate(templateBody, generatedBody, simpleSummary) {
+    const template = String(templateBody || '').trim();
+    const summaryBody = String(generatedBody || '').trim() || `- ${simpleSummary}`;
+    if (!template) {
+      return summaryBody;
+    }
+
+    const replaced = template
+      .replaceAll('{{PR_SIMPLE_SUMMARY}}', simpleSummary)
+      .replaceAll('{{PR_SUMMARY}}', summaryBody)
+      .replaceAll('{{DOPPELGANGER_PR_SUMMARY}}', summaryBody);
+    if (replaced !== template) {
+      return replaced;
+    }
+
+    return `${template}\n\n---\n\n## 자동 생성 요약\n${summaryBody}`;
+  }
+
+  async function assertBranchNameValid(workdir, branchName) {
+    const normalized = normalizeWhitespace(branchName);
+    if (!normalized) {
+      throw new Error('브랜치명이 필요합니다');
+    }
+    await runGit(workdir, ['check-ref-format', '--branch', normalized]);
+    return normalized;
+  }
+
+  async function findOpenPullRequestByHead({ owner, repoName, headRef, baseRef }) {
+    if (!githubClient?.listOpenPullRequests) {
+      return null;
+    }
+
+    const targetHeadRef = normalizeWhitespace(headRef);
+    const targetBaseRef = normalizeWhitespace(baseRef);
+    const pullRequests = await githubClient.listOpenPullRequests({
+      owner,
+      repo: repoName
+    });
+
+    return safeArray(pullRequests).find((pullRequest) => {
+      const head = normalizeWhitespace(pullRequest?.head?.ref);
+      const base = normalizeWhitespace(pullRequest?.base?.ref);
+      if (!head || head !== targetHeadRef) {
+        return false;
+      }
+      if (!targetBaseRef) {
+        return true;
+      }
+      return base === targetBaseRef;
+    }) || null;
+  }
+
+  async function createPullRequestOnGitHub({
+    owner,
+    repoName,
+    remoteBranch,
+    baseBranch,
+    title,
+    body
+  }) {
+    const candidateHeads = Array.from(new Set([
+      normalizeWhitespace(remoteBranch),
+      normalizeWhitespace(owner) && normalizeWhitespace(remoteBranch)
+        ? `${normalizeWhitespace(owner)}:${normalizeWhitespace(remoteBranch)}`
+        : ''
+    ].filter(Boolean)));
+
+    let lastError = null;
+    let lastHead = candidateHeads[0] || normalizeWhitespace(remoteBranch);
+
+    for (const head of candidateHeads) {
+      lastHead = head;
+      const maxAttempts = head.includes(':') ? 3 : 1;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          const response = await githubClient.createPullRequest({
+            owner,
+            repo: repoName,
+            head,
+            base: baseBranch,
+            title,
+            body
+          });
+          return {
+            response,
+            usedHead: head
+          };
+        } catch (error) {
+          lastError = error;
+          if (isAlreadyExistsPullRequestError(error)) {
+            throw error;
+          }
+
+          if (!isNotAllRefsReadableError(error)) {
+            throw error;
+          }
+
+          if (attempt < maxAttempts) {
+            await sleep(1000 * attempt);
+            continue;
+          }
+        }
+      }
+    }
+
+    const fallbackError = lastError || new Error('PR 생성 요청에 실패했습니다');
+    if (isNotAllRefsReadableError(fallbackError)) {
+      throw new Error([
+        formatPullRequestCreateError(fallbackError),
+        `head 후보: ${candidateHeads.join(', ') || lastHead}`,
+        '브랜치 push 계정과 GitHub 토큰 계정 권한(동일 저장소 read 권한)을 확인해 주세요.'
+      ].join(' | '));
+    }
+    throw fallbackError;
+  }
+
   function storeArtifact(taskId, type, title, data) {
     const sortOrder = repo.listArtifacts(taskId, type).length;
     repo.createArtifact(taskId, type, {
@@ -594,7 +1001,9 @@ export function createCodeExecutionDomain({
         agentProvider: selectedAgent.provider,
         needsPlanning: parseBoolean(input.needsPlanning),
         needsDesign: parseBoolean(input.needsDesign),
-        branchName: ''
+        branchName: '',
+        restoreBranch: workspace.git.currentBranch || workspace.git.baseBranch,
+        branchManaged: false
       },
       result: {
         executionProgress: buildExecutionProgress({
@@ -853,7 +1262,8 @@ export function createCodeExecutionDomain({
       }
 
       const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
-      const branchName = await ensureBranch(task, workspace);
+      const branchState = await ensureBranch(task, workspace);
+      const branchName = branchState.branchName;
 
       let plans = loadStoredPlans(taskId, repo.getTask(taskId));
       if (resumeStartStep <= 2 || !plans.promptPlan) {
@@ -922,14 +1332,26 @@ export function createCodeExecutionDomain({
       repo.logExecution(taskId, 'prepare_pr', 'success', {
         response: pullRequest
       });
+      const sourceCommit = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
+      const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
+        workBranch: branchName,
+        preferredRestoreBranch: branchState.restoreBranch,
+        deleteWorkBranch: branchState.branchManaged
+      });
+      const completionSummary = workspaceCleanup.deleted
+        ? `${branchName} 브랜치에서 구현을 마쳤고 ${workspaceCleanup.restoreBranch || workspace.git.baseBranch} 브랜치로 복귀 후 작업 브랜치를 정리했습니다. PR 생성 준비가 되었습니다.`
+        : `${branchName} 브랜치에서 구현을 마쳤습니다. PR 생성 준비가 되었습니다.`;
 
       repo.updateTask(taskId, {
         status: 'awaiting_approval',
         approvalState: 'pending',
-        summary: `${branchName} 브랜치에서 구현을 마쳤습니다. PR 생성 준비가 되었습니다.`,
+        summary: completionSummary,
         result: {
           branch: branchName,
           baseBranch: workspace.git.baseBranch,
+          sourceCommit,
+          restoreBranch: workspaceCleanup.restoreBranch || branchState.restoreBranch || workspace.git.baseBranch,
+          branchCleanup: workspaceCleanup,
           repoSlug: workspace.git.repoSlug,
           promptPlan: plans.promptPlan,
           codingSummary: codingSummary || '이전 실행의 코딩 결과를 재사용했습니다.',
@@ -982,7 +1404,7 @@ export function createCodeExecutionDomain({
     return { started: true };
   }
 
-  async function createPullRequest(taskId) {
+  async function createPullRequest(taskId, options = {}) {
     if (activeRuns.has(taskId)) {
       throw new Error('작업이 아직 실행 중입니다');
     }
@@ -992,56 +1414,151 @@ export function createCodeExecutionDomain({
       throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
     }
 
-    const branch = normalizeWhitespace(task.result?.branch || task.payload?.branchName);
-    if (!branch) {
+    const sourceBranch = normalizeWhitespace(task.result?.branch || task.payload?.branchName);
+    if (!sourceBranch) {
       throw new Error('이 작업에 기록된 작업 브랜치가 없습니다');
     }
 
     const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
-    await runGit(workspace.git.root, ['checkout', branch]);
-    await assertCleanWorktree(workspace.git.root, 'PR 생성 전에 작업 트리가 깨끗해야 합니다');
-    await runGit(workspace.git.root, ['push', '-u', 'origin', branch]);
-
-    const pullRequestDraft = task.result?.pullRequest || buildPullRequestDraft({
-      task,
-      workspace,
-      reviewRounds: task.result?.reviewRounds || [],
-      commitSummary: safeArray(task.result?.commits).map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`)
-    });
+    const remoteBranch = await assertBranchNameValid(
+      workspace.git.root,
+      normalizeWhitespace(options.branchName) || sourceBranch
+    );
     const owner = task.payload?.repoOwner || workspace.git.owner || config.github.owner;
     const repoName = task.payload?.repoName || workspace.git.name;
-    if (!owner || !repoName) {
-      throw new Error('PR 생성을 위한 GitHub 저장소 정보를 확인할 수 없습니다');
-    }
+    const baseBranch = task.result?.baseBranch || workspace.git.baseBranch;
+    const requestInfo = {
+      sourceBranch,
+      remoteBranch,
+      baseBranch,
+      owner: normalizeWhitespace(owner),
+      repoName: normalizeWhitespace(repoName)
+    };
 
-    const prResponse = await githubClient.createPullRequest({
-      owner,
-      repo: repoName,
-      head: branch,
-      base: task.result?.baseBranch || workspace.git.baseBranch,
-      title: pullRequestDraft.title,
-      body: pullRequestDraft.body
-    });
+    try {
+      const branchRestoreResult = await checkoutTaskBranchFromSourceCommit(task, workspace, sourceBranch);
+      await assertCleanWorktree(workspace.git.root, 'PR 생성 전에 작업 트리가 깨끗해야 합니다');
+      if (sourceBranch === remoteBranch) {
+        await runGit(workspace.git.root, ['push', '-u', 'origin', sourceBranch]);
+      } else {
+        await runGit(workspace.git.root, ['push', '-u', 'origin', `${sourceBranch}:${remoteBranch}`]);
+      }
 
-    repo.updateTask(taskId, {
-      status: 'done',
-      approvalState: 'approved',
-      summary: `PR을 생성했습니다: #${prResponse.number}`,
-      result: {
-        ...(task.result || {}),
-        pullRequest: {
-          ...pullRequestDraft,
-          number: prResponse.number,
-          url: prResponse.html_url
+      const pullRequestDraft = task.result?.pullRequest || buildPullRequestDraft({
+        task,
+        workspace,
+        reviewRounds: task.result?.reviewRounds || [],
+        commitSummary: safeArray(task.result?.commits).map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`)
+      });
+      const servicePrefix = resolveServicePrefix(task, workspace);
+      const branchTitleToken = toBranchTitleToken(remoteBranch);
+      const simpleSummary = toSimpleSummary(pullRequestDraft.title || task.payload?.command || task.title);
+      const title = `[${servicePrefix}/${branchTitleToken}] ${simpleSummary}`;
+      const templateBody = await readPullRequestTemplate(workspace.git.root);
+      const body = buildPullRequestBodyFromTemplate(templateBody, pullRequestDraft.body, simpleSummary);
+      if (!owner || !repoName) {
+        throw new Error('PR 생성을 위한 GitHub 저장소 정보를 확인할 수 없습니다');
+      }
+
+      let prResponse = null;
+      let reusedExistingPullRequest = false;
+      let usedHead = remoteBranch;
+      try {
+        const createResult = await createPullRequestOnGitHub({
+          owner,
+          repoName,
+          remoteBranch,
+          baseBranch,
+          title,
+          body
+        });
+        prResponse = createResult.response;
+        usedHead = createResult.usedHead;
+      } catch (error) {
+        if (!isAlreadyExistsPullRequestError(error)) {
+          throw error;
         }
-      },
-      lastError: null
-    });
-    repo.logExecution(taskId, 'create_pr', 'success', {
-      response: prResponse
-    });
 
-    return repo.getTask(taskId);
+        const existingPullRequest = await findOpenPullRequestByHead({
+          owner,
+          repoName,
+          headRef: remoteBranch,
+          baseRef: baseBranch
+        });
+        if (!existingPullRequest) {
+          throw error;
+        }
+
+        prResponse = {
+          number: existingPullRequest.number,
+          html_url: existingPullRequest.html_url,
+          title: existingPullRequest.title || title
+        };
+        reusedExistingPullRequest = true;
+      }
+
+      if (reusedExistingPullRequest && githubClient?.updatePullRequest) {
+        await githubClient.updatePullRequest({
+          owner,
+          repo: repoName,
+          pullNumber: prResponse.number,
+          title,
+          body,
+          base: baseBranch
+        });
+      }
+      const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
+        workBranch: sourceBranch,
+        preferredRestoreBranch: normalizeWhitespace(task.payload?.restoreBranch),
+        deleteWorkBranch: Boolean(task.payload?.branchManaged)
+      });
+
+      repo.updateTask(taskId, {
+        status: 'done',
+        approvalState: 'approved',
+        summary: `${reusedExistingPullRequest ? '기존 PR을 확인했습니다' : 'PR을 생성했습니다'}: #${prResponse.number}`,
+        result: {
+          ...(task.result || {}),
+          restoreBranch: workspaceCleanup.restoreBranch || normalizeWhitespace(task.payload?.restoreBranch) || workspace.git.baseBranch,
+          branchCleanup: workspaceCleanup,
+          pullRequest: {
+            ...pullRequestDraft,
+            title,
+            body,
+            servicePrefix,
+            head: remoteBranch,
+            sourceBranch,
+            templateUsed: Boolean(templateBody.trim()),
+            number: prResponse.number,
+            url: prResponse.html_url
+          }
+        },
+        lastError: null
+      });
+      repo.logExecution(taskId, 'create_pr', 'success', {
+        request: requestInfo,
+        response: {
+          ...prResponse,
+          reusedExistingPullRequest,
+          usedHead,
+          branchRestoreResult,
+          workspaceCleanup
+        }
+      });
+
+      return repo.getTask(taskId);
+    } catch (error) {
+      const formattedError = formatPullRequestCreateError(error);
+      repo.updateTask(taskId, {
+        summary: 'PR 생성 중 오류가 발생했습니다. 입력값과 저장소 상태를 확인한 뒤 다시 시도해 주세요.',
+        lastError: formattedError
+      });
+      repo.logExecution(taskId, 'create_pr', 'failed', {
+        request: requestInfo,
+        error: formattedError
+      });
+      throw new Error(formattedError);
+    }
   }
 
   return {

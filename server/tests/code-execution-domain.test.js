@@ -6,10 +6,24 @@ import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import { createRepository } from '../src/db.js';
 import { WorkspaceRunner } from '../src/connectors/workspace-runner.js';
+import { GitHubApiError } from '../src/connectors/github-client.js';
 import { createCodeExecutionDomain } from '../src/domains/code-execution-domain.js';
 
 function run(command, args, cwd) {
   execFileSync(command, args, { cwd, stdio: 'pipe' });
+}
+
+function read(command, args, cwd) {
+  return execFileSync(command, args, { cwd, stdio: 'pipe' }).toString('utf8').trim();
+}
+
+function hasLocalBranch(cwd, branchName) {
+  try {
+    read('git', ['rev-parse', '--verify', `refs/heads/${branchName}`], cwd);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function writeFile(filePath, content) {
@@ -38,6 +52,13 @@ function createGitWorkspace() {
       test: 'node --test'
     }
   }, null, 2));
+  writeFile(path.join(repoDir, '.github', 'PULL_REQUEST_TEMPLATE.md'), [
+    '## PR 개요',
+    '- {{PR_SIMPLE_SUMMARY}}',
+    '',
+    '## 작업 내용',
+    '{{PR_SUMMARY}}'
+  ].join('\n'));
   writeFile(path.join(repoDir, 'src', 'index.js'), 'export const value = 1;\n');
 
   run('git', ['add', '.'], repoDir);
@@ -197,20 +218,82 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
     },
     async createPullRequestDraft() {
       return {
-        title: 'Implement requested change',
+        title: 'feat(demo): Implement requested change',
         body: '## Summary\n- Implemented requested change\n'
       };
     }
   };
 
+  let lastPullRequestRequest = null;
+  let lastUpdatePullRequestRequest = null;
+  let updatePullRequestCallCount = 0;
+  let createPullRequestCallCount = 0;
+  let existingPullRequest = null;
   const githubClient = {
-    async createPullRequest({ owner, repo: repoName, head, base, title }) {
+    async createPullRequest({ owner, repo: repoName, head, base, title, body }) {
+      createPullRequestCallCount += 1;
+      lastPullRequestRequest = {
+        owner,
+        repoName,
+        head,
+        base,
+        title,
+        body
+      };
+      if (createPullRequestCallCount >= 2) {
+        throw new GitHubApiError('Validation Failed', {
+          status: 422,
+          payload: {
+            message: 'Validation Failed',
+            errors: [
+              {
+                message: `A pull request already exists for ${owner}:${head}.`
+              }
+            ]
+          },
+          method: 'POST',
+          path: `/repos/${owner}/${repoName}/pulls`
+        });
+      }
+
+      existingPullRequest = {
+        number: 7,
+        html_url: `https://github.com/${owner}/${repoName}/pull/7`,
+        head: {
+          ref: head
+        },
+        base: {
+          ref: base
+        },
+        title
+      };
       return {
         number: 7,
         html_url: `https://github.com/${owner}/${repoName}/pull/7`,
         head,
         base,
         title
+      };
+    },
+    async listOpenPullRequests() {
+      return existingPullRequest ? [existingPullRequest] : [];
+    },
+    async updatePullRequest({ owner, repo: repoName, pullNumber, title, body, base }) {
+      updatePullRequestCallCount += 1;
+      lastUpdatePullRequestRequest = {
+        owner,
+        repoName,
+        pullNumber,
+        title,
+        body,
+        base
+      };
+      return {
+        number: pullNumber,
+        html_url: `https://github.com/${owner}/${repoName}/pull/${pullNumber}`,
+        title,
+        body,
+        base
       };
     }
   };
@@ -274,12 +357,276 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(repo.listArtifacts(task.id, 'design_spec').length, 1);
   assert.equal(repo.listArtifacts(task.id, 'review_round').length, 3);
   assert.equal(repo.listArtifacts(task.id, 'patch_round').length, 3);
+  assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
+  assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
+  assert.equal(typeof finishedTask.result.sourceCommit, 'string');
+  assert.ok(finishedTask.result.sourceCommit.length > 0);
+  assert.equal(finishedTask.result.branchCleanup?.deleted, true);
 
-  await domain.createPullRequest(task.id);
+  const remoteBranch = 'release/demo-pr';
+  await domain.createPullRequest(task.id, {
+    branchName: remoteBranch
+  });
 
   const doneTask = repo.getTask(task.id);
   assert.equal(doneTask.status, 'done');
   assert.equal(doneTask.result.pullRequest.url, 'https://github.com/acme/demo/pull/7');
+  assert.equal(lastPullRequestRequest.owner, 'acme');
+  assert.equal(lastPullRequestRequest.repoName, 'demo');
+  assert.equal(lastPullRequestRequest.head, remoteBranch);
+  assert.equal(lastPullRequestRequest.base, 'main');
+  assert.equal(lastPullRequestRequest.title, '[DEMO/demo-pr] Implement requested change');
+  assert.match(lastPullRequestRequest.body, /## PR 개요/);
+  assert.match(lastPullRequestRequest.body, /Implement requested change/);
+  assert.match(lastPullRequestRequest.body, /## Summary/);
+  assert.equal(doneTask.result.pullRequest.servicePrefix, 'DEMO');
+  assert.equal(doneTask.result.pullRequest.sourceBranch, doneTask.result.branch);
+  assert.equal(doneTask.result.pullRequest.head, remoteBranch);
+  assert.equal(doneTask.result.pullRequest.templateUsed, true);
+  assert.equal(createPullRequestCallCount, 1);
+
+  await domain.createPullRequest(task.id, {
+    branchName: remoteBranch
+  });
+  const doneTaskWithExistingPr = repo.getTask(task.id);
+  assert.equal(doneTaskWithExistingPr.status, 'done');
+  assert.match(doneTaskWithExistingPr.summary, /기존 PR을 확인했습니다/);
+  assert.equal(doneTaskWithExistingPr.result.pullRequest.number, 7);
+  assert.equal(createPullRequestCallCount, 2);
+  assert.equal(updatePullRequestCallCount, 1);
+  assert.equal(lastUpdatePullRequestRequest.owner, 'acme');
+  assert.equal(lastUpdatePullRequestRequest.repoName, 'demo');
+  assert.equal(lastUpdatePullRequestRequest.pullNumber, 7);
+  assert.equal(lastUpdatePullRequestRequest.title, '[DEMO/demo-pr] Implement requested change');
+  assert.match(lastUpdatePullRequestRequest.body, /## PR 개요/);
+});
+
+test('createPullRequest retries with owner-prefixed head when refs are unreadable', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+  const triedHeads = [];
+  const githubClient = {
+    async createPullRequest({ owner, repo: repoName, head, base, title }) {
+      triedHeads.push(head);
+      if (head === 'feature/FROMM-3372') {
+        throw new GitHubApiError('Validation Failed: not all refs are readable', {
+          status: 422,
+          payload: {
+            message: 'Validation Failed',
+            errors: [
+              {
+                message: 'not all refs are readable'
+              }
+            ]
+          },
+          method: 'POST',
+          path: `/repos/${owner}/${repoName}/pulls`
+        });
+      }
+
+      return {
+        number: 11,
+        html_url: `https://github.com/${owner}/${repoName}/pull/11`,
+        head,
+        base,
+        title
+      };
+    },
+    async listOpenPullRequests() {
+      return [];
+    }
+  };
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient,
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('runExec should not be called in this test');
+      }
+    },
+    claudeCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('runExec should not be called in this test');
+      }
+    },
+    codeTaskPlanner: {}
+  });
+
+  const task = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    title: '[코드] PR 생성 head fallback 검증',
+    status: 'awaiting_approval',
+    approvalState: 'pending',
+    payload: {
+      command: 'head fallback',
+      projectId: 'repo',
+      projectName: 'repo',
+      workdir: workspace.repoDir,
+      baseBranch: 'main',
+      repoOwner: 'acme',
+      repoName: 'demo',
+      repoSlug: 'acme/demo',
+      remoteUrl: '',
+      agentProvider: 'codex',
+      needsPlanning: false,
+      needsDesign: false,
+      branchName: 'main'
+    },
+    result: {
+      branch: 'main',
+      baseBranch: 'main',
+      repoSlug: 'acme/demo',
+      commits: [],
+      reviewRounds: [],
+      pullRequest: {
+        title: 'Head fallback validation',
+        body: '## Summary\n- Head fallback test\n'
+      }
+    },
+    sourceUrl: null,
+    summary: 'PR 생성 테스트'
+  });
+
+  await domain.createPullRequest(task.id, {
+    branchName: 'feature/FROMM-3372'
+  });
+
+  const doneTask = repo.getTask(task.id);
+  assert.equal(doneTask.status, 'done');
+  assert.deepEqual(triedHeads, [
+    'feature/FROMM-3372',
+    'acme:feature/FROMM-3372'
+  ]);
+  assert.equal(doneTask.result.pullRequest.url, 'https://github.com/acme/demo/pull/11');
+  assert.equal(doneTask.result.pullRequest.head, 'feature/FROMM-3372');
+});
+
+test('createPullRequest formats title with FRM prefix and branch ticket token', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+  let capturedTitle = '';
+  let capturedBody = '';
+  const githubClient = {
+    async createPullRequest({ owner, repo: repoName, head, base, title, body }) {
+      capturedTitle = title;
+      capturedBody = body;
+      return {
+        number: 19,
+        html_url: `https://github.com/${owner}/${repoName}/pull/19`,
+        head,
+        base,
+        title
+      };
+    },
+    async listOpenPullRequests() {
+      return [];
+    },
+    async updatePullRequest() {
+      throw new Error('updatePullRequest should not be called when PR is newly created');
+    }
+  };
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient,
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('runExec should not be called in this test');
+      }
+    },
+    claudeCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('runExec should not be called in this test');
+      }
+    },
+    codeTaskPlanner: {}
+  });
+
+  const task = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    title: '[코드] 제목 규칙 테스트',
+    status: 'awaiting_approval',
+    approvalState: 'pending',
+    payload: {
+      command: 'title format',
+      projectId: 'fromm-web',
+      projectName: 'fromm-web',
+      workdir: workspace.repoDir,
+      baseBranch: 'main',
+      repoOwner: 'acme',
+      repoName: 'fromm-web',
+      repoSlug: 'acme/fromm-web',
+      remoteUrl: '',
+      agentProvider: 'codex',
+      needsPlanning: false,
+      needsDesign: false,
+      branchName: 'main'
+    },
+    result: {
+      branch: 'main',
+      baseBranch: 'main',
+      repoSlug: 'acme/fromm-web',
+      commits: [],
+      reviewRounds: [],
+      pullRequest: {
+        title: 'feat(fromm): Astro→React 마이그레이션 및 리다이렉트/사이트맵 안정화',
+        body: '## Summary\n- Body\n'
+      }
+    },
+    sourceUrl: null,
+    summary: 'PR 생성 테스트'
+  });
+
+  await domain.createPullRequest(task.id, {
+    branchName: 'feature/FROMM-3372'
+  });
+
+  assert.equal(capturedTitle, '[FRM/FROMM-3372] Astro→React 마이그레이션 및 리다이렉트/사이트맵 안정화');
+  assert.match(capturedBody, /## PR 개요/);
+  assert.match(capturedBody, /## 작업 내용/);
 });
 
 test('createTask falls back to codex when requested claude is unavailable', async () => {

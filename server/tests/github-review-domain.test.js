@@ -396,9 +396,10 @@ test('github review domain restores the latest draft from previous successful ou
   assert.equal(drafts[2].id, successDraft.id);
 });
 
-test('github review domain falls back to issue comment when review submission returns 422', async () => {
+test('github review domain posts issue comment without changing review state', async () => {
   const repo = createRepo();
   const task = createDraftTask(repo, 77);
+  let submitPullRequestReviewCount = 0;
 
   const domain = createGitHubReviewDomain({
     config: {
@@ -410,9 +411,10 @@ test('github review domain falls back to issue comment when review submission re
     repo,
     githubClient: {
       submitPullRequestReview: async () => {
-        const error = new Error('Unprocessable Entity');
-        error.status = 422;
-        throw error;
+        submitPullRequestReviewCount += 1;
+        return {
+          id: 1
+        };
       },
       createIssueComment: async () => ({
         id: 70077,
@@ -428,9 +430,9 @@ test('github review domain falls back to issue comment when review submission re
   });
 
   assert.equal(result.provider, 'github');
-  assert.equal(result.reviewMode, 'issue_comment_fallback');
+  assert.equal(result.reviewMode, 'issue_comment');
   assert.equal(result.response.id, 70077);
-  assert.equal(result.response.fallbackFrom, 'pull_request_review');
-  assert.equal(result.response.fallbackReason, 'Unprocessable Entity');
+  assert.equal(result.response.state, 'COMMENT_POSTED');
   assert.equal(result.response.htmlUrl, 'https://github.com/acme/demo/pull/77#issuecomment-70077');
+  assert.equal(submitPullRequestReviewCount, 0);
 });

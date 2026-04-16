@@ -257,6 +257,27 @@ function toScopeMap(entries) {
   return output;
 }
 
+function resolveWorkspaceAllowlistEntry(entry, { cwd, projectsRoot }) {
+  const raw = String(entry || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  if (raw.startsWith('~/')) {
+    return path.resolve(os.homedir(), raw.slice(2));
+  }
+
+  if (path.isAbsolute(raw)) {
+    return path.resolve(raw);
+  }
+
+  if (raw.startsWith('./') || raw.startsWith('../')) {
+    return path.resolve(cwd, raw);
+  }
+
+  return path.resolve(projectsRoot, raw);
+}
+
 export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   const fileValues = loadEnvFile(cwd);
   const mergedEnv = {
@@ -265,7 +286,11 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   };
   const projectsRoot = path.join(os.homedir(), 'workspace');
   const configuredAllowlist = readList(mergedEnv, 'WORKSPACE_ALLOWLIST')
-    .map((item) => path.resolve(cwd, item));
+    .map((item) => resolveWorkspaceAllowlistEntry(item, {
+      cwd,
+      projectsRoot
+    }))
+    .filter(Boolean);
   const defaultAgentProvider = normalizeAgentProvider(readValue(mergedEnv, 'AGENT_PROVIDER', 'codex'));
   const generationProvider = normalizeGenerationProvider(readValue(mergedEnv, 'GENERATION_PROVIDER', 'cli'));
   const generationDefaultAgentProvider = normalizeAgentProvider(
