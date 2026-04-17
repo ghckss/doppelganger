@@ -275,6 +275,7 @@ export function createHttpServer({ cwd, taskService, llmService }) {
         sendJson(response, 200, {
           ok: true,
           summary: result.summary,
+          polishedTranscript: result.polishedTranscript || '',
           document: result.document,
           provider: result.provider,
           agentProvider: result.agentProvider || ''

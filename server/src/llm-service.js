@@ -629,6 +629,27 @@ function normalizeMeetingActionItems(values, { maxItems = 12 } = {}) {
   }];
 }
 
+function normalizeMeetingTranscriptLines(value, { maxLines = 500, maxLineLength = 220 } = {}) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((line) => normalizeWhitespace(line))
+    .map((line) => line.replace(/^\[\d{1,2}:\d{2}:\d{2}\]\s*/, ''))
+    .map((line) => truncateText(line, maxLineLength))
+    .filter(Boolean)
+    .slice(0, maxLines);
+}
+
+function buildPolishedTranscript(value) {
+  const lines = normalizeMeetingTranscriptLines(value, {
+    maxLines: 600,
+    maxLineLength: 260
+  });
+  if (lines.length === 0) {
+    return '';
+  }
+  return lines.join('\n');
+}
+
 function formatMeetingDocument({
   title,
   summary,
@@ -750,6 +771,7 @@ function buildFallbackMeetingSummary({
   return {
     title,
     summary,
+    polishedTranscript: buildPolishedTranscript(transcript),
     document,
     provider: errorMessage ? `fallback:${errorMessage}` : 'fallback',
     agentProvider: ''
@@ -1815,10 +1837,11 @@ export class LlmService {
       '항상 한국어로 작성한다.',
       '전사 원문에 없는 사실은 추정하지 않는다. 불명확하면 "미확정"으로 둔다.',
       '비개발자도 이해 가능한 쉬운 문장으로 정리한다.',
+      'transcriptPolished에는 전사 내용을 문맥/문법/맞춤법 기준으로 다듬은 본문을 줄바꿈 형태로 제공한다.',
       '출력은 반드시 JSON 객체 하나로만 반환한다.',
       '액션 아이템은 task/owner/due/status 필드를 모두 채운다. 모르면 "미확정".',
       'Use this JSON shape:',
-      '{"title":"string","summary":"string","keyPoints":["string"],"decisions":["string"],"actionItems":[{"task":"string","owner":"string","due":"string","status":"string"}],"openIssues":["string"],"notes":["string"]}',
+      '{"title":"string","summary":"string","transcriptPolished":"string","keyPoints":["string"],"decisions":["string"],"actionItems":[{"task":"string","owner":"string","due":"string","status":"string"}],"openIssues":["string"],"notes":["string"]}',
       'Do not include markdown fences or any extra prose.'
     ].join(' ');
 
@@ -1841,6 +1864,7 @@ export class LlmService {
       const parsed = extractJsonObject(generated.text);
       const title = truncateText(normalizeWhitespace(parsed.title) || fallbackSummary.title, 120);
       const summary = truncateText(normalizeWhitespace(parsed.summary) || fallbackSummary.summary, 260);
+      const polishedTranscript = buildPolishedTranscript(parsed.transcriptPolished || normalizedTranscript);
       const keyPoints = normalizeMeetingList(parsed.keyPoints, {
         fallback: fallbackSummary.document ? [] : ['핵심 논의 정리 필요'],
         maxItems: 10,
@@ -1867,6 +1891,7 @@ export class LlmService {
 
       return {
         summary,
+        polishedTranscript,
         document: formatMeetingDocument({
           title,
           summary,

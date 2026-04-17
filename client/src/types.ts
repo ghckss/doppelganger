@@ -97,6 +97,7 @@ export type MeetingSummaryRequest = {
 export type MeetingSummaryResponse = {
   ok: boolean;
   summary: string;
+  polishedTranscript: string;
   document: string;
   provider?: string;
   agentProvider?: string;

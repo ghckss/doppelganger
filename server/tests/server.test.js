@@ -59,6 +59,7 @@ test('meeting summarize endpoint validates transcript input', async (t) => {
       llmService: {
         generateMeetingSummary: async () => ({
           summary: '',
+          polishedTranscript: '',
           document: ''
         })
       }
@@ -96,6 +97,7 @@ test('meeting summarize endpoint returns generated confluence draft', async (t) 
       llmService: {
         generateMeetingSummary: async ({ transcript }) => ({
           summary: `요약: ${String(transcript).slice(0, 10)}`,
+          polishedTranscript: '회의 원문 테스트를 문맥에 맞게 다듬은 전사문입니다.',
           document: '# 회의 기록\n\n## 회의 개요\n테스트 문서',
           provider: 'cli:codex',
           agentProvider: 'codex'
@@ -119,6 +121,7 @@ test('meeting summarize endpoint returns generated confluence draft', async (t) 
       assert.equal(response.status, 200);
       assert.equal(payload.ok, true);
       assert.match(String(payload.summary || ''), /요약/);
+      assert.match(String(payload.polishedTranscript || ''), /다듬은 전사문/);
       assert.match(String(payload.document || ''), /## 회의 개요/);
       assert.equal(payload.provider, 'cli:codex');
       assert.equal(payload.agentProvider, 'codex');

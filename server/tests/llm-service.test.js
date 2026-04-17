@@ -860,6 +860,7 @@ test('LlmService generates Confluence-ready meeting document from transcript', a
       text: JSON.stringify({
         title: '2026-04-17 주간 운영 회의',
         summary: '신규 결제 화면 일정과 QA 일정 조정이 핵심 안건이었습니다.',
+        transcriptPolished: '결제 화면 일정은 4월 24일까지로 공유했습니다.\nQA 시작일은 4월 26일로 조정했습니다.',
         keyPoints: [
           '결제 화면 개발은 4월 24일까지 완료 목표로 공유됨',
           'QA 시작일은 4월 26일로 조정하기로 논의됨'
@@ -897,6 +898,7 @@ test('LlmService generates Confluence-ready meeting document from transcript', a
   assert.equal(result.provider, 'cli:codex');
   assert.equal(result.agentProvider, 'codex');
   assert.match(result.summary, /핵심 안건/);
+  assert.match(result.polishedTranscript, /결제 화면 일정은 4월 24일까지로 공유했습니다/);
   assert.match(result.document, /^# 2026-04-17 주간 운영 회의/m);
   assert.match(result.document, /## 액션 아이템/);
   assert.match(result.document, /\| 액션 \| 담당자 \| 기한 \| 상태 \|/);
@@ -920,6 +922,7 @@ test('LlmService falls back to deterministic meeting document on generation erro
   });
 
   assert.match(result.provider, /^fallback:/);
+  assert.match(result.polishedTranscript, /결제 일정은 다음 주로 조정합니다/);
   assert.match(result.document, /## 회의 개요/);
   assert.match(result.document, /## 핵심 논의/);
   assert.match(result.document, /## 결정 사항/);

@@ -76,7 +76,7 @@ A practical setup is often:
 1. Open the `회의 기록` panel in `/app`.
 2. Click `시작` to begin browser speech recognition (`ko-KR`).
 3. During recording, transcript updates every second in `실시간 전사`.
-4. Click `중지` to stop recording and generate the Confluence draft automatically.
+4. Click `중지` to stop recording. The transcript panel is refined once for context/grammar/spelling, then the Confluence draft is generated automatically.
 5. Review `Confluence 문서 초안` and click `문서 복사` to paste into Confluence.
 
 Notes:

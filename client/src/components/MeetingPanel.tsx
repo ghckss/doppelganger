@@ -33,6 +33,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   });
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
   const [summary, setSummary] = useState('');
+  const [polishedTranscript, setPolishedTranscript] = useState('');
   const [documentText, setDocumentText] = useState('');
   const [summaryError, setSummaryError] = useState('');
   const [copyNotice, setCopyNotice] = useState('');
@@ -65,6 +66,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
         endedAt: endedAt || recorder.endedAt || '',
         language: 'ko-KR'
       });
+      setPolishedTranscript(String(response.polishedTranscript || '').trim());
       setSummary(response.summary || '');
       setDocumentText(response.document || '');
       setSummaryStatus('done');
@@ -80,6 +82,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   async function handleStart() {
     setSummaryStatus('idle');
     setSummary('');
+    setPolishedTranscript('');
     setDocumentText('');
     setSummaryError('');
     setCopyNotice('');
@@ -135,6 +138,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   ]);
 
   const transcriptText = recorder.transcript || '';
+  const transcriptDisplayText = polishedTranscript || transcriptText;
   const isRecording = recorder.status === 'recording';
   const canStart = recorder.isSupported && recorder.status !== 'recording' && recorder.status !== 'stopping';
   const canStop = recorder.status === 'recording';
@@ -192,8 +196,8 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
               </button>
             </div>
             {!collapsedSections.meeting_transcript && (
-              transcriptText
-                ? <pre className="m-0 min-h-40 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptText}</pre>
+              transcriptDisplayText
+                ? <pre className="m-0 min-h-40 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptDisplayText}</pre>
                 : <p className={EMPTY_CLASS}>`시작`을 누르면 1초 단위로 전사 내용이 표시됩니다.</p>
             )}
           </section>
