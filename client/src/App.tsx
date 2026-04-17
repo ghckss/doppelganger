@@ -53,9 +53,12 @@ export default function App() {
     slack_analysis: false,
     slack_draft: false,
     slack_artifacts: true,
+    slack_timeline: true,
     github_draft: false,
+    github_timeline: true,
     code_create: false,
-    code_tasks: true
+    code_tasks: true,
+    code_timeline: true
   });
 
   const metaQuery = useQuery({

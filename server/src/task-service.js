@@ -1,4 +1,9 @@
 import { getConnectorReadiness } from './config.js';
+import {
+  appendSlackStyleMemory,
+  SLACK_STYLE_MEMORY_STATE_KEY,
+  stringifySlackStyleMemory
+} from './slack-style-memory.js';
 
 const CODE_EXECUTION_RECOVERY_ERROR = '앱이 재시작되어 코드 작업 실행이 중단되었습니다. 작업을 다시 실행해 주세요.';
 const CODE_REVIEW_RECOVERY_ERROR = '앱이 재시작되어 코드 검토 실행이 중단되었습니다. 코드 검토를 다시 실행해 주세요.';
@@ -430,6 +435,7 @@ export class TaskService {
         reactionName,
         addReaction
       });
+      this.captureSlackStyleFeedback(task, { message });
       this.repo.updateTask(taskId, {
         status: 'done',
         approvalState: 'approved',
@@ -461,5 +467,30 @@ export class TaskService {
     }
 
     return this.getTaskDetail(taskId);
+  }
+
+  captureSlackStyleFeedback(task, { message }) {
+    if (!task || task.domain !== 'slack_mention') {
+      return;
+    }
+
+    const finalReply = String(message || '').trim();
+    if (!finalReply) {
+      return;
+    }
+
+    const drafts = this.repo.listDrafts(task.id);
+    const generatedDraft = drafts.find((draft) => {
+      const provider = String(draft?.metadata?.provider || '').trim().toLowerCase();
+      return provider && provider !== 'manual' && String(draft?.content || '').trim();
+    });
+    const previousMemoryRaw = this.repo.getState(SLACK_STYLE_MEMORY_STATE_KEY, '');
+    const nextMemory = appendSlackStyleMemory(previousMemoryRaw, {
+      taskId: task.id,
+      prompt: task.payload?.text || task.title || '',
+      generatedReply: generatedDraft?.content || '',
+      finalReply
+    });
+    this.repo.setState(SLACK_STYLE_MEMORY_STATE_KEY, stringifySlackStyleMemory(nextMemory));
   }
 }

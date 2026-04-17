@@ -25,6 +25,7 @@ import {
   StatusBadge,
   SUB_BUTTON_CLASS
 } from './common';
+import { TaskTimeline } from './TaskTimeline';
 
 type ReviewFindingView = {
   id: string;
@@ -596,6 +597,12 @@ export function CodeExecutionPanel({
                         })}
                       </div>
                     </section>
+
+                    <TaskTimeline
+                      executions={detail.executions}
+                      collapsed={collapsedSections.code_timeline}
+                      onToggle={() => onToggleSection('code_timeline')}
+                    />
 
                     <section className="flex flex-wrap gap-2 justify-end">
                       <button

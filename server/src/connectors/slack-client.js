@@ -1,4 +1,4 @@
-import { formatSlackTimestamp, normalizeWhitespace, safeArray, truncateText } from '../utils.js';
+import { formatSlackTimestamp, safeArray, toSlackText, truncateText } from '../utils.js';
 
 function extractThreadTs(match) {
   if (match.thread_ts) {
@@ -282,7 +282,7 @@ export class SlackClient {
       params: {
         channel: channelId,
         thread_ts: threadTs,
-        text: normalizeWhitespace(text)
+        text: toSlackText(text)
       }
     });
   }

@@ -46,7 +46,7 @@ const REQUESTED_ELEMENT_DEFINITION_RULES = [
   {
     key: '범위',
     patterns: [/범위/, /\bscope\b/i],
-    definition: '이번 요청에서 다룰 내용과 제외할 내용을 나눈 기준'
+    definition: '이번 요청에서 다룰 내용과 제외할 내용을 나눈 범위'
   },
   {
     key: '우선순위',
@@ -66,12 +66,12 @@ const REQUESTED_ELEMENT_DEFINITION_RULES = [
   {
     key: '지표',
     patterns: [/지표|성과|KPI/i, /\bmetric/i],
-    definition: '결과를 판단하는 수치 기준'
+    definition: '결과를 판단하는 수치'
   },
   {
     key: '정책',
     patterns: [/정책|룰|규칙/i, /\bpolicy/i],
-    definition: '운영 판단과 예외 처리 기준'
+    definition: '운영 판단과 예외 처리 규칙'
   },
   {
     key: '플로우',
@@ -97,6 +97,15 @@ const REQUESTED_ELEMENT_DEFINITION_RULES = [
     key: '번들',
     patterns: [/번들|bundle/i],
     definition: '여러 상품을 묶어 하나처럼 제공하는 구성'
+  }
+];
+const REQUEST_DRIFT_RULES = [
+  {
+    id: 'product_info',
+    requestPatterns: [/상품|스토어\s*상품|가격|번들|bundle|catalog|카탈로그|구성|정책|price|pricing/i],
+    responseMustInclude: [/상품|가격|번들|bundle|catalog|카탈로그|구성|정책|price|pricing/i],
+    responseDriftPatterns: [/\bapi\b|endpoint|엔드포인트|graphql|rest|axios|fetch|controller|service/i],
+    reason: '상품/정책 정보 확인 요청인데 API 사용 방식 설명으로 이탈했습니다.'
   }
 ];
 
@@ -133,6 +142,158 @@ function normalizeMultilineText(value) {
     .trim();
 }
 
+function normalizeSlackStyleGuide(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const directives = safeArray(value.directives)
+    .map((item) => normalizeWhitespace(item))
+    .filter(Boolean)
+    .slice(0, 8);
+  const keywords = safeArray(value.commonKeywordHints)
+    .map((item) => normalizeWhitespace(item))
+    .filter(Boolean)
+    .slice(0, 5);
+  const examples = safeArray(value.examples)
+    .map((item) => {
+      const prompt = normalizeWhitespace(item?.prompt);
+      const generatedReply = normalizeMultilineText(item?.generatedReply);
+      const finalReply = normalizeMultilineText(item?.finalReply);
+      if (!finalReply) {
+        return null;
+      }
+      return {
+        prompt: truncateText(prompt, 140),
+        generatedReply: truncateText(generatedReply, 220),
+        finalReply: truncateText(finalReply, 220),
+        changed: Boolean(item?.changed)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+
+  if (directives.length === 0 && keywords.length === 0 && examples.length === 0) {
+    return null;
+  }
+
+  return {
+    sampleCount: Number.isFinite(Number(value.sampleCount))
+      ? Math.max(0, Math.min(500, Math.trunc(Number(value.sampleCount))))
+      : 0,
+    editedSampleCount: Number.isFinite(Number(value.editedSampleCount))
+      ? Math.max(0, Math.min(500, Math.trunc(Number(value.editedSampleCount))))
+      : 0,
+    recentAverageLength: Number.isFinite(Number(value.recentAverageLength))
+      ? Math.max(0, Math.min(1000, Math.trunc(Number(value.recentAverageLength))))
+      : 0,
+    multilineRate: Number.isFinite(Number(value.multilineRate))
+      ? Math.max(0, Math.min(100, Math.trunc(Number(value.multilineRate))))
+      : 0,
+    directives,
+    keywords,
+    examples
+  };
+}
+
+function buildSlackStyleGuideTranscript(styleGuide) {
+  if (!styleGuide) {
+    return '';
+  }
+
+  const lines = [
+    'User reply style profile:'
+  ];
+  if (styleGuide.sampleCount > 0) {
+    lines.push(`Samples: ${styleGuide.sampleCount}`);
+  }
+  if (styleGuide.editedSampleCount > 0) {
+    lines.push(`Edited samples: ${styleGuide.editedSampleCount}`);
+  }
+  if (styleGuide.recentAverageLength > 0) {
+    lines.push(`Average reply length: ${styleGuide.recentAverageLength} chars`);
+  }
+  if (styleGuide.multilineRate > 0) {
+    lines.push(`Multiline usage rate: ${styleGuide.multilineRate}%`);
+  }
+  if (styleGuide.directives.length > 0) {
+    lines.push('Style directives:');
+    styleGuide.directives.forEach((directive, index) => {
+      lines.push(`${index + 1}. ${directive}`);
+    });
+  }
+  if (styleGuide.keywords.length > 0) {
+    lines.push(`Common wording hints: ${styleGuide.keywords.join(', ')}`);
+  }
+  if (styleGuide.examples.length > 0) {
+    lines.push('User-approved reply examples:');
+    styleGuide.examples.forEach((example, index) => {
+      lines.push(`${index + 1}. prompt: ${example.prompt || '(prompt unavailable)'}`);
+      if (example.changed && example.generatedReply) {
+        lines.push(`   generated: ${example.generatedReply}`);
+      }
+      lines.push(`   final: ${example.finalReply}`);
+    });
+  }
+  return lines.join('\n');
+}
+
+function sanitizeSlackTonePhrases(value) {
+  const stripped = String(value || '')
+    .replace(/이\s*기준으로\s*공유(?:하|드)면\s*됩니다\.?/gi, '')
+    .replace(/이\s*기준으로\s*진행(?:하|해)면\s*됩니다\.?/gi, '')
+    .replace(/요청\s*기준에서\s*/gi, '')
+    .replace(/코드\s*검토\s*기준으로(?:는)?\s*/gi, '')
+    .replace(/코드\s*기준으로(?:는)?\s*/gi, '')
+    .replace(/기준으로(?:는)?\s*/gi, '')
+    .replace(/바탕으로\s*/gi, '')
+    .replace(/기반으로\s*/gi, '')
+    .replace(/우선\s*확인\s*중(?:이며)?[,，]?\s*/gi, '')
+    .replace(/먼저\s*확인(?:하고)?[,，]?\s*/gi, '')
+    .replace(/관련\s*코드\s*[:：]?\s*[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:\d+/gi, '')
+    .replace(/\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:\d+\b/g, '')
+    .replace(/\s{2,}/g, ' ');
+
+  return normalizeMultilineText(stripped);
+}
+
+function stripSlackEvidenceText(value) {
+  const lines = String(value || '')
+    .split(/\r?\n/)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean)
+    .filter((line) => !/^근거\s*링크\s*[:：]/i.test(line))
+    .filter((line) => !/https?:\/\//i.test(line));
+  return lines.join('\n').trim();
+}
+
+function stripGitHubEvidenceSection(value) {
+  const rawLines = String(value || '').split(/\r?\n/);
+  const output = [];
+  let droppingEvidenceSection = false;
+
+  for (const rawLine of rawLines) {
+    const line = String(rawLine || '');
+    const normalized = normalizeWhitespace(line);
+    if (/^##\s*근거\s*링크/i.test(normalized)) {
+      droppingEvidenceSection = true;
+      continue;
+    }
+    if (droppingEvidenceSection && /^##\s+/.test(normalized)) {
+      droppingEvidenceSection = false;
+    }
+    if (droppingEvidenceSection) {
+      continue;
+    }
+    if (/^근거\s*링크\s*[:：]/i.test(normalized)) {
+      continue;
+    }
+    output.push(line);
+  }
+
+  return normalizeMultilineText(output.join('\n'));
+}
+
 function toNonDeveloperWording(value) {
   let text = String(value || '');
   for (const rule of NON_DEVELOPER_TERM_RULES) {
@@ -165,6 +326,113 @@ function buildPullRequestTranscript(files, { maxFiles = 20, patchMaxLength = 140
       truncatePatch(file.patch, patchMaxLength)
     ].join('\n'))
     .join('\n\n');
+}
+
+function escapePathSegment(value) {
+  return encodeURIComponent(String(value || '')).replace(/%2F/g, '/');
+}
+
+function normalizeGitRef(value) {
+  return normalizeWhitespace(value).replace(/[^A-Za-z0-9._/-]/g, '');
+}
+
+function parseFileRef(value) {
+  const raw = normalizeWhitespace(value);
+  if (!raw) {
+    return null;
+  }
+
+  const hashLine = raw.match(/^(.+?)#L(\d+)$/i);
+  if (hashLine) {
+    return {
+      path: normalizeWhitespace(hashLine[1]),
+      line: Number(hashLine[2]) || 0
+    };
+  }
+
+  const colonLine = raw.match(/^(.+?):(\d+)$/);
+  if (colonLine) {
+    return {
+      path: normalizeWhitespace(colonLine[1]),
+      line: Number(colonLine[2]) || 0
+    };
+  }
+
+  return {
+    path: raw,
+    line: 0
+  };
+}
+
+function buildGitHubBlobLink({ repoSlug, ref, path, line = 0 }) {
+  const normalizedRepoSlug = normalizeWhitespace(repoSlug);
+  const normalizedRef = normalizeGitRef(ref);
+  const normalizedPath = normalizeWhitespace(path).replace(/^\/+/, '');
+  if (!normalizedRepoSlug || !normalizedRef || !normalizedPath) {
+    return '';
+  }
+
+  const base = `https://github.com/${normalizedRepoSlug}/blob/${escapePathSegment(normalizedRef)}/${escapePathSegment(normalizedPath)}`;
+  if (Number.isFinite(line) && Number(line) > 0) {
+    return `${base}#L${Math.trunc(Number(line))}`;
+  }
+  return base;
+}
+
+function collectGitHubEvidenceLinksFromFindings(findings, { repoSlug, ref }) {
+  const links = [];
+  for (const finding of safeArray(findings)) {
+    for (const fileRef of safeArray(finding.fileRefs)) {
+      const parsed = parseFileRef(fileRef);
+      if (!parsed?.path) {
+        continue;
+      }
+      const link = buildGitHubBlobLink({
+        repoSlug,
+        ref,
+        path: parsed.path,
+        line: parsed.line
+      });
+      if (link) {
+        links.push(link);
+      }
+    }
+  }
+  return [...new Set(links)];
+}
+
+function collectGitHubEvidenceLinksFromFiles(files, { repoSlug, ref, max = 5 } = {}) {
+  const links = [];
+  for (const file of safeArray(files)) {
+    const normalizedPath = normalizeWhitespace(file.path || file.filename || '');
+    if (!normalizedPath) {
+      continue;
+    }
+
+    const link = buildGitHubBlobLink({
+      repoSlug,
+      ref,
+      path: normalizedPath
+    });
+    if (link) {
+      links.push(link);
+    }
+    if (links.length >= max) {
+      break;
+    }
+  }
+
+  return [...new Set(links)];
+}
+
+function resolveGitHubEvidenceLinks({ pullRequest, files, findings, max = 5 } = {}) {
+  const repoSlug = pullRequest?.repoSlug || '';
+  const ref = pullRequest?.headSha || pullRequest?.headRef || 'main';
+  const findingLinks = collectGitHubEvidenceLinksFromFindings(findings, { repoSlug, ref });
+  const fallbackLinks = findingLinks.length === 0
+    ? collectGitHubEvidenceLinksFromFiles(files, { repoSlug, ref, max })
+    : [];
+  return (findingLinks.length > 0 ? findingLinks : fallbackLinks).slice(0, max);
 }
 
 function normalizeFinding(finding, index) {
@@ -310,6 +578,7 @@ function buildFallbackGitHubReview({ task, pullRequest, files, errorMessage = ''
       summary,
       findings
     }),
+    evidenceLinks: resolveGitHubEvidenceLinks({ pullRequest, files, findings }),
     provider: errorMessage ? `fallback:${errorMessage}` : 'fallback',
     agentProvider: ''
   };
@@ -440,6 +709,8 @@ function normalizeCodeReviewContext(context) {
     enabled: true,
     analysisStatus: 'completed',
     repository: normalizeWhitespace(context.selectedRepo || context.repository),
+    repoSlug: normalizeWhitespace(context.selectedRepoSlug || context.repoSlug),
+    analysisBaseBranch: normalizeWhitespace(context.analysisBaseBranch || context.baseBranch || 'master'),
     summary: normalizeWhitespace(context.summary),
     selectionReason: normalizeWhitespace(context.selectionReason),
     replyHints: safeArray(context.replyHints).map((item) => normalizeWhitespace(item)).filter(Boolean).slice(0, 5),
@@ -483,25 +754,91 @@ function buildCodeReviewTranscript(context) {
   return lines.join('\n');
 }
 
-function appendCodeReviewHint(reply, codeReviewContext) {
+function resolveSlackEvidenceLinks({ task, codeReviewContext }) {
+  const links = [];
   const normalizedContext = normalizeCodeReviewContext(codeReviewContext);
-  if (!normalizedContext) {
-    return trimSlackReplyLines(reply);
+  if (normalizedContext?.findings?.length) {
+    const repoSlug = normalizedContext.repoSlug;
+    const ref = normalizedContext.analysisBaseBranch || 'master';
+    for (const finding of normalizedContext.findings) {
+      const link = buildGitHubBlobLink({
+        repoSlug,
+        ref,
+        path: finding.path,
+        line: finding.line
+      });
+      if (link) {
+        links.push(link);
+      }
+    }
   }
 
-  const topFinding = normalizedContext.findings[0];
-  const hint = normalizedContext.replyHints[0]
-    || (topFinding ? `관련 코드 ${topFinding.path}:${topFinding.line} 기준으로 우선 확인하고 있습니다.` : '');
-  if (!hint) {
-    return trimSlackReplyLines(reply);
+  const sourceUrl = normalizeWhitespace(task?.source_url || task?.sourceUrl || task?.payload?.permalink || '');
+  if (links.length === 0 && sourceUrl) {
+    links.push(sourceUrl);
   }
 
-  const normalizedReply = normalizeMultilineText(reply);
-  if (normalizedReply.includes(hint)) {
-    return trimSlackReplyLines(normalizedReply);
+  return [...new Set(links)].slice(0, 2);
+}
+
+function detectSlackRequestDrift({ targetText, latestText, candidateReply, fallbackReply }) {
+  const requestCorpus = normalizeWhitespace(`${targetText || ''} ${latestText || ''}`);
+  const responseCorpus = normalizeWhitespace(`${candidateReply || ''}`);
+  if (!requestCorpus || !responseCorpus) {
+    return {
+      detected: false,
+      reason: '',
+      correctedReply: trimSlackReplyLines(candidateReply || fallbackReply, 4)
+    };
   }
 
-  return trimSlackReplyLines(`${normalizedReply}\n${hint}`);
+  for (const rule of REQUEST_DRIFT_RULES) {
+    if (!rule.requestPatterns.some((pattern) => pattern.test(requestCorpus))) {
+      continue;
+    }
+    const hasExpected = rule.responseMustInclude.some((pattern) => pattern.test(responseCorpus));
+    const hasDriftSignal = rule.responseDriftPatterns.some((pattern) => pattern.test(responseCorpus));
+    if (!hasExpected && hasDriftSignal) {
+      return {
+        detected: true,
+        reason: rule.reason,
+        correctedReply: trimSlackReplyLines(fallbackReply, 4)
+      };
+    }
+  }
+
+  return {
+    detected: false,
+    reason: '',
+    correctedReply: trimSlackReplyLines(candidateReply, 4)
+  };
+}
+
+function buildSlackDraftQuality({ summary, suggestedReply, evidenceLinks, driftGuard }) {
+  let score = 100;
+  const warnings = [];
+
+  if (!normalizeWhitespace(summary)) {
+    score -= 10;
+    warnings.push('요약이 비어 있습니다.');
+  }
+  if (looksLikeMetaOnlyReply(suggestedReply)) {
+    score -= 25;
+    warnings.push('답변이 메타 표현 위주로 보입니다.');
+  }
+  if (safeArray(evidenceLinks).length === 0) {
+    score -= 20;
+    warnings.push('근거 링크를 생성하지 못했습니다.');
+  }
+  if (driftGuard?.detected) {
+    score -= 30;
+    warnings.push('요청 이탈을 감지해 답변을 보정했습니다.');
+  }
+
+  return {
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    warnings
+  };
 }
 
 function classifySlackReplyFlow({ targetText, latestText, threadMessages }) {
@@ -642,7 +979,7 @@ function buildRequestedElementDefinitionSentence({ category, targetText, latestT
   if (definitions.length === 0) {
     const combined = normalizeWhitespace(`${targetText || ''} ${latestText || ''}`);
     if (/(요소|항목|정의|포인트)/i.test(combined)) {
-      return '요청하신 요소는 범위(무엇을 다루는지), 우선순위(무엇을 먼저 하는지), 일정(언제 공유하는지) 기준으로 정의해 정리하겠습니다.';
+      return '요청하신 요소는 범위(무엇을 다루는지), 우선순위(무엇을 먼저 하는지), 일정(언제 공유하는지) 순서로 정리하겠습니다.';
     }
     return '';
   }
@@ -660,12 +997,12 @@ function buildRequestedElementDefinitionSentence({ category, targetText, latestT
 
   if (definitions.length === 1) {
     const item = definitions[0];
-    return `요청 기준에서 ${item.key}${topicParticle(item.key)} ${item.definition}입니다.`;
+    return `${item.key}${topicParticle(item.key)} ${item.definition}입니다.`;
   }
 
   const first = definitions[0];
   const second = definitions[1];
-  return `요청 기준에서 ${first.key}${topicParticle(first.key)} ${first.definition}이고, ${second.key}${topicParticle(second.key)} ${second.definition}입니다.`;
+  return `${first.key}${topicParticle(first.key)} ${first.definition}이고, ${second.key}${topicParticle(second.key)} ${second.definition}입니다.`;
 }
 
 function buildAudienceFriendlySlackReply({
@@ -676,17 +1013,17 @@ function buildAudienceFriendlySlackReply({
   candidateReply,
   fallbackReply
 }) {
-  const baseReply = finalizeSlackReply(candidateReply, fallbackReply);
+  const baseReply = sanitizeSlackTonePhrases(finalizeSlackReply(candidateReply, fallbackReply));
   const plainReply = toNonDeveloperWording(baseReply);
-  const definitionSentence = buildRequestedElementDefinitionSentence({
+  const definitionSentence = sanitizeSlackTonePhrases(buildRequestedElementDefinitionSentence({
     category,
     targetText,
     latestText,
     threadMessages
-  });
+  }));
 
   if (!definitionSentence || plainReply.includes(definitionSentence)) {
-    return trimSlackReplyLines(plainReply);
+    return trimSlackReplyLines(sanitizeSlackTonePhrases(plainReply));
   }
 
   const lines = plainReply
@@ -694,22 +1031,22 @@ function buildAudienceFriendlySlackReply({
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean);
   if (lines.length === 0) {
-    return trimSlackReplyLines(definitionSentence);
+    return trimSlackReplyLines(sanitizeSlackTonePhrases(definitionSentence));
   }
 
   const enhancedLines = lines.length >= 2
     ? [lines[0], definitionSentence, ...lines.slice(1)]
     : [lines[0], definitionSentence];
-  return trimSlackReplyLines(enhancedLines.join('\n'));
+  return trimSlackReplyLines(sanitizeSlackTonePhrases(enhancedLines.join('\n')));
 }
 
 function buildReplyIntent({ category, topic, openPoint, deadlineHint }) {
   const base = `${topic} 건에서 ${openPoint}를 분명하게 전달`;
   if (deadlineHint) {
-    return `${base}하고 ${deadlineHint} 기준으로 업데이트 시점을 함께 안내`;
+    return `${base}하고 ${deadlineHint} 업데이트 시점을 함께 안내`;
   }
   if (category === 'decision_request') {
-    return `${base}하며 판단 기준을 짧게 명시`;
+    return `${base}하며 판단 내용을 짧게 명시`;
   }
   return base;
 }
@@ -748,11 +1085,11 @@ function buildSlackSummary({ category, understanding, codeReviewContext }) {
     : `현재는 ${understanding.openPoint}를 명확히 답하는 것이 필요한 상황입니다.`;
   const codeReview = normalizeCodeReviewContext(codeReviewContext);
   const thirdSentence = codeReview?.summary
-    ? `코드 검토 기준으로는 ${codeReview.summary}`
+    ? `코드 관련 사실: ${sanitizeSlackTonePhrases(codeReview.summary)}`
     : '';
 
   if (category === 'owner_incident') {
-    const incidentSummary = `${understanding.topic} 이슈가 보고됐고 담당 대응 요청이 들어온 상태입니다. 현재 공유된 맥락을 기준으로 원인과 영향 범위를 빠르게 확인해야 합니다.`;
+    const incidentSummary = `${understanding.topic} 이슈가 보고됐고 담당 대응 요청이 들어온 상태입니다. 현재 공유된 맥락에서 원인과 영향 범위를 빠르게 정리해야 합니다.`;
     return [incidentSummary, thirdSentence].filter(Boolean).join(' ');
   }
 
@@ -818,7 +1155,7 @@ function buildDirectReply({ category, targetText, latestContext, understanding }
     case 'decision_request':
       if (/(진행해도|가도\s*될|이대로|해도\s*될까요|문제없을지)/i.test(combined)) {
         return joinReplyLines([
-          '현재 공유된 내용 기준으로는 제안하신 방향으로 진행해도 괜찮아 보입니다.',
+          '현재 공유된 내용만 보면 제안하신 방향으로 진행해도 괜찮아 보입니다.',
           `진행 전 ${understanding.openPoint}만 한 번 더 확인하겠습니다.`
         ]);
       }
@@ -915,19 +1252,41 @@ export function buildFallbackSlackDraft({ task, threadMessages, codeReviewContex
     candidateReply: directReply,
     fallbackReply: '확인 중인 내용 정리해서 공유드리겠습니다.'
   });
+  const driftGuard = detectSlackRequestDrift({
+    targetText: targetText || first,
+    latestText: latest,
+    candidateReply: audienceReply,
+    fallbackReply: directReply
+  });
+  const evidenceLinks = resolveSlackEvidenceLinks({
+    task,
+    codeReviewContext
+  });
+  const suggestedReply = trimSlackReplyLines(
+    sanitizeSlackTonePhrases(stripSlackEvidenceText(driftGuard.correctedReply)),
+    4
+  );
+  const normalizedSuggestedReply = sanitizeSlackTonePhrases(suggestedReply);
+  const quality = buildSlackDraftQuality({
+    summary,
+    suggestedReply: normalizedSuggestedReply,
+    evidenceLinks,
+    driftGuard
+  });
 
   return {
-    summary: toNonDeveloperWording(summary),
+    summary: sanitizeSlackTonePhrases(toNonDeveloperWording(summary)),
     requestedAction,
     replyIntent: understanding.replyIntent,
-    suggestedReply: appendCodeReviewHint(
-      audienceReply,
-      codeReviewContext
-    ),
+    suggestedReply: normalizedSuggestedReply,
     replyCategory,
     replyCategoryLabel,
     reactionName,
-    provider: 'fallback'
+    provider: 'fallback',
+    qualityScore: quality.score,
+    qualityWarnings: quality.warnings,
+    evidenceLinks,
+    driftGuard
   };
 }
 
@@ -936,8 +1295,9 @@ export class LlmService {
     this.generationClient = generationClient;
   }
 
-  async generateSlackDraft({ task, threadMessages, agentProvider, codeReviewContext, model }) {
+  async generateSlackDraft({ task, threadMessages, agentProvider, codeReviewContext, styleGuide, model }) {
     const normalizedCodeReviewContext = normalizeCodeReviewContext(codeReviewContext);
+    const normalizedStyleGuide = normalizeSlackStyleGuide(styleGuide);
     const fallbackDraft = buildFallbackSlackDraft({
       task,
       threadMessages,
@@ -959,9 +1319,16 @@ export class LlmService {
       'replyIntent에는 "왜 이 답변이 적절한지"를 한 문장으로 적는다.',
       'suggestedReply는 Slack에 바로 전송 가능한 답변 본문이며 1~3문장으로 작성한다.',
       'suggestedReply는 마지막 멘션 질문이나 요청에 직접 답해야 하며, 메타 표현만 반복하면 안 된다.',
+      'suggestedReply 본문에는 URL/근거 링크 문구를 넣지 않는다. 근거 링크는 별도 필드로 분리된다.',
+      'suggestedReply에는 사실 자체만 간단히 적고, 사실을 어떻게 파악했는지(기준으로/바탕으로/기반으로/우선 확인)는 쓰지 않는다.',
+      'suggestedReply 본문에는 파일 경로나 라인 번호(예: src/x.ts:12)를 쓰지 않는다.',
       '공유/확인 요청에 특정 요소(예: 범위, 우선순위, 일정, 정책, 지표 등)가 언급되면, suggestedReply에 각 요소 의미를 짧게 정의해 포함한다.',
       '코드 검토 결과가 함께 주어지면, 해당 근거를 반영해 답변하되 확인되지 않은 내용은 단정하지 않는다.',
+      '요청이 상품/정책 정보 파악이면 API 사용 방식 설명으로 답변을 대체하지 않는다.',
       '메타 설명이나 추상적인 태도 설명으로 채우지 않는다.',
+      normalizedStyleGuide ? '아래에 제공되는 사용자 실제 전송 답변 어투를 우선적으로 맞춘다.' : '',
+      normalizedStyleGuide ? '사용자 어투 가이드를 반영하되, 예시 문장을 그대로 복사하지 않고 현재 스레드 사실에 맞게 재작성한다.' : '',
+      normalizedStyleGuide?.multilineRate >= 35 ? 'suggestedReply는 핵심 항목을 줄바꿈해 2~3줄로 작성한다.' : '',
       '영어 표현, 불필요한 사과, 과장, 허위 추론을 피한다.',
       'suggestedReaction은 없으면 빈 문자열로 두고, 빠른 확인 표시가 적절한 경우에만 white_check_mark를 사용한다.',
       'Return valid JSON only.',
@@ -977,6 +1344,7 @@ export class LlmService {
       `Permalink: ${task.source_url || task.sourceUrl || ''}`,
       'Thread transcript:',
       buildThreadTranscript(threadMessages),
+      normalizedStyleGuide ? buildSlackStyleGuideTranscript(normalizedStyleGuide) : '',
       normalizedCodeReviewContext ? buildCodeReviewTranscript(normalizedCodeReviewContext) : ''
     ].join('\n\n');
 
@@ -1018,19 +1386,44 @@ export class LlmService {
         candidateReply: modelReply,
         fallbackReply: fallbackReply || fallbackDraft.suggestedReply
       });
+      const driftGuard = detectSlackRequestDrift({
+        targetText,
+        latestText,
+        candidateReply: audienceReply,
+        fallbackReply: fallbackReply || fallbackDraft.suggestedReply
+      });
+      const evidenceLinks = resolveSlackEvidenceLinks({
+        task,
+        codeReviewContext: normalizedCodeReviewContext
+      });
+      const suggestedReply = trimSlackReplyLines(
+        sanitizeSlackTonePhrases(stripSlackEvidenceText(driftGuard.correctedReply)),
+        4
+      );
+      const normalizedSuggestedReply = sanitizeSlackTonePhrases(suggestedReply);
+      const normalizedSummary = sanitizeSlackTonePhrases(
+        summary && !isStructuredSlackSummary(summary) ? toNonDeveloperWording(summary) : fallbackDraft.summary
+      );
+      const quality = buildSlackDraftQuality({
+        summary: normalizedSummary,
+        suggestedReply: normalizedSuggestedReply,
+        evidenceLinks,
+        driftGuard
+      });
       return {
-        summary: summary && !isStructuredSlackSummary(summary) ? toNonDeveloperWording(summary) : fallbackDraft.summary,
+        summary: normalizedSummary,
         requestedAction: normalizeWhitespace(parsed.requestedAction) || categoryMeta.requestedAction,
         replyIntent: normalizeWhitespace(parsed.replyIntent) || fallbackDraft.replyIntent,
-        suggestedReply: appendCodeReviewHint(
-          audienceReply,
-          normalizedCodeReviewContext
-        ),
+        suggestedReply: normalizedSuggestedReply,
         replyCategory,
         replyCategoryLabel: categoryMeta.label,
         reactionName: normalizeReactionName(parsed.suggestedReaction) || categoryMeta.reactionName,
         provider: generated.provider,
-        agentProvider: generated.agentProvider || ''
+        agentProvider: generated.agentProvider || '',
+        qualityScore: quality.score,
+        qualityWarnings: quality.warnings,
+        evidenceLinks,
+        driftGuard
       };
     } catch (error) {
       return {
@@ -1070,7 +1463,12 @@ export class LlmService {
           summary: buildExternalAgentReviewSummary(reviewBody, pullRequest),
           approval: 'approved_with_no_changes',
           findings: [],
-          reviewBody: prependGitHubReviewDisclaimer(reviewBody),
+          reviewBody: prependGitHubReviewDisclaimer(stripGitHubEvidenceSection(reviewBody)),
+          evidenceLinks: resolveGitHubEvidenceLinks({
+            pullRequest,
+            files,
+            findings: []
+          }),
           provider: generated.provider || 'external_agent',
           agentProvider: ''
         };
@@ -1139,6 +1537,11 @@ export class LlmService {
         findings,
         reviewBody: formatGitHubReviewBody({
           summary,
+          findings
+        }),
+        evidenceLinks: resolveGitHubEvidenceLinks({
+          pullRequest,
+          files: contextFiles,
           findings
         }),
         provider: generated.provider,

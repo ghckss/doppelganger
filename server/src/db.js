@@ -249,19 +249,51 @@ export function createRepository(databasePath) {
       return null;
     }
 
+    const nextStatus = fields.status === undefined ? existing.status : fields.status;
+    const nextApprovalState = fields.approvalState === undefined ? existing.approval_state : fields.approvalState;
+    const nextLastError = fields.lastError === undefined ? existing.last_error : fields.lastError;
     const timestamp = nowIso();
     statements.updateTask.run(
       fields.title === undefined ? existing.title : fields.title,
-      fields.status === undefined ? existing.status : fields.status,
-      fields.approvalState === undefined ? existing.approval_state : fields.approvalState,
+      nextStatus,
+      nextApprovalState,
       fields.sourceUrl === undefined ? existing.source_url : fields.sourceUrl,
       fields.summary === undefined ? existing.summary : fields.summary,
       fields.payload === undefined ? writeJson(existing.payload) : writeJson(fields.payload),
       fields.result === undefined ? writeJson(existing.result) : writeJson(fields.result),
-      fields.lastError === undefined ? existing.last_error : fields.lastError,
+      nextLastError,
       timestamp,
       taskId
     );
+
+    const statusChanged = String(existing.status) !== String(nextStatus);
+    const approvalChanged = String(existing.approval_state) !== String(nextApprovalState);
+    const lastErrorChanged = String(existing.last_error || '') !== String(nextLastError || '');
+    if (statusChanged || approvalChanged || lastErrorChanged) {
+      statements.insertExecution.run(
+        createId('exec'),
+        taskId,
+        'task_transition',
+        'success',
+        writeJson({
+          from: {
+            status: existing.status,
+            approvalState: existing.approval_state,
+            lastError: existing.last_error || ''
+          },
+          to: {
+            status: nextStatus,
+            approvalState: nextApprovalState,
+            lastError: nextLastError || ''
+          }
+        }),
+        writeJson({
+          updatedAt: timestamp
+        }),
+        null,
+        timestamp
+      );
+    }
 
     return getTask(taskId);
   }

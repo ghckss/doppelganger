@@ -27,6 +27,7 @@ import {
   StatusBadge,
   SUB_BUTTON_CLASS
 } from './common';
+import { TaskTimeline } from './TaskTimeline';
 
 type SlackPanelProps = {
   tasks: Task[];
@@ -64,6 +65,16 @@ export function SlackPanel({
   const messageArtifacts = detail
     ? detail.artifacts.filter((artifact) => artifact.type === 'slack_message')
     : [];
+  const latestDraftMetadata = detail?.latestDraft?.metadata || {};
+  const qualityScore = Number(latestDraftMetadata.qualityScore);
+  const qualityWarnings = Array.isArray(latestDraftMetadata.qualityWarnings)
+    ? latestDraftMetadata.qualityWarnings.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const evidenceLinks = Array.isArray(latestDraftMetadata.evidenceLinks)
+    ? latestDraftMetadata.evidenceLinks.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const driftDetected = Boolean(latestDraftMetadata.requestDriftDetected);
+  const driftReason = String(latestDraftMetadata.requestDriftReason || '').trim();
   const normalizedReactionName = normalizeReactionName(editor?.reactionName || '');
   const reactionGlyph = resolveReactionGlyph(normalizedReactionName);
 
@@ -118,6 +129,20 @@ export function SlackPanel({
 
               <p className="text-sm text-slate-600">{detail.task.summary || '요약이 아직 없습니다.'}</p>
               {detail.task.last_error && <p className="text-sm text-rose-700">오류: {detail.task.last_error}</p>}
+              {(Number.isFinite(qualityScore) || qualityWarnings.length > 0 || evidenceLinks.length > 0 || driftDetected) && (
+                <section className="rounded-xl border border-slate-200 bg-white p-3">
+                  <h4 className="text-sm font-semibold text-slate-900">슬랙 답변 품질</h4>
+                  <p className="mt-1 text-xs text-slate-700">
+                    품질 점수: {Number.isFinite(qualityScore) ? `${Math.max(0, Math.min(100, Math.round(qualityScore)))}/100` : '-'}
+                  </p>
+                  {qualityWarnings.length > 0 && (
+                    <p className="mt-1 text-xs text-amber-700">주의: {qualityWarnings.join(' / ')}</p>
+                  )}
+                  {driftDetected && (
+                    <p className="mt-1 text-xs text-rose-700">요청 이탈 감지: {driftReason || '요청과 다른 방향이 감지되어 보정했습니다.'}</p>
+                  )}
+                </section>
+              )}
 
               {showCodeReviewSection && (
                 <section className="grid gap-3 rounded-xl border border-slate-200 bg-white p-3">
@@ -233,10 +258,33 @@ export function SlackPanel({
                       </>
                     )}
                     {editor.sendMode !== 'reaction' && (
-                      <label className={LABEL_CLASS}>
-                        본문
-                        <textarea className={INPUT_CLASS} value={editor.content} onChange={(event) => onUpdateEditor(detail.task.id, { content: event.target.value })} rows={8} />
-                      </label>
+                      <>
+                        <label className={LABEL_CLASS}>
+                          본문
+                          <textarea className={INPUT_CLASS} value={editor.content} onChange={(event) => onUpdateEditor(detail.task.id, { content: event.target.value })} rows={8} />
+                        </label>
+                        <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                          <h5 className="text-xs font-semibold text-slate-900">근거 링크</h5>
+                          {evidenceLinks.length > 0 ? (
+                            <ul className="mt-2 grid gap-1">
+                              {evidenceLinks.map((link) => (
+                                <li key={link} className="text-xs">
+                                  <a
+                                    className="break-all text-sky-700 underline underline-offset-2"
+                                    href={link}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {link}
+                                  </a>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mt-1 text-xs text-slate-500">표시할 근거 링크가 없습니다.</p>
+                          )}
+                        </section>
+                      </>
                     )}
                     <div className="flex flex-wrap justify-end gap-2">
                       <button
@@ -300,6 +348,12 @@ export function SlackPanel({
                   </ul>
                 )}
               </section>
+
+              <TaskTimeline
+                executions={detail.executions}
+                collapsed={collapsedSections.slack_timeline}
+                onToggle={() => onToggleSection('slack_timeline')}
+              />
             </article>
           )}
         </>

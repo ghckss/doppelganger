@@ -62,10 +62,14 @@ A practical setup is often:
 
 ## Slack manual code review in detail view
 - By default, Slack polling/draft generation does not query repositories.
-- In Slack task detail, choose a repository and click `코드 검토 실행` to run a read-only Codex/Claude analysis from thread context.
-- 코드 검토 실행 시 에이전트가 스레드 대화 + 저장소 문서(`README`, `docs/`)를 먼저 읽고 조회 폴더를 추론합니다. 고정 키워드 매핑 규칙에는 의존하지 않습니다.
+- In Slack task detail, click `코드 검토 실행` to run a read-only Codex/Claude analysis from thread context.
+- 코드 검토 실행 시 에이전트가 스레드 대화 + 저장소 문서(`README`, `docs/`)를 먼저 읽고 저장소/조회 폴더를 자동 선택합니다. 고정 키워드 매핑 규칙에는 의존하지 않습니다.
 - After analysis completes, the server regenerates the reply draft with code evidence.
 - This step does not modify repository files.
+- 코드 검토 결과가 요청 의도에서 이탈했다고 감지되면(예: 상품 정보 요청인데 API 사용 방식만 설명), 재검증 1회를 수행하고 계속 이탈 시 실패로 종료합니다.
+- 근거 링크는 본문 텍스트에 삽입하지 않고, 초안 메타데이터로 저장되어 상세 화면의 본문 하단 `근거 링크` 영역에 별도로 표시됩니다.
+- Slack/GitHub/코드작업 상세에는 실행 이력을 시간순으로 확인할 수 있는 `작업 타임라인` 섹션이 제공됩니다.
+- Slack 답변 전송 시 사용자가 최종 수정한 본문이 로컬 스타일 메모리에 누적되고, 이후 초안 생성 프롬프트에 반영되어 어투/문장 길이/표현 습관을 점진적으로 맞춥니다.
 
 ## Scripts
 - `npm start`: run the HTTP server
@@ -112,6 +116,7 @@ A practical setup is often:
 6. Open a candidate PR from the home screen, generate or edit the draft review, then post as `COMMENT`.
 7. If generation fails, the task stays editable with fallback summary so you can retry or post manually.
 8. Once a PR has been reviewed, the poll does not review it again.
+9. GitHub 근거 링크는 리뷰 본문에 삽입하지 않고 초안 메타데이터로 저장되며, 상세 화면의 본문 하단 `근거 링크` 영역에서 확인합니다.
 
 ## Code execution workflow
 1. Put the repositories you want to work on under `~/workspace`.

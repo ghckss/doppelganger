@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createRepository } from '../src/db.js';
+import { parseSlackStyleMemory, SLACK_STYLE_MEMORY_STATE_KEY } from '../src/slack-style-memory.js';
 import { TaskService } from '../src/task-service.js';
 
 function createRepo() {
@@ -81,6 +82,58 @@ test('TaskService allows saving an empty Slack draft when a reaction emoji is pr
   assert.equal(latestDraft.content, '');
   assert.equal(latestDraft.metadata.sendMode, 'reaction');
   assert.equal(latestDraft.metadata.reactionName, 'white_check_mark');
+});
+
+test('TaskService stores sent Slack reply as style feedback memory', async () => {
+  const repo = createRepo();
+  const task = repo.upsertTask({
+    domain: 'slack_mention',
+    kind: 'reply',
+    externalId: 'style-feedback',
+    title: 'Style feedback task',
+    status: 'drafted',
+    payload: {
+      text: '<@U123> 공유 부탁드립니다.'
+    }
+  });
+  repo.createDraft(task.id, '확인했습니다. 정리해서 공유드리겠습니다.', {
+    provider: 'cli:codex'
+  });
+  repo.createDraft(task.id, '확인했습니다.\n범위와 일정 정리해서 전달드리겠습니다.', {
+    provider: 'manual',
+    sendMode: 'reply'
+  });
+
+  const service = new TaskService({
+    config: {},
+    repo,
+    domains: {
+      slack_mention: {
+        execute: async () => ({
+          provider: 'slack',
+          response: {
+            ok: true
+          }
+        })
+      }
+    }
+  });
+
+  await service.executeTask(task.id, {
+    message: '확인했습니다.\n범위와 일정 정리해서 전달드리겠습니다.',
+    reactionName: '',
+    addReaction: false
+  });
+
+  const savedRaw = repo.getState(SLACK_STYLE_MEMORY_STATE_KEY, '');
+  const memory = parseSlackStyleMemory(savedRaw);
+  assert.equal(memory.entries.length, 1);
+  assert.equal(memory.entries[0].taskId, task.id);
+  assert.match(memory.entries[0].prompt, /공유 부탁드립니다/);
+  assert.equal(memory.entries[0].generatedReply, '확인했습니다. 정리해서 공유드리겠습니다.');
+  assert.equal(memory.entries[0].finalReply, '확인했습니다.\n범위와 일정 정리해서 전달드리겠습니다.');
+  assert.equal(memory.entries[0].finalReply.includes('\n'), true);
+  assert.equal(memory.entries[0].changed, true);
 });
 
 test('TaskService picks the next pending Slack task in queue order', () => {

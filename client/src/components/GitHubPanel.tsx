@@ -14,6 +14,7 @@ import {
   StatusBadge,
   SUB_BUTTON_CLASS
 } from './common';
+import { TaskTimeline } from './TaskTimeline';
 
 type GitHubPanelProps = {
   tasks: Task[];
@@ -42,6 +43,11 @@ export function GitHubPanel({
   onUpdateEditor,
   onRunAction
 }: GitHubPanelProps) {
+  const latestDraftMetadata = detail?.latestDraft?.metadata || {};
+  const evidenceLinks = Array.isArray(latestDraftMetadata.evidenceLinks)
+    ? latestDraftMetadata.evidenceLinks.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+
   return (
     <section className={`${PANEL_CLASS} border-emerald-200 bg-emerald-50/60`}>
       <div className={`${SECTION_HEADER_CLASS} border-emerald-200 bg-emerald-100/80`}>
@@ -149,6 +155,27 @@ export function GitHubPanel({
                       본문
                       <textarea className={INPUT_CLASS} value={editor.content} onChange={(event) => onUpdateEditor(detail.task.id, { content: event.target.value })} rows={8} />
                     </label>
+                    <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <h5 className="text-xs font-semibold text-slate-900">근거 링크</h5>
+                      {evidenceLinks.length > 0 ? (
+                        <ul className="mt-2 grid gap-1">
+                          {evidenceLinks.map((link) => (
+                            <li key={link} className="text-xs">
+                              <a
+                                className="break-all text-sky-700 underline underline-offset-2"
+                                href={link}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {link}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-1 text-xs text-slate-500">표시할 근거 링크가 없습니다.</p>
+                      )}
+                    </section>
                     <div className="flex flex-wrap gap-2 justify-end">
                       <button
                         type="button"
@@ -186,6 +213,12 @@ export function GitHubPanel({
                   </>
                 )}
               </section>
+
+              <TaskTimeline
+                executions={detail.executions}
+                collapsed={collapsedSections.github_timeline}
+                onToggle={() => onToggleSection('github_timeline')}
+              />
             </article>
           )}
         </>

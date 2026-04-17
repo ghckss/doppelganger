@@ -10,7 +10,8 @@ export const STATUS_LABELS: Record<string, string> = {
   ignored: '무시됨',
   done: '완료',
   failed: '실패',
-  running: '실행 중'
+  running: '실행 중',
+  success: '성공'
 };
 
 export const DOMAIN_LABELS: Record<string, string> = {
@@ -55,9 +56,12 @@ export type CollapsibleSectionId =
   | 'slack_analysis'
   | 'slack_draft'
   | 'slack_artifacts'
+  | 'slack_timeline'
   | 'github_draft'
+  | 'github_timeline'
   | 'code_create'
-  | 'code_tasks';
+  | 'code_tasks'
+  | 'code_timeline';
 
 export type CollapsibleState = Record<CollapsibleSectionId, boolean>;
 

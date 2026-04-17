@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { normalizeWhitespace, truncateText } from '../utils.js';
+import { normalizeWhitespace, safeArray, truncateText } from '../utils.js';
 
 function buildReviewFingerprint(pullRequest, files) {
   return crypto.createHash('sha1').update(JSON.stringify({
@@ -61,6 +61,7 @@ function buildAnalysisArtifact(generated) {
     metadata: {
       approval: generated.approval,
       findings: generated.findings,
+      evidenceLinks: safeArray(generated.evidenceLinks).map((item) => normalizeWhitespace(item)).filter(Boolean).slice(0, 10),
       provider: generated.provider,
       agentProvider: generated.agentProvider || ''
     }
@@ -144,7 +145,8 @@ export function createGitHubReviewDomain({ config, repo, githubClient, llmServic
       provider: generated.provider,
       generationAgentProvider: generated.agentProvider || selectedGenerationAgentProvider || '',
       approval: generated.approval,
-      findingsCount: generated.findings.length
+      findingsCount: generated.findings.length,
+      evidenceLinks: safeArray(generated.evidenceLinks).map((item) => normalizeWhitespace(item)).filter(Boolean).slice(0, 10)
     });
     repo.replaceArtifacts(task.id, 'github_review_analysis', [buildAnalysisArtifact(generated)]);
 
@@ -163,7 +165,8 @@ export function createGitHubReviewDomain({ config, repo, githubClient, llmServic
       result: {
         ...(task.result || {}),
         approval: generated.approval,
-        findings: generated.findings
+        findings: generated.findings,
+        evidenceLinks: safeArray(generated.evidenceLinks).map((item) => normalizeWhitespace(item)).filter(Boolean).slice(0, 10)
       },
       lastError: null
     });

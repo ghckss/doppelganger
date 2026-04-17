@@ -157,9 +157,11 @@ test('buildFallbackSlackDraft includes element definitions for share/confirm req
   assert.equal(result.replyCategory, 'info_share_confirmation');
   assert.match(result.suggestedReply, /범위는/);
   assert.match(result.suggestedReply, /우선순위는/);
+  assert.doesNotMatch(result.suggestedReply, /요청\s*기준에서/);
+  assert.doesNotMatch(result.suggestedReply, /기준으로|바탕으로|기반으로/);
 });
 
-test('buildFallbackSlackDraft appends code-review grounded hint when context is available', () => {
+test('buildFallbackSlackDraft does not append code path details in suggested reply', () => {
   const result = buildFallbackSlackDraft({
     task: {
       payload: {
@@ -190,7 +192,8 @@ test('buildFallbackSlackDraft appends code-review grounded hint when context is 
   });
 
   assert.match(result.summary, /auth\/login 관련 코드 근거/);
-  assert.match(result.suggestedReply, /src\/auth\/login\.ts:42/);
+  assert.doesNotMatch(result.suggestedReply, /src\/auth\/login\.ts:42/);
+  assert.doesNotMatch(result.suggestedReply, /관련\s*코드/);
 });
 
 test('LlmService includes code-review context in model input when available', async () => {
@@ -211,7 +214,7 @@ test('LlmService includes code-review context in model input when available', as
     }
   });
 
-  await service.generateSlackDraft({
+  const result = await service.generateSlackDraft({
     task: {
       title: 'Slack task',
       payload: {
@@ -244,6 +247,72 @@ test('LlmService includes code-review context in model input when available', as
   assert.match(capturedInput, /Code review context:/);
   assert.match(capturedInput, /Repository: fromm-web/);
   assert.match(capturedInput, /src\/auth\/login\.ts:42/);
+  assert.doesNotMatch(result.suggestedReply, /기준으로|바탕으로|기반으로/);
+  assert.doesNotMatch(result.suggestedReply, /[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:\d+/);
+});
+
+test('LlmService includes user style guide context in Slack draft generation input', async () => {
+  let capturedInstructions = '';
+  let capturedInput = '';
+  const service = new LlmService({
+    getMode: () => 'cli',
+    isConfigured: () => true,
+    createTextResponse: async ({ instructions, input }) => {
+      capturedInstructions = instructions;
+      capturedInput = input;
+      return JSON.stringify({
+        category: 'action_request',
+        summary: '공유 요청이 들어왔고 확인 답변이 필요한 상황입니다.',
+        requestedAction: '읽었고 필요한 경우 의견을 더하겠다는 점을 짧게 답변',
+        replyIntent: '확인 사실과 공유 시점을 전달',
+        suggestedReply: '확인했습니다. 오늘 중으로 정리해서 전달드리겠습니다.',
+        suggestedReaction: 'white_check_mark'
+      });
+    }
+  });
+
+  await service.generateSlackDraft({
+    task: {
+      title: 'Slack task',
+      payload: {
+        text: '<@U123> 공유 부탁드립니다.'
+      }
+    },
+    threadMessages: [
+      {
+        content: '<@U123> 공유 부탁드립니다.',
+        metadata: { user: 'U999' }
+      }
+    ],
+    styleGuide: {
+      sampleCount: 8,
+      editedSampleCount: 5,
+      recentAverageLength: 72,
+      multilineRate: 60,
+      directives: [
+        '문장 끝맺음은 "~합니다/~드립니다" 형태의 정중한 업무 톤을 유지합니다.',
+        '답변 길이는 짧게 유지하고 핵심 사실만 먼저 전달합니다.'
+      ],
+      commonKeywordHints: ['확인', '공유'],
+      examples: [
+        {
+          prompt: '<@U123> 일정 공유 부탁',
+          generatedReply: '확인했습니다. 정리해서 공유하겠습니다.',
+          finalReply: '확인했습니다. 오늘 일정 정리해서 전달드리겠습니다.',
+          changed: true
+        }
+      ]
+    }
+  });
+
+  assert.match(capturedInstructions, /사용자 실제 전송 답변 어투/);
+  assert.match(capturedInput, /User reply style profile:/);
+  assert.match(capturedInput, /Style directives:/);
+  assert.match(capturedInput, /User-approved reply examples:/);
+  assert.match(capturedInput, /generated:/);
+  assert.match(capturedInput, /final:/);
+  assert.match(capturedInput, /Multiline usage rate: 60%/);
+  assert.match(capturedInstructions, /줄바꿈해 2~3줄/);
 });
 
 test('LlmService uses model-proposed contextual reply when it is usable', async () => {
@@ -424,6 +493,86 @@ test('LlmService rewrites technical wording and includes element definitions for
   assert.doesNotMatch(result.suggestedReply, /스키마/);
   assert.match(result.suggestedReply, /범위는/);
   assert.match(result.suggestedReply, /일정은/);
+  assert.doesNotMatch(result.suggestedReply, /요청\s*기준에서/);
+  assert.doesNotMatch(result.suggestedReply, /기준으로|바탕으로|기반으로/);
+});
+
+test('LlmService removes AI-like 기준 공유 문구 from suggested reply', async () => {
+  const service = new LlmService({
+    getMode: () => 'cli',
+    isConfigured: () => true,
+    createTextResponse: async () => ({
+      text: JSON.stringify({
+        category: 'info_share_confirmation',
+        summary: '요소 확인 요청입니다.',
+        requestedAction: '확인 후 공유',
+        replyIntent: '요청 요소 정리 전달',
+        suggestedReply: '범위는 이번 요청에서 다룰 내용과 제외할 내용을 나눈 기준입니다. 이 기준으로 공유하면 됩니다.',
+        suggestedReaction: ''
+      }),
+      provider: 'cli:codex',
+      agentProvider: 'codex'
+    })
+  });
+
+  const result = await service.generateSlackDraft({
+    task: {
+      title: 'Slack task',
+      payload: {
+        text: '<@U123> 범위 요소 정리 부탁드립니다.'
+      }
+    },
+    threadMessages: [
+      {
+        content: '<@U123> 범위 요소 정리 부탁드립니다.',
+        metadata: { user: 'U999' }
+      }
+    ]
+  });
+
+  assert.doesNotMatch(result.suggestedReply, /이\s*기준으로\s*공유(?:하|드)면\s*됩니다/);
+  assert.doesNotMatch(result.suggestedReply, /요청\s*기준에서/);
+  assert.doesNotMatch(result.suggestedReply, /기준으로|바탕으로|기반으로/);
+});
+
+test('LlmService corrects drifted API-centric reply for product-information request', async () => {
+  const service = new LlmService({
+    getMode: () => 'cli',
+    isConfigured: () => true,
+    createTextResponse: async () => ({
+      text: JSON.stringify({
+        category: 'action_request',
+        summary: '상품 정보 요청입니다.',
+        requestedAction: '확인 후 공유',
+        replyIntent: '요청에 맞는 확인 계획 전달',
+        suggestedReply: 'API 엔드포인트를 먼저 확인하고 서비스 레이어를 정리하겠습니다.',
+        suggestedReaction: ''
+      }),
+      provider: 'cli:codex',
+      agentProvider: 'codex'
+    })
+  });
+
+  const result = await service.generateSlackDraft({
+    task: {
+      title: 'Slack task',
+      source_url: 'https://example.slack.com/archives/C123/p1710000000000100',
+      payload: {
+        text: '<@U123> 스토어 상품 정보 파악 부탁드립니다.'
+      }
+    },
+    threadMessages: [
+      {
+        content: '<@U123> 스토어 상품 정보 파악 부탁드립니다.',
+        metadata: { user: 'U999' }
+      }
+    ]
+  });
+
+  assert.equal(result.driftGuard?.detected, true);
+  assert.doesNotMatch(result.suggestedReply, /API|엔드포인트/i);
+  assert.ok(Array.isArray(result.evidenceLinks));
+  assert.match(result.evidenceLinks[0] || '', /example\.slack\.com/);
 });
 
 test('LlmService returns GitHub fallback review when generation mode is fallback', async () => {
@@ -505,7 +654,9 @@ test('LlmService stores raw external-agent review output as GitHub review body',
   assert.match(result.reviewBody, /코드 작성자의 판단하에 수정 여부를 결정해주세요\./);
   assert.match(result.reviewBody, /## 요약/);
   assert.match(result.reviewBody, /## 리뷰 의견/);
-  assert.ok(result.reviewBody.includes(externalReviewBody));
+  assert.match(result.reviewBody, /결제 API 리팩터링에서 실패 응답 메시지 일관성이 일부 약화되었습니다/);
+  assert.equal(Array.isArray(result.evidenceLinks), true);
+  assert.equal(result.evidenceLinks.length, 0);
   assert.match(result.summary, /결제 API 리팩터링/);
   assert.equal(result.approval, 'approved_with_no_changes');
   assert.equal(result.findings.length, 0);
@@ -626,6 +777,9 @@ test('LlmService formats GitHub review body with summary and severity-separated 
   assert.equal(result.reviewBody.startsWith(GITHUB_REVIEW_DISCLAIMER), true);
   assert.match(result.reviewBody, /## 요약/);
   assert.match(result.reviewBody, /## 리뷰 의견/);
+  assert.doesNotMatch(result.reviewBody, /## 근거 링크/);
+  assert.equal(Array.isArray(result.evidenceLinks), true);
+  assert.match(result.evidenceLinks[0] || '', /https:\/\/github\.com\/acme\/demo\/blob\/abc123\/src\/payment\/controller\.ts/);
   assert.match(result.reviewBody, /🔴 \[버그\]/);
   assert.doesNotMatch(result.reviewBody, /## 주요 변경사항/);
   assert.doesNotMatch(result.reviewBody, /## 잔여 리스크/);

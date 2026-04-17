@@ -150,3 +150,45 @@ test('SlackClient logs why users.info lookup failed and falls back to the user i
   assert.equal(warnings[0][1].reason, 'api_failed');
   assert.match(warnings[0][1].error, /users\.info|socket hang up/);
 });
+
+test('SlackClient postReply preserves line breaks in Slack message text', async () => {
+  const requests = [];
+  const client = new SlackClient({
+    slack: {
+      readToken: 'xoxp-test',
+      writeToken: 'xoxp-test',
+      userId: 'U123',
+      searchPageSize: 100,
+      searchMaxPages: 3
+    }
+  }, async (url, options) => {
+    const body = options.body.toString();
+    requests.push({ url, body });
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      json: async () => ({
+        ok: true,
+        ts: '1710000002.000100',
+        channel: 'C123',
+        message: {
+          text: 'ok'
+        }
+      })
+    };
+  });
+
+  await client.postReply({
+    channelId: 'C123',
+    threadTs: '1710000000.000100',
+    text: '첫 줄\n둘째 줄'
+  });
+
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /chat\.postMessage$/);
+  const params = new URLSearchParams(requests[0].body);
+  assert.equal(params.get('channel'), 'C123');
+  assert.equal(params.get('thread_ts'), '1710000000.000100');
+  assert.equal(params.get('text'), '첫 줄\n둘째 줄');
+});

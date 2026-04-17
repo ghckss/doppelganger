@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeWhitespace, safeArray, truncateText } from '../utils.js';
+import { buildSlackStyleGuide, SLACK_STYLE_MEMORY_STATE_KEY } from '../slack-style-memory.js';
 
 const CODE_REVIEW_STATUS = {
   NOT_CANDIDATE: 'not_candidate',
@@ -155,6 +156,7 @@ function normalizeCodeReviewState(previousState, threadFingerprint) {
       progressPercent: 0,
       progressLabel: '',
       selectedRepo: '',
+      selectedRepoSlug: '',
       selectedFolder: '',
       candidateRepos: [],
       matchedKeywords: [],
@@ -170,6 +172,12 @@ function normalizeCodeReviewState(previousState, threadFingerprint) {
       findings: [],
       analysisAgentProvider: '',
       analysisBaseBranch: CODE_ANALYSIS_BASE_BRANCH,
+      requestDriftGuard: {
+        retried: false,
+        retryCount: 0,
+        detected: false,
+        reason: ''
+      },
       analyzedAt: '',
       workspacePath: '',
       error: ''
@@ -192,6 +200,7 @@ function normalizeCodeReviewState(previousState, threadFingerprint) {
     progressLabel: '',
     threadFingerprint,
     selectedFolder: '',
+    selectedRepoSlug: '',
     scopeRationale: '',
     scopeInvestigationPlan: '',
     scopeSource: '',
@@ -200,6 +209,12 @@ function normalizeCodeReviewState(previousState, threadFingerprint) {
     findings: [],
     analysisAgentProvider: '',
     analysisBaseBranch: CODE_ANALYSIS_BASE_BRANCH,
+    requestDriftGuard: {
+      retried: false,
+      retryCount: 0,
+      detected: false,
+      reason: ''
+    },
     analyzedAt: '',
     workspacePath: '',
     error: ''
@@ -817,6 +832,55 @@ function buildReplyHints(replyHints, findings) {
   return hints;
 }
 
+function shouldPrioritizeDomainInformation(task, threadMessages) {
+  const corpus = normalizeWhitespace([
+    task?.payload?.text || '',
+    ...safeArray(threadMessages).map((message) => normalizeWhitespace(message.content))
+  ].join(' ')).toLowerCase();
+  if (!corpus) {
+    return false;
+  }
+
+  const asksDomainInfo = /(상품|스토어\s*상품|상품\s*정보|가격|정책|번들|bundle|catalog|카탈로그|구성|판매)/i.test(corpus);
+  const explicitlyAsksApi = /\bapi\b|endpoint|엔드포인트|graphql|rest|호출/i.test(corpus);
+  return asksDomainInfo && !explicitlyAsksApi;
+}
+
+function detectCodeReviewRequestDrift({ task, threadMessages, summary, replyHints, findings }) {
+  if (!shouldPrioritizeDomainInformation(task, threadMessages)) {
+    return {
+      detected: false,
+      reason: ''
+    };
+  }
+
+  const responseCorpus = normalizeWhitespace([
+    summary,
+    ...safeArray(replyHints),
+    ...safeArray(findings).map((finding) => `${finding.path || ''} ${finding.reason || ''} ${finding.excerpt || ''}`)
+  ].join(' ')).toLowerCase();
+  if (!responseCorpus) {
+    return {
+      detected: false,
+      reason: ''
+    };
+  }
+
+  const hasDomainSignals = /(상품|가격|정책|번들|bundle|catalog|카탈로그|구성|판매|plan|sku)/i.test(responseCorpus);
+  const hasApiSignals = /\bapi\b|endpoint|엔드포인트|graphql|rest|controller|service|axios|fetch/i.test(responseCorpus);
+  if (hasApiSignals && !hasDomainSignals) {
+    return {
+      detected: true,
+      reason: '상품/정책 정보 파악 요청인데 API 사용 방식 중심으로 분석되었습니다.'
+    };
+  }
+
+  return {
+    detected: false,
+    reason: ''
+  };
+}
+
 function buildScopeSelectionReason({
   selectedRepo,
   selectedFolder,
@@ -1146,6 +1210,9 @@ export function createSlackMentionDomain({
     const threadMessages = repo.listArtifacts(task.id, 'slack_message');
     const includeCodeReviewContext = Boolean(options.includeCodeReviewContext);
     const codeReviewContext = includeCodeReviewContext ? (task.payload?.codeReview || null) : null;
+    const styleGuide = buildSlackStyleGuide(repo.getState(SLACK_STYLE_MEMORY_STATE_KEY, ''), {
+      maxExamples: 3
+    });
     const preferredProviders = resolveDraftProviderCandidates();
 
     let generated = null;
@@ -1157,6 +1224,7 @@ export function createSlackMentionDomain({
           task,
           threadMessages,
           codeReviewContext,
+          styleGuide,
           agentProvider: candidateProvider,
           model: candidateProvider === 'claude' ? SLACK_DRAFT_MODEL : ''
         });
@@ -1182,6 +1250,11 @@ export function createSlackMentionDomain({
     if (!generated) {
       throw new Error(lastErrorMessage || '슬랙 답변 생성에 실패했습니다');
     }
+    const qualityScore = Number(generated.qualityScore);
+    const qualityWarnings = compactStrings(generated.qualityWarnings || [], 6);
+    const evidenceLinks = compactStrings(generated.evidenceLinks || [], 6);
+    const driftDetected = Boolean(generated.driftGuard?.detected);
+    const driftReason = normalizeWhitespace(generated.driftGuard?.reason);
     const generationModel = resolvedAgentProvider === 'claude' ? SLACK_DRAFT_MODEL : '';
     const draft = repo.createDraft(task.id, generated.suggestedReply, {
       provider: generated.provider,
@@ -1192,8 +1265,34 @@ export function createSlackMentionDomain({
       replyIntent: generated.replyIntent || '',
       replyCategory: generated.replyCategory,
       replyCategoryLabel: generated.replyCategoryLabel,
-      reactionName: generated.reactionName || ''
+      reactionName: generated.reactionName || '',
+      qualityScore: Number.isFinite(qualityScore) ? Math.max(0, Math.min(100, Math.round(qualityScore))) : undefined,
+      qualityWarnings,
+      evidenceLinks,
+      requestDriftDetected: driftDetected,
+      requestDriftReason: driftReason || ''
     });
+
+    repo.replaceArtifacts(task.id, 'slack_draft_quality', [
+      {
+        externalId: `quality:${task.id}`,
+        title: '초안 품질 점검',
+        content: [
+          `품질 점수: ${Number.isFinite(qualityScore) ? Math.max(0, Math.min(100, Math.round(qualityScore))) : '-'}`,
+          qualityWarnings.length > 0 ? `경고: ${qualityWarnings.join(' / ')}` : '경고: 없음',
+          evidenceLinks.length > 0 ? `근거 링크: ${evidenceLinks.join(' | ')}` : '근거 링크: 없음',
+          driftDetected ? `요청 이탈 감지: ${driftReason || '감지됨'}` : '요청 이탈 감지: 없음'
+        ].join('\n'),
+        sortOrder: 0,
+        metadata: {
+          qualityScore: Number.isFinite(qualityScore) ? Math.max(0, Math.min(100, Math.round(qualityScore))) : null,
+          qualityWarnings,
+          evidenceLinks,
+          driftDetected,
+          driftReason
+        }
+      }
+    ]);
 
     const latestTask = repo.getTask(task.id) || task;
     const nextPayload = {
@@ -1247,6 +1346,9 @@ export function createSlackMentionDomain({
       ...normalizeCodeReviewState(currentTask.payload?.codeReview, threadFingerprint),
       enabled: true,
       selectedRepo,
+      selectedRepoSlug: normalizeWhitespace(config.github?.owner)
+        ? `${normalizeWhitespace(config.github?.owner)}/${selectedRepo}`
+        : selectedRepo,
       selectedFolder: '',
       candidateRepos: repositorySelection.candidateRepos,
       selectionReason: repositorySelection.selectionReason,
@@ -1408,22 +1510,72 @@ export function createSlackMentionDomain({
           step: progressTotalSteps - 1,
           label: analyzingLabel
         });
-        const reviewResponse = await agent.runner.runExec({
-          workdir,
-          prompt,
-          sandboxMode: 'read-only',
-          schema: SLACK_CODE_REVIEW_SCHEMA,
-          timeoutSeconds: codeReviewTimeoutSeconds
-        });
+        const runAnalysisOnce = async (analysisPrompt) => {
+          const reviewResponse = await agent.runner.runExec({
+            workdir,
+            prompt: analysisPrompt,
+            sandboxMode: 'read-only',
+            schema: SLACK_CODE_REVIEW_SCHEMA,
+            timeoutSeconds: codeReviewTimeoutSeconds
+          });
+          const findings = normalizeCodeReviewFindings(reviewResponse.parsed?.findings, maxFindings);
+          const summary = buildAnalysisSummary({
+            selectedRepo: runningState.selectedRepo,
+            summary: reviewResponse.parsed?.summary,
+            findings
+          });
+          const replyHints = buildReplyHints(reviewResponse.parsed?.replyHints, findings);
+          return {
+            findings,
+            summary,
+            replyHints
+          };
+        };
 
-        const findings = normalizeCodeReviewFindings(reviewResponse.parsed?.findings, maxFindings);
-        const summary = buildAnalysisSummary({
-          selectedRepo: runningState.selectedRepo,
-          summary: reviewResponse.parsed?.summary,
-          findings
+        let analysisResult = await runAnalysisOnce(prompt);
+        let requestDrift = detectCodeReviewRequestDrift({
+          task: runningTask,
+          threadMessages,
+          summary: analysisResult.summary,
+          replyHints: analysisResult.replyHints,
+          findings: analysisResult.findings
         });
-        const replyHints = buildReplyHints(reviewResponse.parsed?.replyHints, findings);
+        let driftRetryCount = 0;
+        if (requestDrift.detected) {
+          driftRetryCount = 1;
+          updateRunningProgress({
+            step: progressTotalSteps - 1,
+            label: '요청 이탈을 감지해 분석을 다시 검증하고 있습니다.'
+          });
+          const remediationPrompt = [
+            prompt,
+            '',
+            '## 요청 이탈 재검증 지시',
+            `- 직전 결과 이슈: ${requestDrift.reason}`,
+            '- 이번 답변은 API 호출 경로 나열이 아니라 상품/정책/도메인 정의 근거 중심으로 작성한다.',
+            '- summary/replyHints/findings 모두 질문 의도와 직접 연결된 근거만 남긴다.'
+          ].join('\n');
+          analysisResult = await runAnalysisOnce(remediationPrompt);
+          requestDrift = detectCodeReviewRequestDrift({
+            task: runningTask,
+            threadMessages,
+            summary: analysisResult.summary,
+            replyHints: analysisResult.replyHints,
+            findings: analysisResult.findings
+          });
+          if (requestDrift.detected) {
+            throw new Error(`요청 이탈 감지: ${requestDrift.reason}`);
+          }
+        }
+
+        const findings = analysisResult.findings;
+        const summary = analysisResult.summary;
+        const replyHints = analysisResult.replyHints;
         const completedAt = new Date().toISOString();
+        const repoOwner = normalizeWhitespace(config.github?.owner);
+        const selectedRepoSlug = repoOwner
+          ? `${repoOwner}/${runningState.selectedRepo}`
+          : runningState.selectedRepo;
         const completedState = {
           ...(repo.getTask(currentTask.id)?.payload?.codeReview || runningState),
           ...createCodeReviewProgress({
@@ -1435,6 +1587,7 @@ export function createSlackMentionDomain({
           analysisAgentProvider: agent.provider,
           workspacePath: repoRoot,
           analysisBaseBranch: CODE_ANALYSIS_BASE_BRANCH,
+          selectedRepoSlug,
           selectedFolder,
           selectionReason,
           scopeRationale,
@@ -1443,6 +1596,12 @@ export function createSlackMentionDomain({
           findings,
           summary,
           replyHints,
+          requestDriftGuard: {
+            retried: driftRetryCount > 0,
+            retryCount: driftRetryCount,
+            detected: false,
+            reason: ''
+          },
           analyzedAt: completedAt,
           error: ''
         };
