@@ -329,11 +329,6 @@ export default function App() {
         </header>
 
         <main className="flex flex-col gap-5 pb-4">
-          <MeetingPanel
-            collapsedSections={collapsedSections}
-            onToggleSection={toggleSection}
-          />
-
           <SlackPanel
             tasks={slackTasks}
             selectedTaskId={selectedSlackTaskId}
@@ -377,6 +372,11 @@ export default function App() {
             onRunAction={(label, action) => {
               void runAction(label, action);
             }}
+          />
+
+          <MeetingPanel
+            collapsedSections={collapsedSections}
+            onToggleSection={toggleSection}
           />
 
           <CodeExecutionPanel
