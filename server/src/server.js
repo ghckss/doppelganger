@@ -1,0 +1,608 @@
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import { renderErrorPage, renderTaskDetailPage, renderTaskListPage } from './web/render.js';
+
+const CONTENT_TYPE_BY_EXTENSION = {
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.map': 'application/json; charset=utf-8'
+};
+
+const DEFAULT_DEV_CORS_ORIGINS = new Set([
+  'http://localhost:5173',
+  'http://127.0.0.1:5173'
+]);
+
+function redirect(response, location) {
+  response.writeHead(303, { Location: location });
+  response.end();
+}
+
+function sendHtml(response, statusCode, html) {
+  response.writeHead(statusCode, {
+    'Content-Type': 'text/html; charset=utf-8'
+  });
+  response.end(html);
+}
+
+function sendJson(response, statusCode, payload) {
+  response.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8'
+  });
+  response.end(JSON.stringify(payload, null, 2));
+}
+
+async function readBody(request) {
+  const chunks = [];
+  for await (const chunk of request) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function parseRequestBody(request) {
+  const rawBody = await readBody(request);
+  const contentType = request.headers['content-type'] || '';
+
+  if (contentType.includes('application/json')) {
+    return rawBody ? JSON.parse(rawBody) : {};
+  }
+
+  const params = new URLSearchParams(rawBody);
+  return Object.fromEntries(params.entries());
+}
+
+function acceptsJson(request) {
+  return (request.headers.accept || '').includes('application/json');
+}
+
+function normalizeOrigin(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (!parsed.protocol || !parsed.host) {
+      return '';
+    }
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return '';
+  }
+}
+
+function buildAllowedCorsOrigins(config) {
+  const allowed = new Set(DEFAULT_DEV_CORS_ORIGINS);
+  const baseOrigin = normalizeOrigin(config?.app?.baseUrl);
+  if (baseOrigin) {
+    allowed.add(baseOrigin);
+  }
+
+  const configuredOrigins = Array.isArray(config?.app?.corsOrigins) ? config.app.corsOrigins : [];
+  for (const origin of configuredOrigins) {
+    const normalized = normalizeOrigin(origin);
+    if (normalized) {
+      allowed.add(normalized);
+    }
+  }
+
+  return allowed;
+}
+
+function applyCorsHeaders(request, response, allowedOrigins) {
+  const origin = String(request.headers.origin || '').trim();
+  if (!origin || !allowedOrigins.has(origin)) {
+    return false;
+  }
+
+  response.setHeader('Access-Control-Allow-Origin', origin);
+  response.setHeader('Vary', 'Origin');
+  response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  response.setHeader('Access-Control-Max-Age', '86400');
+  return true;
+}
+
+function resolveStaticFile(baseDir, requestPath) {
+  const resolved = path.resolve(baseDir, `.${requestPath}`);
+  if (resolved !== baseDir && !resolved.startsWith(`${baseDir}${path.sep}`)) {
+    return '';
+  }
+  return resolved;
+}
+
+function sendFile(response, filePath) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return false;
+  }
+
+  const extension = path.extname(filePath).toLowerCase();
+  const contentType = CONTENT_TYPE_BY_EXTENSION[extension] || 'application/octet-stream';
+  response.writeHead(200, { 'Content-Type': contentType });
+  response.end(fs.readFileSync(filePath));
+  return true;
+}
+
+function serveClientApp(requestPath, response, cwd) {
+  if (!/^\/app(?:\/|$)/.test(requestPath)) {
+    return false;
+  }
+
+  const distDir = path.join(cwd, 'client', 'dist');
+  const indexPath = path.join(distDir, 'index.html');
+  if (!fs.existsSync(indexPath)) {
+    sendHtml(response, 503, `
+      <!doctype html>
+      <html lang="ko">
+        <head>
+          <meta charset="utf-8" />
+          <title>클라이언트 준비 필요</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0e1528; color: #edf2ff; margin: 0; padding: 2rem; }
+            .card { max-width: 720px; margin: 3rem auto; background: #172038; border: 1px solid #30406f; border-radius: 16px; padding: 1.5rem; }
+            code { background: #243259; border-radius: 6px; padding: 0.1rem 0.4rem; }
+          </style>
+        </head>
+        <body>
+          <article class="card">
+            <h1>React 클라이언트 빌드가 필요합니다</h1>
+            <p><code>npm run build:client</code> 또는 <code>npm run dev:client</code>를 실행한 뒤 다시 접속해 주세요.</p>
+          </article>
+        </body>
+      </html>
+    `);
+    return true;
+  }
+
+  if (requestPath === '/app' || requestPath === '/app/') {
+    return sendFile(response, indexPath);
+  }
+
+  if (requestPath.startsWith('/app/assets/')) {
+    const assetPath = resolveStaticFile(distDir, requestPath.replace('/app', ''));
+    if (!assetPath) {
+      return false;
+    }
+    return sendFile(response, assetPath);
+  }
+
+  return sendFile(response, indexPath);
+}
+
+function serveStatic(requestPath, response, cwd) {
+  if (serveClientApp(requestPath, response, cwd)) {
+    return true;
+  }
+
+  if (requestPath !== '/static/styles.css') {
+    return false;
+  }
+
+  const cssPath = path.join(cwd, 'server', 'public', 'styles.css');
+  if (!fs.existsSync(cssPath)) {
+    return false;
+  }
+  response.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
+  response.end(fs.readFileSync(cssPath, 'utf8'));
+  return true;
+}
+
+function redirectToTaskOrList(response, nextTaskId, message) {
+  if (nextTaskId) {
+    redirect(response, `/tasks/${encodeURIComponent(nextTaskId)}?message=${encodeURIComponent(message)}`);
+    return;
+  }
+
+  redirect(response, `/tasks?message=${encodeURIComponent(message)}`);
+}
+
+export function createHttpServer({ cwd, taskService }) {
+  const allowedCorsOrigins = buildAllowedCorsOrigins(taskService?.config || {});
+
+  return http.createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    const pathname = url.pathname;
+    const query = Object.fromEntries(url.searchParams.entries());
+
+    try {
+      const corsApplied = applyCorsHeaders(request, response, allowedCorsOrigins);
+      if (request.method === 'OPTIONS') {
+        if (corsApplied) {
+          response.writeHead(204);
+          response.end();
+          return;
+        }
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+
+      const hasUsableDraft = (detail) => Boolean(detail.latestDraft?.content || detail.latestDraft?.metadata?.reactionName);
+      const shouldAutoGenerateDraft = (detail) => detail.domain?.capabilities?.drafting
+        && detail.task.domain !== 'github_review'
+        && detail.task.status !== 'failed'
+        && (!detail.task.summary || !hasUsableDraft(detail));
+
+      if (serveStatic(pathname, response, cwd)) {
+        return;
+      }
+
+      if (request.method === 'GET' && pathname === '/') {
+        redirect(response, '/app');
+        return;
+      }
+
+      if (request.method === 'GET' && pathname === '/healthz') {
+        sendJson(response, 200, { ok: true, uptimeSeconds: Math.round(process.uptime()) });
+        return;
+      }
+
+      if (request.method === 'GET' && pathname === '/tasks') {
+        const html = renderTaskListPage({
+          tasks: taskService.listTasks({
+            includeResolved: url.searchParams.get('includeResolved') === '1'
+          }),
+          projects: taskService.getCodeExecutionProjects(),
+          projectsRoot: taskService.config.workspace.projectsRoot,
+          defaultAgentProvider: taskService.config.agent?.defaultProvider || 'codex',
+          readiness: taskService.getConnectorReadiness(),
+          domains: taskService.getDomainCatalog(),
+          query
+        });
+        sendHtml(response, 200, html);
+        return;
+      }
+
+      if (request.method === 'GET' && pathname === '/api/tasks') {
+        sendJson(response, 200, {
+          tasks: taskService.listTasks({
+            includeResolved: url.searchParams.get('includeResolved') === '1'
+          }),
+          projects: taskService.getCodeExecutionProjects(),
+          readiness: taskService.getConnectorReadiness(),
+          domains: taskService.getDomainCatalog()
+        });
+        return;
+      }
+
+      if (request.method === 'GET' && pathname === '/api/meta') {
+        sendJson(response, 200, {
+          projects: taskService.getCodeExecutionProjects(),
+          readiness: taskService.getConnectorReadiness(),
+          domains: taskService.getDomainCatalog(),
+          projectsRoot: taskService.config.workspace.projectsRoot,
+          defaultAgentProvider: taskService.config.agent?.defaultProvider || 'codex'
+        });
+        return;
+      }
+
+      if ((request.method === 'POST' && pathname === '/tasks/code-execution/create') || (request.method === 'POST' && pathname === '/api/tasks/code-execution')) {
+        const body = await parseRequestBody(request);
+        const detail = await taskService.createCodeExecutionTask({
+          command: body.command,
+          projectId: body.projectId,
+          baseBranch: body.baseBranch,
+          agentProvider: body.agentProvider,
+          needsPlanning: body.needsPlanning,
+          needsDesign: body.needsDesign
+        });
+        const prefersJson = pathname.startsWith('/api/') || (request.headers.accept || '').includes('application/json');
+        if (prefersJson) {
+          sendJson(response, 201, detail);
+          return;
+        }
+        redirect(response, `/tasks/${encodeURIComponent(detail.task.id)}?message=${encodeURIComponent('코드 작업을 생성하고 실행을 시작했습니다')}`);
+        return;
+      }
+
+      const taskMatch = pathname.match(/^\/tasks\/([^/]+)$/);
+      if (request.method === 'GET' && taskMatch) {
+        const taskId = decodeURIComponent(taskMatch[1]);
+        let detail = taskService.getTaskDetail(taskId);
+        if (shouldAutoGenerateDraft(detail)) {
+          detail = await taskService.generateDraft(taskId, {});
+        }
+        if (detail.task.domain === 'slack_mention') {
+          const analysisStatus = String(detail.task.payload?.codeReview?.analysisStatus || '').toLowerCase();
+          if (!analysisStatus || analysisStatus === 'not_requested') {
+            await taskService.startSlackCodeReview(taskId, {});
+            detail = taskService.getTaskDetail(taskId);
+          }
+        }
+        sendHtml(response, 200, renderTaskDetailPage({
+          detail,
+          query,
+          slackCodeReviewRepos: taskService.config.github?.repositories || []
+        }));
+        return;
+      }
+
+      const taskApiMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+      if (request.method === 'GET' && taskApiMatch) {
+        const taskId = decodeURIComponent(taskApiMatch[1]);
+        let detail = taskService.getTaskDetail(taskId);
+        if (shouldAutoGenerateDraft(detail)) {
+          detail = await taskService.generateDraft(taskId, {});
+        }
+        if (detail.task.domain === 'slack_mention') {
+          const analysisStatus = String(detail.task.payload?.codeReview?.analysisStatus || '').toLowerCase();
+          if (!analysisStatus || analysisStatus === 'not_requested') {
+            await taskService.startSlackCodeReview(taskId, {});
+            detail = taskService.getTaskDetail(taskId);
+          }
+        }
+        sendJson(response, 200, detail);
+        return;
+      }
+
+      const runCodeTaskMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/run$/);
+      if (request.method === 'POST' && runCodeTaskMatch) {
+        const taskId = decodeURIComponent(runCodeTaskMatch[1]);
+        const detail = await taskService.startCodeExecutionTask(taskId);
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status
+          });
+          return;
+        }
+        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('코드 작업 실행을 시작했습니다')}`);
+        return;
+      }
+
+      const resumeCodeTaskMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/resume$/);
+      if (request.method === 'POST' && resumeCodeTaskMatch) {
+        const taskId = decodeURIComponent(resumeCodeTaskMatch[1]);
+        const detail = await taskService.resumeCodeExecutionTask(taskId);
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status
+          });
+          return;
+        }
+        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('코드 작업 재개를 시작했습니다')}`);
+        return;
+      }
+
+      const createPrMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/create-pr$/);
+      if (request.method === 'POST' && createPrMatch) {
+        const taskId = decodeURIComponent(createPrMatch[1]);
+        const body = await parseRequestBody(request);
+        const detail = await taskService.createCodeExecutionPullRequest(taskId, {
+          branchName: body.branchName
+        });
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status
+          });
+          return;
+        }
+        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('PR을 생성했습니다')}`);
+        return;
+      }
+
+      if (request.method === 'POST' && pathname === '/internal/poll/slack-mentions') {
+        const result = await taskService.pollSlackMentions();
+        const acceptsJson = (request.headers.accept || '').includes('application/json') || (request.headers['content-type'] || '').includes('application/json');
+        if (acceptsJson) {
+          sendJson(response, 200, result);
+          return;
+        }
+        redirect(response, `/tasks?message=${encodeURIComponent(`Slack 멘션 영역을 업데이트했습니다: ${result.matchesFound}건 (코드검토 자동 시작 ${result.autoCodeReviewsStarted || 0}건)`)}`);
+        return;
+      }
+
+      if (request.method === 'POST' && pathname === '/internal/poll/github-reviews') {
+        const result = await taskService.pollGitHubReviews();
+        const acceptsJson = (request.headers.accept || '').includes('application/json') || (request.headers['content-type'] || '').includes('application/json');
+        if (acceptsJson) {
+          sendJson(response, 200, result);
+          return;
+        }
+        const skipped = result.alreadyReviewedSkipped + result.draftsSkipped + (result.selfAuthoredSkipped || 0);
+        redirect(response, `/tasks?message=${encodeURIComponent(`GitHub PR 후보 수집이 끝났습니다: 후보 ${result.candidatesListed || 0}건, 스킵 ${skipped}건`)}`);
+        return;
+      }
+
+      const draftMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/draft$/);
+      if (request.method === 'POST' && draftMatch) {
+        const taskId = decodeURIComponent(draftMatch[1]);
+        const body = await parseRequestBody(request);
+        if (body.mode === 'generate') {
+          const task = taskService.getTaskDetail(taskId).task;
+          const includeCodeReviewContext = String(body.includeCodeReviewContext || '').toLowerCase() === 'true';
+          const detail = await taskService.generateDraft(taskId, task.domain === 'slack_mention'
+            ? {
+              includeCodeReviewContext
+            }
+            : {
+              generationAgentProvider: body.generationAgentProvider
+            });
+          const redirectUrl = `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('초안을 생성했습니다')}`;
+          const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+          if (prefersJson) {
+            const latestProvider = detail.latestDraft?.metadata?.provider || '';
+            sendJson(response, 200, {
+              ok: true,
+              taskId,
+              status: detail.task.status,
+              provider: latestProvider,
+              redirectUrl
+            });
+            return;
+          }
+          redirect(response, redirectUrl);
+          return;
+        }
+
+        taskService.saveDraft(taskId, {
+          content: body.draft,
+          summary: body.summary,
+          metadata: {
+            sendMode: body.sendMode,
+            replyCategory: body.replyCategory,
+            replyCategoryLabel: body.replyCategoryLabel,
+            requestedAction: body.requestedAction,
+            reactionName: body.reactionName
+          }
+        });
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId
+          });
+          return;
+        }
+        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('초안을 저장했습니다')}`);
+        return;
+      }
+
+      const codeReviewMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/code-review$/);
+      if (request.method === 'POST' && codeReviewMatch) {
+        const taskId = decodeURIComponent(codeReviewMatch[1]);
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        const started = await taskService.startSlackCodeReview(taskId, {});
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            started: started.started,
+            alreadyRunning: started.alreadyRunning,
+            status: started.detail.task.payload?.codeReview?.analysisStatus || ''
+          });
+          return;
+        }
+        const message = started.alreadyRunning
+          ? '코드 검토가 이미 실행 중입니다'
+          : '코드 검토를 시작했습니다. 코드검토 반영 초안은 별도 버튼으로 생성할 수 있습니다';
+        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent(message)}`);
+        return;
+      }
+
+      const approveMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/approve$/);
+      if (request.method === 'POST' && approveMatch) {
+        const taskId = decodeURIComponent(approveMatch[1]);
+        const detail = taskService.approveTask(taskId);
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status,
+            approvalState: detail.task.approval_state
+          });
+          return;
+        }
+        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('작업을 승인했습니다')}`);
+        return;
+      }
+
+      const ignoreMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/ignore$/);
+      if (request.method === 'POST' && ignoreMatch) {
+        const taskId = decodeURIComponent(ignoreMatch[1]);
+        const task = taskService.getTaskDetail(taskId).task;
+        const nextSlackTaskId = task.domain === 'slack_mention'
+          ? taskService.getNextPendingTaskId(taskId, { domain: 'slack_mention' })
+          : null;
+        const detail = taskService.ignoreTask(taskId);
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status
+          });
+          return;
+        }
+        if (task.domain === 'slack_mention') {
+          redirectToTaskOrList(response, nextSlackTaskId, '작업을 무시했습니다');
+          return;
+        }
+        redirect(response, `/tasks?message=${encodeURIComponent('작업을 무시했습니다')}`);
+        return;
+      }
+
+      const sendMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/send$/);
+      if (request.method === 'POST' && sendMatch) {
+        const taskId = decodeURIComponent(sendMatch[1]);
+        const body = await parseRequestBody(request);
+        const task = taskService.getTaskDetail(taskId).task;
+        const nextSlackTaskId = task.domain === 'slack_mention'
+          ? taskService.getNextPendingTaskId(taskId, { domain: 'slack_mention' })
+          : null;
+        taskService.saveDraft(taskId, {
+          content: body.draft,
+          summary: body.summary,
+          metadata: {
+            sendMode: body.sendMode,
+            replyCategory: body.replyCategory,
+            replyCategoryLabel: body.replyCategoryLabel,
+            requestedAction: body.requestedAction,
+            reactionName: body.reactionName
+          }
+        });
+        const detail = await taskService.executeTask(taskId, {
+          message: body.sendMode === 'reaction' ? '' : body.draft,
+          reactionName: body.sendMode === 'reaction' ? body.reactionName : '',
+          addReaction: body.sendMode === 'reaction'
+        });
+        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
+        if (prefersJson) {
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status
+          });
+          return;
+        }
+        if (task.domain === 'slack_mention') {
+          redirectToTaskOrList(response, nextSlackTaskId, '답변을 전송했습니다');
+          return;
+        }
+        redirect(response, `/tasks?message=${encodeURIComponent(task.domain === 'github_review' ? '리뷰 코멘트를 게시했습니다' : '답변을 전송했습니다')}`);
+        return;
+      }
+
+      sendHtml(response, 404, renderErrorPage({ title: '찾을 수 없음', message: '요청한 경로가 존재하지 않습니다.', query }));
+    } catch (error) {
+      const prefersJson = pathname.startsWith('/api/') || (request.headers.accept || '').includes('application/json');
+      if (prefersJson) {
+        sendJson(response, 500, {
+          ok: false,
+          error: error.message
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && pathname.startsWith('/tasks/')) {
+        const fallbackTarget = pathname.split('/').slice(0, 3).join('/');
+        redirect(response, `${fallbackTarget}?error=${encodeURIComponent(error.message)}`);
+        return;
+      }
+
+      sendHtml(response, 500, renderErrorPage({ title: '요청 실패', message: error.message, query }));
+    }
+  });
+}
