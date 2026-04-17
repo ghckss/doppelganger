@@ -36,7 +36,8 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   const [polishedTranscript, setPolishedTranscript] = useState('');
   const [documentText, setDocumentText] = useState('');
   const [summaryError, setSummaryError] = useState('');
-  const [copyNotice, setCopyNotice] = useState('');
+  const [transcriptCopyNotice, setTranscriptCopyNotice] = useState('');
+  const [documentCopyNotice, setDocumentCopyNotice] = useState('');
   const autoSummaryTriggeredRef = useRef(false);
 
   async function summarizeFromTranscript({
@@ -85,14 +86,16 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     setPolishedTranscript('');
     setDocumentText('');
     setSummaryError('');
-    setCopyNotice('');
+    setTranscriptCopyNotice('');
+    setDocumentCopyNotice('');
     autoSummaryTriggeredRef.current = false;
     recorder.resetSession();
     await recorder.start();
   }
 
   async function handleStopAndSummarize() {
-    setCopyNotice('');
+    setTranscriptCopyNotice('');
+    setDocumentCopyNotice('');
     const result = await recorder.stop();
     await summarizeFromTranscript({
       transcript: String(result?.transcript || ''),
@@ -101,15 +104,28 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     });
   }
 
+  async function handleCopyTranscript() {
+    const text = String(transcriptDisplayText || '').trim();
+    if (!text) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setTranscriptCopyNotice('전사 내용을 클립보드에 복사했습니다.');
+    } catch {
+      setTranscriptCopyNotice('복사에 실패했습니다. 브라우저 권한을 확인해 주세요.');
+    }
+  }
+
   async function handleCopyDocument() {
     if (!documentText.trim()) {
       return;
     }
     try {
       await navigator.clipboard.writeText(documentText);
-      setCopyNotice('문서를 클립보드에 복사했습니다.');
+      setDocumentCopyNotice('문서를 클립보드에 복사했습니다.');
     } catch {
-      setCopyNotice('복사에 실패했습니다. 브라우저 권한을 확인해 주세요.');
+      setDocumentCopyNotice('복사에 실패했습니다. 브라우저 권한을 확인해 주세요.');
     }
   }
 
@@ -191,13 +207,28 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
           <section className="grid gap-2 border-t border-dashed border-slate-300 pt-4">
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm font-semibold text-slate-900">실시간 전사</h4>
-              <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('meeting_transcript')}>
-                {collapsedSections.meeting_transcript ? '펼치기' : '접기'}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className={SUB_BUTTON_CLASS}
+                  onClick={() => void handleCopyTranscript()}
+                  disabled={!transcriptDisplayText.trim()}
+                >
+                  전사 복사
+                </button>
+                <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('meeting_transcript')}>
+                  {collapsedSections.meeting_transcript ? '펼치기' : '접기'}
+                </button>
+              </div>
             </div>
             {!collapsedSections.meeting_transcript && (
               transcriptDisplayText
-                ? <pre className="m-0 min-h-40 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptDisplayText}</pre>
+                ? (
+                  <>
+                    <pre className="m-0 min-h-40 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptDisplayText}</pre>
+                    {transcriptCopyNotice && <p className="text-xs text-slate-600">{transcriptCopyNotice}</p>}
+                  </>
+                )
                 : <p className={EMPTY_CLASS}>`시작`을 누르면 1초 단위로 전사 내용이 표시됩니다.</p>
             )}
           </section>
@@ -223,7 +254,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
                         <button type="button" className={BUTTON_CLASS} onClick={() => void handleCopyDocument()}>
                           문서 복사
                         </button>
-                        {copyNotice && <span className="text-xs text-slate-600">{copyNotice}</span>}
+                        {documentCopyNotice && <span className="text-xs text-slate-600">{documentCopyNotice}</span>}
                       </div>
                     </>
                   )
