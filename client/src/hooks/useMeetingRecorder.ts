@@ -18,6 +18,26 @@ function normalizeLine(value: string): string {
     .trim();
 }
 
+function mapRecognitionErrorMessage(errorCode: string): string {
+  const reason = normalizeLine(errorCode).toLowerCase();
+  if (reason === 'network') {
+    return '네트워크 연결 문제로 음성 인식이 중단되었습니다. 인터넷/VPN/방화벽 설정을 확인한 뒤 다시 시작해 주세요.';
+  }
+  if (reason === 'not-allowed' || reason === 'service-not-allowed') {
+    return '마이크 또는 음성 인식 권한이 거부되었습니다. 브라우저 권한 설정을 확인해 주세요.';
+  }
+  if (reason === 'audio-capture') {
+    return '마이크 장치를 찾지 못했습니다. 입력 장치 연결 상태를 확인해 주세요.';
+  }
+  if (reason === 'no-speech') {
+    return '음성이 감지되지 않았습니다. 마이크 입력 레벨을 확인해 주세요.';
+  }
+  if (!reason) {
+    return '음성 인식 중 오류가 발생했습니다.';
+  }
+  return `음성 인식 오류: ${reason}`;
+}
+
 function composeTranscript(finalLines: string[], interimLine: string): string {
   const sections = [...finalLines];
   if (interimLine) {
@@ -190,6 +210,11 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
       setError('이 브라우저는 음성 인식을 지원하지 않습니다.');
       return;
     }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setStatus('error');
+      setError('인터넷 연결이 없어 음성 인식을 시작할 수 없습니다. 연결 후 다시 시작해 주세요.');
+      return;
+    }
 
     stopTicker();
     teardownRecognition();
@@ -225,9 +250,9 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
     };
 
     recognition.onerror = (event) => {
-      const reason = normalizeLine(event?.error || '');
+      const reason = String(event?.error || '');
       setStatus('error');
-      setError(reason ? `음성 인식 오류: ${reason}` : '음성 인식 중 오류가 발생했습니다.');
+      setError(mapRecognitionErrorMessage(reason));
       stopTicker();
       teardownRecognition();
       stoppingRef.current = false;
