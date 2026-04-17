@@ -193,7 +193,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
             </div>
             {!collapsedSections.meeting_transcript && (
               transcriptText
-                ? <pre className="m-0 min-h-40 whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptText}</pre>
+                ? <pre className="m-0 min-h-40 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptText}</pre>
                 : <p className={EMPTY_CLASS}>`시작`을 누르면 1초 단위로 전사 내용이 표시됩니다.</p>
             )}
           </section>
