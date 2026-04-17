@@ -8,6 +8,18 @@ export type MeetingStopResult = {
   endedAt: string;
 } | null;
 
+type MeetingRecorderOptions = {
+  language?: string;
+  tickMs?: number;
+  maxResumeAttempts?: number;
+  resumeDelayMs?: number;
+};
+
+type CapturedEntry = {
+  capturedAt: string;
+  text: string;
+};
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -21,7 +33,7 @@ function normalizeLine(value: string): string {
 function mapRecognitionErrorMessage(errorCode: string): string {
   const reason = normalizeLine(errorCode).toLowerCase();
   if (reason === 'network') {
-    return '네트워크 연결 문제로 음성 인식이 중단되었습니다. 인터넷/VPN/방화벽 설정을 확인한 뒤 다시 시작해 주세요.';
+    return '네트워크 연결 문제로 음성 인식이 중단되었습니다. 인터넷/VPN/방화벽 설정을 확인한 뒤 다시 시도합니다.';
   }
   if (reason === 'not-allowed' || reason === 'service-not-allowed') {
     return '마이크 또는 음성 인식 권한이 거부되었습니다. 브라우저 권한 설정을 확인해 주세요.';
@@ -49,11 +61,6 @@ function composeTranscript(finalLines: string[], interimLine: string): string {
     .join('\n');
 }
 
-type CapturedEntry = {
-  capturedAt: string;
-  text: string;
-};
-
 function formatCapturedTime(isoString: string): string {
   const value = new Date(isoString);
   if (Number.isNaN(value.valueOf())) {
@@ -70,7 +77,12 @@ function renderCapturedTranscript(entries: CapturedEntry[]): string {
     .join('\n');
 }
 
-export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
+export function useMeetingRecorder({
+  language = 'ko-KR',
+  tickMs = 1000,
+  maxResumeAttempts = 3,
+  resumeDelayMs = 900
+}: MeetingRecorderOptions = {}) {
   const constructorRef = useMemo(() => {
     if (typeof window === 'undefined') {
       return null;
@@ -80,6 +92,7 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
 
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const tickTimerRef = useRef<number | null>(null);
+  const retryTimerRef = useRef<number | null>(null);
   const statusRef = useRef<MeetingRecorderStatus>('idle');
   const stoppingRef = useRef(false);
   const stopResolverRef = useRef<((value: MeetingStopResult) => void) | null>(null);
@@ -88,12 +101,34 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
   const interimLineRef = useRef('');
   const capturedEntriesRef = useRef<CapturedEntry[]>([]);
   const lastCapturedTextRef = useRef('');
+  const retryCountRef = useRef(0);
 
   const [status, setStatus] = useState<MeetingRecorderStatus>('idle');
   const [error, setError] = useState('');
   const [startedAt, setStartedAt] = useState('');
   const [endedAt, setEndedAt] = useState('');
   const [snapshotTranscript, setSnapshotTranscript] = useState('');
+  const [retryCount, setRetryCount] = useState(0);
+  const [shouldAutoSummarize, setShouldAutoSummarize] = useState(false);
+
+  function setRetryCountState(value: number) {
+    const normalized = Math.max(0, Math.trunc(Number(value) || 0));
+    retryCountRef.current = normalized;
+    setRetryCount(normalized);
+  }
+
+  function stopRetryTimer() {
+    if (!retryTimerRef.current) {
+      return;
+    }
+    window.clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
+  }
+
+  function resetRetryState() {
+    stopRetryTimer();
+    setRetryCountState(0);
+  }
 
   function syncCapturedTranscriptState() {
     setSnapshotTranscript(renderCapturedTranscript(capturedEntriesRef.current));
@@ -104,7 +139,6 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
     if (!normalized) {
       return;
     }
-
     if (!allowDuplicate && normalized === lastCapturedTextRef.current) {
       return;
     }
@@ -154,9 +188,10 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
 
   function finalizeStop() {
     stopTicker();
-    const composedTranscript = composeTranscript(finalLinesRef.current, interimLineRef.current);
+    stopRetryTimer();
     captureTranscriptLine(interimLineRef.current);
 
+    const composedTranscript = composeTranscript(finalLinesRef.current, interimLineRef.current);
     let finalTranscript = capturedEntriesRef.current
       .map((entry) => normalizeLine(entry.text))
       .filter(Boolean)
@@ -182,50 +217,52 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
       setSnapshotTranscript(finalTranscript);
     }
     setEndedAt(endedAtIso);
-    const result = {
+    return {
       transcript: finalTranscript,
       startedAt: startedAtRef.current,
       endedAt: endedAtIso
     };
-    return result;
   }
 
-  function resetSession() {
-    stopTicker();
-    finalLinesRef.current = [];
-    interimLineRef.current = '';
-    capturedEntriesRef.current = [];
-    lastCapturedTextRef.current = '';
-    startedAtRef.current = '';
-    setStartedAt('');
-    setEndedAt('');
-    setSnapshotTranscript('');
-    setError('');
-    setStatus('idle');
+  function scheduleResumeAttempt(message: string) {
+    const attempt = retryCountRef.current + 1;
+    if (attempt > maxResumeAttempts) {
+      return false;
+    }
+
+    setRetryCountState(attempt);
+    setStatus('recording');
+    setError(`${message} 연결 재개 시도 ${attempt}/${maxResumeAttempts}`);
+    stopRetryTimer();
+    retryTimerRef.current = window.setTimeout(() => {
+      void startRecognitionSession({ preserveSession: true });
+    }, Math.max(300, resumeDelayMs));
+    return true;
   }
 
-  async function start() {
+  async function startRecognitionSession({ preserveSession = false } = {}) {
     if (!constructorRef) {
       setStatus('error');
       setError('이 브라우저는 음성 인식을 지원하지 않습니다.');
       return;
     }
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      setStatus('error');
-      setError('인터넷 연결이 없어 음성 인식을 시작할 수 없습니다. 연결 후 다시 시작해 주세요.');
-      return;
-    }
 
-    stopTicker();
-    teardownRecognition();
+    stopRetryTimer();
     stopResolverRef.current = null;
-    finalLinesRef.current = [];
-    interimLineRef.current = '';
-    capturedEntriesRef.current = [];
-    lastCapturedTextRef.current = '';
-    setSnapshotTranscript('');
-    setEndedAt('');
-    setError('');
+    teardownRecognition();
+
+    if (!preserveSession) {
+      finalLinesRef.current = [];
+      interimLineRef.current = '';
+      capturedEntriesRef.current = [];
+      lastCapturedTextRef.current = '';
+      startedAtRef.current = '';
+      setStartedAt('');
+      setEndedAt('');
+      setSnapshotTranscript('');
+      resetRetryState();
+      setShouldAutoSummarize(false);
+    }
 
     const recognition = new constructorRef();
     recognition.continuous = true;
@@ -250,19 +287,27 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
     };
 
     recognition.onerror = (event) => {
-      const reason = String(event?.error || '');
-      setStatus('error');
-      setError(mapRecognitionErrorMessage(reason));
-      stopTicker();
+      if (stoppingRef.current) {
+        return;
+      }
+
       teardownRecognition();
+      const message = mapRecognitionErrorMessage(String(event?.error || ''));
+      if (scheduleResumeAttempt(message)) {
+        return;
+      }
+
+      setStatus('error');
+      setError(`${message} 연결 재개 시도 ${maxResumeAttempts}회 실패로 지금까지 기록한 내용으로 정리를 진행합니다.`);
+      setShouldAutoSummarize(true);
       stoppingRef.current = false;
       resolveStop(finalizeStop());
     };
 
     recognition.onend = () => {
-      const result = finalizeStop();
-      teardownRecognition();
       if (stoppingRef.current) {
+        const result = finalizeStop();
+        teardownRecognition();
         stoppingRef.current = false;
         setStatus('idle');
         resolveStop(result);
@@ -270,27 +315,90 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
       }
 
       if (statusRef.current === 'recording') {
+        teardownRecognition();
+        const message = '음성 인식 연결이 중간에 종료되었습니다.';
+        if (scheduleResumeAttempt(message)) {
+          return;
+        }
         setStatus('error');
-        setError('음성 인식이 중간에 종료되었습니다. 다시 시작해 주세요.');
+        setError(`${message} 연결 재개 시도 ${maxResumeAttempts}회 실패로 지금까지 기록한 내용으로 정리를 진행합니다.`);
+        setShouldAutoSummarize(true);
+        resolveStop(finalizeStop());
       }
     };
 
     recognitionRef.current = recognition;
-    const startedAtIso = nowIso();
-    startedAtRef.current = startedAtIso;
-    setStartedAt(startedAtIso);
+    if (!startedAtRef.current) {
+      const startedAtIso = nowIso();
+      startedAtRef.current = startedAtIso;
+      setStartedAt(startedAtIso);
+    }
+
     setStatus('recording');
     startTicker();
-
     try {
       recognition.start();
+      setError('');
+      if (preserveSession && retryCountRef.current > 0) {
+        setRetryCountState(0);
+      }
     } catch (caught) {
-      const message = normalizeLine((caught as Error)?.message || '');
-      setStatus('error');
-      setError(message || '음성 인식을 시작하지 못했습니다.');
-      stopTicker();
       teardownRecognition();
+      const message = normalizeLine((caught as Error)?.message || '') || '음성 인식을 시작하지 못했습니다.';
+      if (scheduleResumeAttempt(message)) {
+        return;
+      }
+      stopTicker();
+      setStatus('error');
+      setError(`${message} 연결 재개 시도 ${maxResumeAttempts}회 실패로 지금까지 기록한 내용으로 정리를 진행합니다.`);
+      setShouldAutoSummarize(true);
+      resolveStop(finalizeStop());
     }
+  }
+
+  function resetSession() {
+    stopTicker();
+    stopRetryTimer();
+    stopResolverRef.current = null;
+
+    const currentRecognition = recognitionRef.current;
+    teardownRecognition();
+    if (currentRecognition) {
+      try {
+        currentRecognition.abort();
+      } catch {
+        // Ignore abort errors during cleanup.
+      }
+    }
+
+    stoppingRef.current = false;
+    finalLinesRef.current = [];
+    interimLineRef.current = '';
+    capturedEntriesRef.current = [];
+    lastCapturedTextRef.current = '';
+    startedAtRef.current = '';
+    setStartedAt('');
+    setEndedAt('');
+    setSnapshotTranscript('');
+    setError('');
+    setShouldAutoSummarize(false);
+    resetRetryState();
+    setStatus('idle');
+  }
+
+  async function start() {
+    if (!constructorRef) {
+      setStatus('error');
+      setError('이 브라우저는 음성 인식을 지원하지 않습니다.');
+      return;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setStatus('error');
+      setError('인터넷 연결이 없어 음성 인식을 시작할 수 없습니다. 연결 후 다시 시작해 주세요.');
+      return;
+    }
+
+    await startRecognitionSession({ preserveSession: false });
   }
 
   async function stop(): Promise<MeetingStopResult> {
@@ -300,6 +408,7 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
 
     setStatus('stopping');
     stoppingRef.current = true;
+    stopRetryTimer();
 
     const recognition = recognitionRef.current;
     if (!recognition) {
@@ -338,13 +447,17 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
 
   useEffect(() => () => {
     stopTicker();
+    stopRetryTimer();
     stopResolverRef.current = null;
-    try {
-      recognitionRef.current?.abort();
-    } catch {
-      // Ignore abort errors during cleanup.
-    }
+    const currentRecognition = recognitionRef.current;
     teardownRecognition();
+    if (currentRecognition) {
+      try {
+        currentRecognition.abort();
+      } catch {
+        // Ignore abort errors during cleanup.
+      }
+    }
   }, []);
 
   return {
@@ -354,8 +467,12 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
     startedAt,
     endedAt,
     transcript: snapshotTranscript,
+    retryCount,
+    maxResumeAttempts,
+    shouldAutoSummarize,
     start,
     stop,
-    resetSession
+    resetSession,
+    clearAutoSummarizeRequest: () => setShouldAutoSummarize(false)
   };
 }

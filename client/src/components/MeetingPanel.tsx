@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { summarizeMeeting } from '../api';
 import { useMeetingRecorder } from '../hooks/useMeetingRecorder';
 import type { CollapsibleSectionId, CollapsibleState } from '../task-view';
@@ -36,22 +36,19 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   const [documentText, setDocumentText] = useState('');
   const [summaryError, setSummaryError] = useState('');
   const [copyNotice, setCopyNotice] = useState('');
+  const autoSummaryTriggeredRef = useRef(false);
 
-  async function handleStart() {
-    setSummaryStatus('idle');
-    setSummary('');
-    setDocumentText('');
-    setSummaryError('');
-    setCopyNotice('');
-    recorder.resetSession();
-    await recorder.start();
-  }
-
-  async function handleStopAndSummarize() {
-    setCopyNotice('');
-    const result = await recorder.stop();
-    const transcript = String(result?.transcript || '').trim();
-    if (!transcript) {
+  async function summarizeFromTranscript({
+    transcript,
+    startedAt,
+    endedAt
+  }: {
+    transcript: string;
+    startedAt: string;
+    endedAt: string;
+  }) {
+    const normalizedTranscript = String(transcript || '').trim();
+    if (!normalizedTranscript) {
       setSummaryStatus('error');
       setSummary('');
       setDocumentText('');
@@ -63,9 +60,9 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     setSummaryError('');
     try {
       const response = await summarizeMeeting({
-        transcript,
-        startedAt: result?.startedAt || recorder.startedAt || '',
-        endedAt: result?.endedAt || recorder.endedAt || '',
+        transcript: normalizedTranscript,
+        startedAt: startedAt || recorder.startedAt || '',
+        endedAt: endedAt || recorder.endedAt || '',
         language: 'ko-KR'
       });
       setSummary(response.summary || '');
@@ -80,6 +77,27 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     }
   }
 
+  async function handleStart() {
+    setSummaryStatus('idle');
+    setSummary('');
+    setDocumentText('');
+    setSummaryError('');
+    setCopyNotice('');
+    autoSummaryTriggeredRef.current = false;
+    recorder.resetSession();
+    await recorder.start();
+  }
+
+  async function handleStopAndSummarize() {
+    setCopyNotice('');
+    const result = await recorder.stop();
+    await summarizeFromTranscript({
+      transcript: String(result?.transcript || ''),
+      startedAt: result?.startedAt || recorder.startedAt || '',
+      endedAt: result?.endedAt || recorder.endedAt || ''
+    });
+  }
+
   async function handleCopyDocument() {
     if (!documentText.trim()) {
       return;
@@ -91,6 +109,30 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
       setCopyNotice('복사에 실패했습니다. 브라우저 권한을 확인해 주세요.');
     }
   }
+
+  useEffect(() => {
+    if (!recorder.shouldAutoSummarize) {
+      return;
+    }
+    if (summaryStatus === 'loading') {
+      return;
+    }
+    if (autoSummaryTriggeredRef.current) {
+      return;
+    }
+
+    autoSummaryTriggeredRef.current = true;
+    void summarizeFromTranscript({
+      transcript: recorder.transcript || '',
+      startedAt: recorder.startedAt || '',
+      endedAt: recorder.endedAt || new Date().toISOString()
+    }).finally(() => {
+      recorder.clearAutoSummarizeRequest();
+    });
+  }, [
+    recorder,
+    summaryStatus
+  ]);
 
   const transcriptText = recorder.transcript || '';
   const isRecording = recorder.status === 'recording';
@@ -122,6 +164,11 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
               상태: <strong>{mapRecorderStatusLabel(recorder.status)}</strong>
             </span>
             {isRecording && <span className="text-xs text-indigo-700">실시간 갱신: 1초</span>}
+            {recorder.retryCount > 0 && (
+              <span className="text-xs text-amber-700">
+                연결 재개 시도: {recorder.retryCount}/{recorder.maxResumeAttempts}
+              </span>
+            )}
           </div>
 
           {!recorder.isSupported && (
