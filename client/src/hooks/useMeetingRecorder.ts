@@ -29,6 +29,27 @@ function composeTranscript(finalLines: string[], interimLine: string): string {
     .join('\n');
 }
 
+type CapturedEntry = {
+  capturedAt: string;
+  text: string;
+};
+
+function formatCapturedTime(isoString: string): string {
+  const value = new Date(isoString);
+  if (Number.isNaN(value.valueOf())) {
+    return '';
+  }
+  return value.toLocaleTimeString('ko-KR', {
+    hour12: false
+  });
+}
+
+function renderCapturedTranscript(entries: CapturedEntry[]): string {
+  return entries
+    .map((entry) => `[${formatCapturedTime(entry.capturedAt)}] ${entry.text}`)
+    .join('\n');
+}
+
 export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
   const constructorRef = useMemo(() => {
     if (typeof window === 'undefined') {
@@ -45,12 +66,36 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
   const startedAtRef = useRef('');
   const finalLinesRef = useRef<string[]>([]);
   const interimLineRef = useRef('');
+  const capturedEntriesRef = useRef<CapturedEntry[]>([]);
+  const lastCapturedTextRef = useRef('');
 
   const [status, setStatus] = useState<MeetingRecorderStatus>('idle');
   const [error, setError] = useState('');
   const [startedAt, setStartedAt] = useState('');
   const [endedAt, setEndedAt] = useState('');
   const [snapshotTranscript, setSnapshotTranscript] = useState('');
+
+  function syncCapturedTranscriptState() {
+    setSnapshotTranscript(renderCapturedTranscript(capturedEntriesRef.current));
+  }
+
+  function captureTranscriptLine(value: string, { allowDuplicate = false } = {}) {
+    const normalized = normalizeLine(value);
+    if (!normalized) {
+      return;
+    }
+
+    if (!allowDuplicate && normalized === lastCapturedTextRef.current) {
+      return;
+    }
+
+    capturedEntriesRef.current.push({
+      capturedAt: nowIso(),
+      text: normalized
+    });
+    lastCapturedTextRef.current = normalized;
+    syncCapturedTranscriptState();
+  }
 
   function stopTicker() {
     if (!tickTimerRef.current) {
@@ -63,7 +108,7 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
   function startTicker() {
     stopTicker();
     tickTimerRef.current = window.setInterval(() => {
-      setSnapshotTranscript(composeTranscript(finalLinesRef.current, interimLineRef.current));
+      captureTranscriptLine(interimLineRef.current);
     }, Math.max(200, tickMs));
   }
 
@@ -89,9 +134,33 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
 
   function finalizeStop() {
     stopTicker();
-    const finalTranscript = composeTranscript(finalLinesRef.current, interimLineRef.current);
+    const composedTranscript = composeTranscript(finalLinesRef.current, interimLineRef.current);
+    captureTranscriptLine(interimLineRef.current);
+
+    let finalTranscript = capturedEntriesRef.current
+      .map((entry) => normalizeLine(entry.text))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+
+    if (!finalTranscript && composedTranscript) {
+      const lines = composedTranscript
+        .split('\n')
+        .map((line) => normalizeLine(line))
+        .filter(Boolean);
+      capturedEntriesRef.current = lines.map((line) => ({
+        capturedAt: nowIso(),
+        text: line
+      }));
+      lastCapturedTextRef.current = lines.length > 0 ? lines[lines.length - 1] : '';
+      finalTranscript = composedTranscript;
+      syncCapturedTranscriptState();
+    }
+
     const endedAtIso = nowIso();
-    setSnapshotTranscript(finalTranscript);
+    if (!capturedEntriesRef.current.length) {
+      setSnapshotTranscript(finalTranscript);
+    }
     setEndedAt(endedAtIso);
     const result = {
       transcript: finalTranscript,
@@ -105,6 +174,8 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
     stopTicker();
     finalLinesRef.current = [];
     interimLineRef.current = '';
+    capturedEntriesRef.current = [];
+    lastCapturedTextRef.current = '';
     startedAtRef.current = '';
     setStartedAt('');
     setEndedAt('');
@@ -125,6 +196,8 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
     stopResolverRef.current = null;
     finalLinesRef.current = [];
     interimLineRef.current = '';
+    capturedEntriesRef.current = [];
+    lastCapturedTextRef.current = '';
     setSnapshotTranscript('');
     setEndedAt('');
     setError('');
@@ -143,6 +216,7 @@ export function useMeetingRecorder({ language = 'ko-KR', tickMs = 1000 } = {}) {
         }
         if (event.results[index].isFinal) {
           finalLinesRef.current.push(transcript);
+          captureTranscriptLine(transcript);
           continue;
         }
         interimLine = transcript;
