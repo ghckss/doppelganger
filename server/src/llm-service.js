@@ -1617,6 +1617,119 @@ export class LlmService {
       return buildFallbackGitHubReview({ task, pullRequest, files });
     }
 
+    const instructions = [
+      '당신은 한국어로 GitHub Pull Request를 리뷰하는 시니어 엔지니어다.',
+      '항상 한국어로만 작성한다.',
+      '요약 나열이 아니라 실제 리뷰 판단을 내려야 한다.',
+      '버그, 회귀, 누락된 테스트, 명세 불일치, 중요한 코드 품질 이슈만 지적한다.',
+      '보안/성능/유지보수성 관점도 점검한다.',
+      '사소한 스타일 취향은 제외한다.',
+      'findings는 심각도 순으로 정리한다. (critical/high=🔴, medium=🟡, low=🟢)',
+      '파일 근거가 없는 "확인 불가/수동 확인 필요" 류의 일반 문구는 금지한다.',
+      '문제가 없으면 findings를 빈 배열로 두고 approval은 approved_with_no_changes로 둔다.',
+      '문제가 있으면 approval은 changes_requested로 두고 mustFix를 정확히 표시한다.',
+      'Return valid JSON only.',
+      'Use this JSON shape:',
+      '{"summary":"string","approval":"approved_with_no_changes|changes_requested","findings":[{"id":"string","severity":"critical|high|medium|low","category":"bug|regression|missing_test|design_gap|spec_mismatch|security|performance|maintainability|code_quality","title":"string","description":"string","fileRefs":["string"],"suggestedFix":"string","mustFix":true}]}',
+      'Do not include markdown fences or any extra prose.'
+    ].join(' ');
+
+    const runReviewGeneration = async ({ compactContext = false, forceCliAgentProvider = '' } = {}) => {
+      const contextFiles = compactContext ? safeArray(files).slice(0, 8) : safeArray(files);
+      const input = [
+        `Task title: ${task.title}`,
+        `Repository: ${pullRequest.repoSlug}`,
+        `Pull request: #${pullRequest.number} ${pullRequest.title}`,
+        `Author: ${pullRequest.author}`,
+        `Base: ${pullRequest.baseRef}`,
+        `Head: ${pullRequest.headRef} (${pullRequest.headSha})`,
+        `Changed files: ${files.length}`,
+        `Review context files: ${contextFiles.length}`,
+        compactContext ? 'Note: timeout 방지를 위해 변경 파일 일부와 축약 패치로 재시도 중입니다.' : '',
+        `PR body: ${String(pullRequest.body || '').trim() || '(empty)'}`,
+        'Changed file patches:',
+        buildPullRequestTranscript(contextFiles, {
+          maxFiles: compactContext ? 8 : 20,
+          patchMaxLength: compactContext ? 700 : 1400
+        })
+      ].filter(Boolean).join('\n\n');
+
+      let response;
+      if (forceCliAgentProvider) {
+        const cliClient = this.generationClient?.cliClient;
+        if (!cliClient?.isConfigured?.()) {
+          throw new Error('CLI 생성기가 설정되지 않았습니다');
+        }
+        const cliGenerated = await cliClient.createTextResponse({
+          instructions,
+          input,
+          agentProvider: forceCliAgentProvider,
+          scope: 'github_review'
+        });
+        const resolvedCliProvider = normalizeWhitespace(cliGenerated?.provider) || forceCliAgentProvider;
+        response = {
+          text: String(cliGenerated?.text || ''),
+          provider: `cli:${resolvedCliProvider}`,
+          agentProvider: resolvedCliProvider
+        };
+      } else {
+        response = await this.generationClient.createTextResponse({
+          instructions,
+          input,
+          scope: 'github_review',
+          agentProvider: agentProvider || task.payload?.generationAgentProvider || ''
+        });
+      }
+      const generated = extractTextResponse(response);
+      const parsed = extractJsonObject(generated.text);
+      const findings = safeArray(parsed.findings).map(normalizeFinding);
+      const approval = parsed.approval === 'changes_requested' ? 'changes_requested' : 'approved_with_no_changes';
+      const summary = normalizeWhitespace(parsed.summary);
+
+      return {
+        summary,
+        approval,
+        findings,
+        reviewBody: formatGitHubReviewBody({
+          summary,
+          findings
+        }),
+        evidenceLinks: resolveGitHubEvidenceLinks({
+          pullRequest,
+          files: contextFiles,
+          findings
+        }),
+        provider: generated.provider,
+        agentProvider: generated.agentProvider || '',
+        usedCompactContext: compactContext
+      };
+    };
+
+    const runReviewGenerationWithRetry = async ({ forceCliAgentProvider = '' } = {}) => {
+      try {
+        const primary = await runReviewGeneration({
+          compactContext: false,
+          forceCliAgentProvider
+        });
+        return {
+          ...primary,
+          usedCompactContext: undefined
+        };
+      } catch (error) {
+        if (isGenerationTimeoutError(error)) {
+          const compact = await runReviewGeneration({
+            compactContext: true,
+            forceCliAgentProvider
+          });
+          return {
+            ...compact,
+            usedCompactContext: undefined
+          };
+        }
+        throw error;
+      }
+    };
+
     if (generationMode === 'external' || generationMode === 'hovis') {
       try {
         const response = await this.generationClient.createTextResponse({
@@ -1645,107 +1758,26 @@ export class LlmService {
           agentProvider: ''
         };
       } catch (error) {
-        return buildFallbackGitHubReview({
-          task,
-          pullRequest,
-          files,
-          errorMessage: error.message
-        });
-      }
-    }
-
-    const instructions = [
-      '당신은 한국어로 GitHub Pull Request를 리뷰하는 시니어 엔지니어다.',
-      '항상 한국어로만 작성한다.',
-      '요약 나열이 아니라 실제 리뷰 판단을 내려야 한다.',
-      '버그, 회귀, 누락된 테스트, 명세 불일치, 중요한 코드 품질 이슈만 지적한다.',
-      '보안/성능/유지보수성 관점도 점검한다.',
-      '사소한 스타일 취향은 제외한다.',
-      'findings는 심각도 순으로 정리한다. (critical/high=🔴, medium=🟡, low=🟢)',
-      '파일 근거가 없는 "확인 불가/수동 확인 필요" 류의 일반 문구는 금지한다.',
-      '문제가 없으면 findings를 빈 배열로 두고 approval은 approved_with_no_changes로 둔다.',
-      '문제가 있으면 approval은 changes_requested로 두고 mustFix를 정확히 표시한다.',
-      'Return valid JSON only.',
-      'Use this JSON shape:',
-      '{"summary":"string","approval":"approved_with_no_changes|changes_requested","findings":[{"id":"string","severity":"critical|high|medium|low","category":"bug|regression|missing_test|design_gap|spec_mismatch|security|performance|maintainability|code_quality","title":"string","description":"string","fileRefs":["string"],"suggestedFix":"string","mustFix":true}]}',
-      'Do not include markdown fences or any extra prose.'
-    ].join(' ');
-
-    const runReviewGeneration = async ({ compactContext = false } = {}) => {
-      const contextFiles = compactContext ? safeArray(files).slice(0, 8) : safeArray(files);
-      const input = [
-        `Task title: ${task.title}`,
-        `Repository: ${pullRequest.repoSlug}`,
-        `Pull request: #${pullRequest.number} ${pullRequest.title}`,
-        `Author: ${pullRequest.author}`,
-        `Base: ${pullRequest.baseRef}`,
-        `Head: ${pullRequest.headRef} (${pullRequest.headSha})`,
-        `Changed files: ${files.length}`,
-        `Review context files: ${contextFiles.length}`,
-        compactContext ? 'Note: timeout 방지를 위해 변경 파일 일부와 축약 패치로 재시도 중입니다.' : '',
-        `PR body: ${String(pullRequest.body || '').trim() || '(empty)'}`,
-        'Changed file patches:',
-        buildPullRequestTranscript(contextFiles, {
-          maxFiles: compactContext ? 8 : 20,
-          patchMaxLength: compactContext ? 700 : 1400
-        })
-      ].filter(Boolean).join('\n\n');
-
-      const response = await this.generationClient.createTextResponse({
-        instructions,
-        input,
-        scope: 'github_review',
-        agentProvider: agentProvider || task.payload?.generationAgentProvider || ''
-      });
-      const generated = extractTextResponse(response);
-      const parsed = extractJsonObject(generated.text);
-      const findings = safeArray(parsed.findings).map(normalizeFinding);
-      const approval = parsed.approval === 'changes_requested' ? 'changes_requested' : 'approved_with_no_changes';
-      const summary = normalizeWhitespace(parsed.summary);
-
-      return {
-        summary,
-        approval,
-        findings,
-        reviewBody: formatGitHubReviewBody({
-          summary,
-          findings
-        }),
-        evidenceLinks: resolveGitHubEvidenceLinks({
-          pullRequest,
-          files: contextFiles,
-          findings
-        }),
-        provider: generated.provider,
-        agentProvider: generated.agentProvider || '',
-        usedCompactContext: compactContext
-      };
-    };
-
-    try {
-      const primary = await runReviewGeneration({ compactContext: false });
-      return {
-        ...primary,
-        usedCompactContext: undefined
-      };
-    } catch (error) {
-      if (isGenerationTimeoutError(error)) {
+        const externalErrorMessage = normalizeWhitespace(error?.message || '외부 에이전트 리뷰 생성 실패');
         try {
-          const compact = await runReviewGeneration({ compactContext: true });
-          return {
-            ...compact,
-            usedCompactContext: undefined
-          };
-        } catch (retryError) {
+          const codexFallback = await runReviewGenerationWithRetry({
+            forceCliAgentProvider: 'codex'
+          });
+          return codexFallback;
+        } catch (cliFallbackError) {
           return buildFallbackGitHubReview({
             task,
             pullRequest,
             files,
-            errorMessage: retryError.message
+            errorMessage: `${externalErrorMessage} / codex fallback failed: ${cliFallbackError.message}`
           });
         }
       }
+    }
 
+    try {
+      return await runReviewGenerationWithRetry();
+    } catch (error) {
       return buildFallbackGitHubReview({
         task,
         pullRequest,

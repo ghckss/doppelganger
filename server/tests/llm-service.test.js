@@ -662,6 +662,73 @@ test('LlmService stores raw external-agent review output as GitHub review body',
   assert.equal(result.findings.length, 0);
 });
 
+test('LlmService falls back to cli codex review generation when external github review fails', async () => {
+  let externalCallCount = 0;
+  let cliCallCount = 0;
+  const service = new LlmService({
+    getMode: () => 'external',
+    isConfigured: () => true,
+    createTextResponse: async () => {
+      externalCallCount += 1;
+      throw new Error('external provider failed');
+    },
+    cliClient: {
+      isConfigured: () => true,
+      createTextResponse: async ({ agentProvider, scope }) => {
+        cliCallCount += 1;
+        assert.equal(agentProvider, 'codex');
+        assert.equal(scope, 'github_review');
+        return {
+          text: JSON.stringify({
+            summary: '외부 제공자 실패 후 Codex로 리뷰를 생성했습니다.',
+            approval: 'approved_with_no_changes',
+            findings: []
+          }),
+          provider: 'codex'
+        };
+      }
+    }
+  });
+
+  const result = await service.generateGitHubReview({
+    task: {
+      title: 'GitHub review task',
+      payload: {
+        repoSlug: 'acme/demo',
+        pullNumber: 23,
+        sourceUrl: 'https://github.com/acme/demo/pull/23'
+      }
+    },
+    pullRequest: {
+      repoSlug: 'acme/demo',
+      number: 23,
+      title: 'Payment flow refactor',
+      author: 'author',
+      baseRef: 'main',
+      headRef: 'feature',
+      headSha: 'abc123',
+      htmlUrl: 'https://github.com/acme/demo/pull/23'
+    },
+    files: [
+      {
+        path: 'src/payment.ts',
+        status: 'modified',
+        additions: 4,
+        deletions: 2,
+        patch: '@@ -1 +1 @@\n-const a = 1;\n+const a = 2;'
+      }
+    ]
+  });
+
+  assert.equal(externalCallCount, 1);
+  assert.equal(cliCallCount, 1);
+  assert.equal(result.provider, 'cli:codex');
+  assert.equal(result.agentProvider, 'codex');
+  assert.equal(result.approval, 'approved_with_no_changes');
+  assert.equal(result.findings.length, 0);
+  assert.match(result.summary, /Codex/);
+});
+
 test('LlmService retries GitHub review generation with compact context on timeout', async () => {
   let callCount = 0;
   const service = new LlmService({
