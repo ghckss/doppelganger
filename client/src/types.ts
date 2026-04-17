@@ -86,3 +86,18 @@ export type MetaResponse = {
   projectsRoot: string;
   defaultAgentProvider: string;
 };
+
+export type MeetingSummaryRequest = {
+  transcript: string;
+  startedAt: string;
+  endedAt: string;
+  language: 'ko-KR';
+};
+
+export type MeetingSummaryResponse = {
+  ok: boolean;
+  summary: string;
+  document: string;
+  provider?: string;
+  agentProvider?: string;
+};

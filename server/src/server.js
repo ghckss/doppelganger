@@ -209,7 +209,7 @@ function redirectToTaskOrList(response, nextTaskId, message) {
   redirect(response, `/tasks?message=${encodeURIComponent(message)}`);
 }
 
-export function createHttpServer({ cwd, taskService }) {
+export function createHttpServer({ cwd, taskService, llmService }) {
   const allowedCorsOrigins = buildAllowedCorsOrigins(taskService?.config || {});
 
   return http.createServer(async (request, response) => {
@@ -247,6 +247,38 @@ export function createHttpServer({ cwd, taskService }) {
 
       if (request.method === 'GET' && pathname === '/healthz') {
         sendJson(response, 200, { ok: true, uptimeSeconds: Math.round(process.uptime()) });
+        return;
+      }
+
+      if (request.method === 'POST' && pathname === '/api/meetings/summarize') {
+        const body = await parseRequestBody(request);
+        const transcript = String(body.transcript || '').trim();
+        if (!transcript) {
+          sendJson(response, 400, {
+            ok: false,
+            error: '회의 전사 내용이 필요합니다'
+          });
+          return;
+        }
+
+        if (!llmService?.generateMeetingSummary) {
+          throw new Error('회의 정리 서비스를 사용할 수 없습니다');
+        }
+
+        const result = await llmService.generateMeetingSummary({
+          transcript,
+          startedAt: String(body.startedAt || '').trim(),
+          endedAt: String(body.endedAt || '').trim(),
+          language: String(body.language || 'ko-KR').trim() || 'ko-KR'
+        });
+
+        sendJson(response, 200, {
+          ok: true,
+          summary: result.summary,
+          document: result.document,
+          provider: result.provider,
+          agentProvider: result.agentProvider || ''
+        });
         return;
       }
 

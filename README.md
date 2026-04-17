@@ -12,6 +12,7 @@ Current state:
 - Slack mention detail supports optional manual repository analysis for deeper replies, while default polling/drafting does not inspect repositories.
 - GitHub PR review is implemented for configured repositories, with open PR candidate polling, draft PR skip, duplicate-review skip, and manual selection from the web UI before posting comments.
 - Local code execution is implemented with prompt planning, optional planning/design phases, coding, review loops, and PR creation.
+- Meeting recording is implemented in the React UI with Korean real-time transcript capture (1s refresh) and Confluence paste-ready summary document generation.
 
 ## Requirements
 - Node.js 22+
@@ -71,6 +72,17 @@ A practical setup is often:
 - Slack/GitHub/코드작업 상세에는 실행 이력을 시간순으로 확인할 수 있는 `작업 타임라인` 섹션이 제공됩니다.
 - Slack 답변 전송 시 사용자가 최종 수정한 본문이 로컬 스타일 메모리에 누적되고, 이후 초안 생성 프롬프트에 반영되어 어투/문장 길이/표현 습관을 점진적으로 맞춥니다.
 
+## Meeting recording workflow
+1. Open the `회의 기록` panel in `/app`.
+2. Click `시작` to begin browser speech recognition (`ko-KR`).
+3. During recording, transcript updates every second in `실시간 전사`.
+4. Click `중지` to stop recording and generate the Confluence draft automatically.
+5. Review `Confluence 문서 초안` and click `문서 복사` to paste into Confluence.
+
+Notes:
+- Transcript and generated document are session-local UI state (not persisted to DB).
+- Browser speech recognition support is required (Chrome-family recommended).
+
 ## Scripts
 - `npm start`: run the HTTP server
 - `npm run dev`: run the HTTP server with watch mode
@@ -87,6 +99,7 @@ A practical setup is often:
   - `SLACK_GENERATION_PROVIDER`, `SLACK_GENERATION_AGENT_PROVIDER`
   - `GITHUB_REVIEW_PROVIDER`, `GITHUB_REVIEW_AGENT_PROVIDER`
   - `CODE_PLANNING_PROVIDER`, `CODE_PLANNING_AGENT_PROVIDER`
+  - `MEETING_NOTES_PROVIDER`, `MEETING_NOTES_AGENT_PROVIDER`
 - `EXTERNAL_AGENT_COMMAND` sets the external-agent review CLI executable.
   - 실행 방식은 `pr` 서브커맨드를 호출하고 PR URL을 stdin으로 전달합니다.
 - `GENERATION_TIMEOUT_SECONDS` controls CLI generation timeout (default: 90s)
@@ -95,6 +108,7 @@ A practical setup is often:
   - `SLACK_GENERATION_TIMEOUT_SECONDS`
   - `GITHUB_REVIEW_TIMEOUT_SECONDS`
   - `CODE_PLANNING_TIMEOUT_SECONDS`
+  - `MEETING_NOTES_TIMEOUT_SECONDS`
   - Set any of them to `0` to disable timeout for that scope only
 
 ## GitHub review workflow

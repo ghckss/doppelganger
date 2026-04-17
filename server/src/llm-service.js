@@ -584,6 +584,178 @@ function buildFallbackGitHubReview({ task, pullRequest, files, errorMessage = ''
   };
 }
 
+function escapeMarkdownTableCell(value) {
+  return String(value || '')
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, ' ')
+    .trim();
+}
+
+function normalizeMeetingList(values, { fallback = [], maxItems = 10, maxLength = 220 } = {}) {
+  const normalized = safeArray(values)
+    .map((value) => truncateText(normalizeWhitespace(value), maxLength))
+    .filter(Boolean);
+  if (normalized.length > 0) {
+    return normalized.slice(0, maxItems);
+  }
+  return safeArray(fallback).slice(0, maxItems);
+}
+
+function normalizeMeetingActionItems(values, { maxItems = 12 } = {}) {
+  const normalized = safeArray(values)
+    .map((item) => ({
+      task: truncateText(normalizeWhitespace(item?.task), 240),
+      owner: truncateText(normalizeWhitespace(item?.owner), 80),
+      due: truncateText(normalizeWhitespace(item?.due), 80),
+      status: truncateText(normalizeWhitespace(item?.status), 80)
+    }))
+    .filter((item) => item.task)
+    .slice(0, maxItems)
+    .map((item) => ({
+      task: item.task,
+      owner: item.owner || '미확정',
+      due: item.due || '미확정',
+      status: item.status || '미확정'
+    }));
+
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return [{
+    task: '추가 액션 아이템 확인 필요',
+    owner: '미확정',
+    due: '미확정',
+    status: '미확정'
+  }];
+}
+
+function formatMeetingDocument({
+  title,
+  summary,
+  keyPoints,
+  decisions,
+  actionItems,
+  openIssues,
+  notes,
+  startedAt,
+  endedAt,
+  language
+}) {
+  const output = [];
+  output.push(`# ${title}`);
+  output.push('');
+  output.push('## 회의 개요');
+  output.push(summary || '회의 개요가 제공되지 않았습니다.');
+  output.push('');
+  output.push(`- 언어: ${language || 'ko-KR'}`);
+  if (startedAt) {
+    output.push(`- 시작 시각: ${startedAt}`);
+  }
+  if (endedAt) {
+    output.push(`- 종료 시각: ${endedAt}`);
+  }
+  output.push('');
+  output.push('## 핵심 논의');
+  if (keyPoints.length === 0) {
+    output.push('- 핵심 논의 정리가 필요합니다.');
+  } else {
+    keyPoints.forEach((item) => output.push(`- ${item}`));
+  }
+  output.push('');
+  output.push('## 결정 사항');
+  if (decisions.length === 0) {
+    output.push('- 확정된 결정 사항이 없습니다.');
+  } else {
+    decisions.forEach((item) => output.push(`- ${item}`));
+  }
+  output.push('');
+  output.push('## 액션 아이템');
+  output.push('| 액션 | 담당자 | 기한 | 상태 |');
+  output.push('| --- | --- | --- | --- |');
+  actionItems.forEach((item) => {
+    output.push(`| ${escapeMarkdownTableCell(item.task)} | ${escapeMarkdownTableCell(item.owner)} | ${escapeMarkdownTableCell(item.due)} | ${escapeMarkdownTableCell(item.status)} |`);
+  });
+  output.push('');
+  output.push('## 미해결 이슈');
+  if (openIssues.length === 0) {
+    output.push('- 미해결 이슈 없음');
+  } else {
+    openIssues.forEach((item) => output.push(`- ${item}`));
+  }
+  output.push('');
+  output.push('## 원문 기반 참고 메모');
+  if (notes.length === 0) {
+    output.push('- 추가 메모 없음');
+  } else {
+    notes.forEach((item) => output.push(`- ${item}`));
+  }
+  return output.join('\n').trim();
+}
+
+function buildFallbackMeetingSummary({
+  transcript,
+  startedAt,
+  endedAt,
+  language = 'ko-KR',
+  errorMessage = ''
+}) {
+  const transcriptLines = String(transcript || '')
+    .split(/\r?\n/)
+    .map((line) => truncateText(normalizeWhitespace(line), 220))
+    .filter(Boolean);
+  const title = startedAt ? `회의 기록 (${String(startedAt).slice(0, 10)})` : '회의 기록';
+  const summary = transcriptLines.length > 0
+    ? truncateText(transcriptLines.slice(0, 2).join(' / '), 220)
+    : '회의 전사 원문을 바탕으로 정리가 필요합니다.';
+  const keyPoints = normalizeMeetingList(transcriptLines, {
+    fallback: ['전사 원문에서 핵심 논의를 수동 확인해 주세요.'],
+    maxItems: 8,
+    maxLength: 220
+  });
+  const decisions = normalizeMeetingList(
+    transcriptLines.filter((line) => /(결정|합의|확정|정한다|하기로|로 한다)/.test(line)),
+    { fallback: ['결정 사항 확인 필요'], maxItems: 6, maxLength: 220 }
+  );
+  const openIssues = normalizeMeetingList(
+    transcriptLines.filter((line) => /(확인 필요|미정|이슈|리스크|쟁점|추가 논의)/.test(line)),
+    { fallback: ['미해결 이슈 정리 필요'], maxItems: 6, maxLength: 220 }
+  );
+  const actionItems = normalizeMeetingActionItems(
+    transcriptLines
+      .filter((line) => /(TODO|할 일|액션|담당|기한|까지|공유|준비|진행)/i.test(line))
+      .map((line) => ({ task: line, owner: '미확정', due: '미확정', status: '미확정' })),
+    { maxItems: 8 }
+  );
+  const notes = normalizeMeetingList([
+    errorMessage ? `자동 생성 오류로 fallback 문서를 제공했습니다: ${truncateText(errorMessage, 120)}` : '',
+    transcriptLines.length > 0 ? '원문 주요 문장을 기반으로 임시 정리했습니다.' : ''
+  ], {
+    fallback: ['원문 추가 확인 필요'],
+    maxItems: 4,
+    maxLength: 220
+  });
+  const document = formatMeetingDocument({
+    title,
+    summary,
+    keyPoints,
+    decisions,
+    actionItems,
+    openIssues,
+    notes,
+    startedAt,
+    endedAt,
+    language
+  });
+
+  return {
+    title,
+    summary,
+    document,
+    provider: errorMessage ? `fallback:${errorMessage}` : 'fallback',
+    agentProvider: ''
+  };
+}
+
 function isGenerationTimeoutError(error) {
   return /(제한 시간을 초과|timeout|timed out)/i.test(String(error?.message || ''));
 }
@@ -1579,6 +1751,112 @@ export class LlmService {
         pullRequest,
         files,
         errorMessage: error.message
+      });
+    }
+  }
+
+  async generateMeetingSummary({ transcript, startedAt, endedAt, language = 'ko-KR', agentProvider = '' }) {
+    const normalizedTranscript = String(transcript || '').trim();
+    const normalizedStartedAt = normalizeWhitespace(startedAt);
+    const normalizedEndedAt = normalizeWhitespace(endedAt);
+    const normalizedLanguage = normalizeWhitespace(language) || 'ko-KR';
+    const fallbackSummary = buildFallbackMeetingSummary({
+      transcript: normalizedTranscript,
+      startedAt: normalizedStartedAt,
+      endedAt: normalizedEndedAt,
+      language: normalizedLanguage
+    });
+
+    if (!normalizedTranscript) {
+      return {
+        ...fallbackSummary,
+        summary: '회의 전사 내용이 비어 있습니다.'
+      };
+    }
+
+    if (resolveGenerationMode(this.generationClient, 'meeting_notes') === 'fallback') {
+      return fallbackSummary;
+    }
+
+    const instructions = [
+      '당신은 한국어 회의록을 Confluence 문서로 정리하는 비서다.',
+      '항상 한국어로 작성한다.',
+      '전사 원문에 없는 사실은 추정하지 않는다. 불명확하면 "미확정"으로 둔다.',
+      '비개발자도 이해 가능한 쉬운 문장으로 정리한다.',
+      '출력은 반드시 JSON 객체 하나로만 반환한다.',
+      '액션 아이템은 task/owner/due/status 필드를 모두 채운다. 모르면 "미확정".',
+      'Use this JSON shape:',
+      '{"title":"string","summary":"string","keyPoints":["string"],"decisions":["string"],"actionItems":[{"task":"string","owner":"string","due":"string","status":"string"}],"openIssues":["string"],"notes":["string"]}',
+      'Do not include markdown fences or any extra prose.'
+    ].join(' ');
+
+    const input = [
+      `Language: ${normalizedLanguage}`,
+      `Started at: ${normalizedStartedAt || '(unknown)'}`,
+      `Ended at: ${normalizedEndedAt || '(unknown)'}`,
+      'Transcript:',
+      normalizedTranscript
+    ].join('\n\n');
+
+    try {
+      const response = await this.generationClient.createTextResponse({
+        instructions,
+        input,
+        scope: 'meeting_notes',
+        agentProvider
+      });
+      const generated = extractTextResponse(response);
+      const parsed = extractJsonObject(generated.text);
+      const title = truncateText(normalizeWhitespace(parsed.title) || fallbackSummary.title, 120);
+      const summary = truncateText(normalizeWhitespace(parsed.summary) || fallbackSummary.summary, 260);
+      const keyPoints = normalizeMeetingList(parsed.keyPoints, {
+        fallback: fallbackSummary.document ? [] : ['핵심 논의 정리 필요'],
+        maxItems: 10,
+        maxLength: 220
+      });
+      const decisions = normalizeMeetingList(parsed.decisions, {
+        fallback: ['확정된 결정 사항이 없습니다.'],
+        maxItems: 8,
+        maxLength: 220
+      });
+      const actionItems = normalizeMeetingActionItems(parsed.actionItems, {
+        maxItems: 12
+      });
+      const openIssues = normalizeMeetingList(parsed.openIssues, {
+        fallback: ['미해결 이슈 확인 필요'],
+        maxItems: 8,
+        maxLength: 220
+      });
+      const notes = normalizeMeetingList(parsed.notes, {
+        fallback: ['원문 기반으로 확인된 추가 메모 없음'],
+        maxItems: 6,
+        maxLength: 220
+      });
+
+      return {
+        summary,
+        document: formatMeetingDocument({
+          title,
+          summary,
+          keyPoints,
+          decisions,
+          actionItems,
+          openIssues,
+          notes,
+          startedAt: normalizedStartedAt,
+          endedAt: normalizedEndedAt,
+          language: normalizedLanguage
+        }),
+        provider: generated.provider,
+        agentProvider: generated.agentProvider || ''
+      };
+    } catch (error) {
+      return buildFallbackMeetingSummary({
+        transcript: normalizedTranscript,
+        startedAt: normalizedStartedAt,
+        endedAt: normalizedEndedAt,
+        language: normalizedLanguage,
+        errorMessage: error?.message || '회의 정리 생성 실패'
       });
     }
   }

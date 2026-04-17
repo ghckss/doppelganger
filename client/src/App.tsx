@@ -9,6 +9,7 @@ import {
 } from './api';
 import { CodeExecutionPanel } from './components/CodeExecutionPanel';
 import { GitHubPanel } from './components/GitHubPanel';
+import { MeetingPanel } from './components/MeetingPanel';
 import { SlackPanel } from './components/SlackPanel';
 import { BUTTON_CLASS } from './components/common';
 import type { TaskDetail } from './types';
@@ -47,6 +48,9 @@ export default function App() {
   const [needsDesign, setNeedsDesign] = useState(false);
   const [metaInitialized, setMetaInitialized] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<CollapsibleState>({
+    panel_meeting: false,
+    meeting_transcript: false,
+    meeting_document: false,
     panel_slack: false,
     panel_github: false,
     panel_code: false,
@@ -325,6 +329,11 @@ export default function App() {
         </header>
 
         <main className="flex flex-col gap-5 pb-4">
+          <MeetingPanel
+            collapsedSections={collapsedSections}
+            onToggleSection={toggleSection}
+          />
+
           <SlackPanel
             tasks={slackTasks}
             selectedTaskId={selectedSlackTaskId}

@@ -784,3 +784,79 @@ test('LlmService formats GitHub review body with summary and severity-separated 
   assert.doesNotMatch(result.reviewBody, /## 주요 변경사항/);
   assert.doesNotMatch(result.reviewBody, /## 잔여 리스크/);
 });
+
+test('LlmService generates Confluence-ready meeting document from transcript', async () => {
+  const service = new LlmService({
+    getMode: () => 'cli',
+    isConfigured: () => true,
+    createTextResponse: async () => ({
+      text: JSON.stringify({
+        title: '2026-04-17 주간 운영 회의',
+        summary: '신규 결제 화면 일정과 QA 일정 조정이 핵심 안건이었습니다.',
+        keyPoints: [
+          '결제 화면 개발은 4월 24일까지 완료 목표로 공유됨',
+          'QA 시작일은 4월 26일로 조정하기로 논의됨'
+        ],
+        decisions: [
+          '결제 화면 디자인 반영 범위를 이번 주 안에 확정한다'
+        ],
+        actionItems: [
+          {
+            task: '결제 화면 QA 테스트 케이스 정리',
+            owner: '지민',
+            due: '2026-04-23',
+            status: '진행 예정'
+          }
+        ],
+        openIssues: [
+          '모바일 결제 예외 케이스 범위는 추가 확인 필요'
+        ],
+        notes: [
+          '원문 기준으로 일정 관련 발언이 가장 빈도가 높았습니다.'
+        ]
+      }),
+      provider: 'cli:codex',
+      agentProvider: 'codex'
+    })
+  });
+
+  const result = await service.generateMeetingSummary({
+    transcript: '회의 원문',
+    startedAt: '2026-04-17T10:00:00.000Z',
+    endedAt: '2026-04-17T10:40:00.000Z',
+    language: 'ko-KR'
+  });
+
+  assert.equal(result.provider, 'cli:codex');
+  assert.equal(result.agentProvider, 'codex');
+  assert.match(result.summary, /핵심 안건/);
+  assert.match(result.document, /^# 2026-04-17 주간 운영 회의/m);
+  assert.match(result.document, /## 액션 아이템/);
+  assert.match(result.document, /\| 액션 \| 담당자 \| 기한 \| 상태 \|/);
+  assert.match(result.document, /\| 결제 화면 QA 테스트 케이스 정리 \| 지민 \| 2026-04-23 \| 진행 예정 \|/);
+});
+
+test('LlmService falls back to deterministic meeting document on generation error', async () => {
+  const service = new LlmService({
+    getMode: () => 'cli',
+    isConfigured: () => true,
+    createTextResponse: async () => {
+      throw new Error('generation failed');
+    }
+  });
+
+  const result = await service.generateMeetingSummary({
+    transcript: '결제 일정은 다음 주로 조정합니다.\nQA 담당은 확정이 필요합니다.',
+    startedAt: '2026-04-17T10:00:00.000Z',
+    endedAt: '2026-04-17T10:20:00.000Z',
+    language: 'ko-KR'
+  });
+
+  assert.match(result.provider, /^fallback:/);
+  assert.match(result.document, /## 회의 개요/);
+  assert.match(result.document, /## 핵심 논의/);
+  assert.match(result.document, /## 결정 사항/);
+  assert.match(result.document, /## 액션 아이템/);
+  assert.match(result.document, /## 미해결 이슈/);
+  assert.match(result.document, /## 원문 기반 참고 메모/);
+});

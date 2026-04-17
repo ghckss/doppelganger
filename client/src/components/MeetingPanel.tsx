@@ -1,0 +1,187 @@
+import { useState } from 'react';
+import { summarizeMeeting } from '../api';
+import { useMeetingRecorder } from '../hooks/useMeetingRecorder';
+import type { CollapsibleSectionId, CollapsibleState } from '../task-view';
+import { formatDateTime } from '../task-view';
+import {
+  BUTTON_CLASS,
+  EMPTY_CLASS,
+  PANEL_CLASS,
+  SECTION_COUNT_CLASS,
+  SECTION_HEADER_CLASS,
+  SUB_BUTTON_CLASS
+} from './common';
+
+type MeetingPanelProps = {
+  collapsedSections: CollapsibleState;
+  onToggleSection: (sectionId: CollapsibleSectionId) => void;
+};
+
+type SummaryStatus = 'idle' | 'loading' | 'done' | 'error';
+
+function mapRecorderStatusLabel(value: string): string {
+  if (value === 'recording') return '녹음 중';
+  if (value === 'stopping') return '종료 중';
+  if (value === 'error') return '오류';
+  return '대기';
+}
+
+export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPanelProps) {
+  const recorder = useMeetingRecorder({
+    language: 'ko-KR',
+    tickMs: 1000
+  });
+  const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
+  const [summary, setSummary] = useState('');
+  const [documentText, setDocumentText] = useState('');
+  const [summaryError, setSummaryError] = useState('');
+  const [copyNotice, setCopyNotice] = useState('');
+
+  async function handleStart() {
+    setSummaryStatus('idle');
+    setSummary('');
+    setDocumentText('');
+    setSummaryError('');
+    setCopyNotice('');
+    recorder.resetSession();
+    await recorder.start();
+  }
+
+  async function handleStopAndSummarize() {
+    setCopyNotice('');
+    const result = await recorder.stop();
+    const transcript = String(result?.transcript || '').trim();
+    if (!transcript) {
+      setSummaryStatus('error');
+      setSummary('');
+      setDocumentText('');
+      setSummaryError('전사된 회의 내용이 없어 문서를 생성하지 못했습니다.');
+      return;
+    }
+
+    setSummaryStatus('loading');
+    setSummaryError('');
+    try {
+      const response = await summarizeMeeting({
+        transcript,
+        startedAt: result?.startedAt || recorder.startedAt || '',
+        endedAt: result?.endedAt || recorder.endedAt || '',
+        language: 'ko-KR'
+      });
+      setSummary(response.summary || '');
+      setDocumentText(response.document || '');
+      setSummaryStatus('done');
+    } catch (caught) {
+      const message = String((caught as Error)?.message || '').trim();
+      setSummaryStatus('error');
+      setSummary('');
+      setDocumentText('');
+      setSummaryError(message || '회의 정리 문서를 생성하지 못했습니다.');
+    }
+  }
+
+  async function handleCopyDocument() {
+    if (!documentText.trim()) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(documentText);
+      setCopyNotice('문서를 클립보드에 복사했습니다.');
+    } catch {
+      setCopyNotice('복사에 실패했습니다. 브라우저 권한을 확인해 주세요.');
+    }
+  }
+
+  const transcriptText = recorder.transcript || '';
+  const isRecording = recorder.status === 'recording';
+  const canStart = recorder.isSupported && recorder.status !== 'recording' && recorder.status !== 'stopping';
+  const canStop = recorder.status === 'recording';
+
+  return (
+    <section className={`${PANEL_CLASS} border-indigo-200 bg-indigo-50/70`}>
+      <div className={`${SECTION_HEADER_CLASS} border-indigo-200 bg-indigo-100/70`}>
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold text-slate-800">회의 기록</h2>
+          <span className={`${SECTION_COUNT_CLASS} border-indigo-200`}>한국어</span>
+        </div>
+        <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('panel_meeting')}>
+          {collapsedSections.panel_meeting ? '펼치기' : '접기'}
+        </button>
+      </div>
+
+      {!collapsedSections.panel_meeting && (
+        <div className="grid gap-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className={BUTTON_CLASS} onClick={() => void handleStart()} disabled={!canStart}>
+              시작
+            </button>
+            <button type="button" className={BUTTON_CLASS} onClick={() => void handleStopAndSummarize()} disabled={!canStop}>
+              중지
+            </button>
+            <span className="text-sm text-slate-600">
+              상태: <strong>{mapRecorderStatusLabel(recorder.status)}</strong>
+            </span>
+            {isRecording && <span className="text-xs text-indigo-700">실시간 갱신: 1초</span>}
+          </div>
+
+          {!recorder.isSupported && (
+            <p className="text-sm text-rose-700">
+              이 브라우저는 음성 인식을 지원하지 않습니다. Chrome 계열 브라우저를 사용해 주세요.
+            </p>
+          )}
+          {recorder.error && <p className="text-sm text-rose-700">{recorder.error}</p>}
+          {recorder.startedAt && (
+            <p className="text-xs text-slate-600">
+              시작: {formatDateTime(recorder.startedAt)}
+              {recorder.endedAt ? ` · 종료: ${formatDateTime(recorder.endedAt)}` : ''}
+            </p>
+          )}
+
+          <section className="grid gap-2 border-t border-dashed border-slate-300 pt-4">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-sm font-semibold text-slate-900">실시간 전사</h4>
+              <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('meeting_transcript')}>
+                {collapsedSections.meeting_transcript ? '펼치기' : '접기'}
+              </button>
+            </div>
+            {!collapsedSections.meeting_transcript && (
+              transcriptText
+                ? <pre className="m-0 min-h-40 whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptText}</pre>
+                : <p className={EMPTY_CLASS}>`시작`을 누르면 1초 단위로 전사 내용이 표시됩니다.</p>
+            )}
+          </section>
+
+          <section className="grid gap-2 border-t border-dashed border-slate-300 pt-4">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-sm font-semibold text-slate-900">Confluence 문서 초안</h4>
+              <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('meeting_document')}>
+                {collapsedSections.meeting_document ? '펼치기' : '접기'}
+              </button>
+            </div>
+
+            {!collapsedSections.meeting_document && (
+              <>
+                {summaryStatus === 'loading' && <p className="text-sm text-slate-600">회의 내용을 분석해 문서를 생성하는 중입니다…</p>}
+                {summaryStatus === 'error' && <p className="text-sm text-rose-700">{summaryError || '문서 생성 중 오류가 발생했습니다.'}</p>}
+                {summary && <p className="text-sm text-slate-700">{summary}</p>}
+                {documentText
+                  ? (
+                    <>
+                      <pre className="m-0 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{documentText}</pre>
+                      <div className="flex items-center gap-2">
+                        <button type="button" className={BUTTON_CLASS} onClick={() => void handleCopyDocument()}>
+                          문서 복사
+                        </button>
+                        {copyNotice && <span className="text-xs text-slate-600">{copyNotice}</span>}
+                      </div>
+                    </>
+                  )
+                  : summaryStatus !== 'loading' && <p className={EMPTY_CLASS}>중지 후 자동으로 Confluence 붙여넣기용 문서를 생성합니다.</p>}
+              </>
+            )}
+          </section>
+        </div>
+      )}
+    </section>
+  );
+}
