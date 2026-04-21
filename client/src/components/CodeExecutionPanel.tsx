@@ -260,6 +260,22 @@ export function CodeExecutionPanel({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showCreatePrModal, setShowCreatePrModal] = useState(false);
   const [prBranchName, setPrBranchName] = useState('');
+  const sortedTasks = useMemo(() => {
+    const list = [...tasks];
+    list.sort((left, right) => {
+      const leftRunning = String(left.status || '').toLowerCase() === 'running';
+      const rightRunning = String(right.status || '').toLowerCase() === 'running';
+      if (leftRunning !== rightRunning) {
+        return leftRunning ? -1 : 1;
+      }
+
+      const leftUpdated = String(left.updated_at || '');
+      const rightUpdated = String(right.updated_at || '');
+      return rightUpdated.localeCompare(leftUpdated);
+    });
+    return list;
+  }, [tasks]);
+  const runningTaskCount = sortedTasks.filter((task) => String(task.status || '').toLowerCase() === 'running').length;
   const executionStepSummary = executionProgress
     ? summarizeExecutionStep(executionProgress)
     : '';
@@ -443,28 +459,36 @@ export function CodeExecutionPanel({
               <>
                 <div className={`${SECTION_HEADER_CLASS} border-amber-200 bg-amber-100/80`}>
                   <h2 className="text-base font-semibold text-slate-800">코드 작업</h2>
-                  <span className={`${SECTION_COUNT_CLASS} border-amber-200`}>{tasks.length}건</span>
+                  <span className={`${SECTION_COUNT_CLASS} border-amber-200`}>{sortedTasks.length}건</span>
                 </div>
 
                 <div className="mb-4">
-                  <label className={LABEL_CLASS}>
-                    작업 선택
-                    <select
-                      className={INPUT_CLASS}
-                      value={selectedTaskId}
-                      onChange={(event) => onSelectTask(event.target.value)}
-                      disabled={tasks.length === 0}
-                    >
-                      {tasks.length === 0 && (
-                        <option value="">선택 가능한 작업이 없습니다</option>
-                      )}
-                      {tasks.map((task) => (
-                        <option key={task.id} value={task.id}>
-                          {`${mapStatusLabel(task.status)} · ${task.title}`}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <p className="mb-2 text-xs text-slate-600">
+                    진행 중 {runningTaskCount}건
+                  </p>
+                  <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
+                    {sortedTasks.length === 0 && (
+                      <p className={EMPTY_CLASS}>선택 가능한 작업이 없습니다.</p>
+                    )}
+                    {sortedTasks.map((task) => {
+                      const isSelected = selectedTaskId === task.id;
+                      return (
+                        <button
+                          key={task.id}
+                          type="button"
+                          className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                            isSelected
+                              ? 'border-amber-300 bg-amber-50'
+                              : 'border-slate-200 bg-white hover:border-amber-200 hover:bg-amber-50/40'
+                          }`}
+                          onClick={() => onSelectTask(task.id)}
+                        >
+                          <p className="text-xs text-slate-500">{mapStatusLabel(task.status)}</p>
+                          <p className="mt-0.5 truncate text-sm font-medium text-slate-900">{task.title}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {!selectedTaskId && <p className={EMPTY_CLASS}>코드 작업이 없습니다.</p>}
