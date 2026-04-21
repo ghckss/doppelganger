@@ -116,6 +116,19 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     });
   }
 
+  function handleClear() {
+    recorder.resetSession();
+    setSummaryStatus('idle');
+    setSummary('');
+    setPolishedTranscript('');
+    setDocumentText('');
+    setSummaryError('');
+    setTranscriptCopyNotice('');
+    setDocumentCopyNotice('');
+    setIsTranscriptPinnedToBottom(true);
+    autoSummaryTriggeredRef.current = false;
+  }
+
   async function handleCopyTranscript() {
     const text = String(transcriptDisplayText || '').trim();
     if (!text) {
@@ -172,6 +185,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   const canPause = recorder.status === 'recording';
   const canResume = recorder.status === 'paused';
   const canStop = recorder.status === 'recording' || recorder.status === 'paused';
+  const canClear = recorder.status !== 'recording' && recorder.status !== 'stopping';
 
   function updateTranscriptPinnedState(element: HTMLPreElement) {
     const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
@@ -223,19 +237,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
 
       {!collapsedSections.panel_meeting && (
         <div className="grid gap-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className={BUTTON_CLASS} onClick={() => void handleStart()} disabled={!canStart}>
-              시작
-            </button>
-            <button type="button" className={BUTTON_CLASS} onClick={() => void handlePause()} disabled={!canPause}>
-              일시정지
-            </button>
-            <button type="button" className={BUTTON_CLASS} onClick={() => void handleResume()} disabled={!canResume}>
-              재개
-            </button>
-            <button type="button" className={BUTTON_CLASS} onClick={() => void handleStopAndSummarize()} disabled={!canStop}>
-              중지
-            </button>
+          <div className="grid gap-2">
             <span className="text-sm text-slate-600">
               상태: <strong>{mapRecorderStatusLabel(recorder.status)}</strong>
             </span>
@@ -245,6 +247,23 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
                 연결 재개 시도: {recorder.retryCount}/{recorder.maxResumeAttempts}
               </span>
             )}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button type="button" className={BUTTON_CLASS} onClick={() => void handleStart()} disabled={!canStart}>
+                시작
+              </button>
+              <button type="button" className={BUTTON_CLASS} onClick={() => void handlePause()} disabled={!canPause}>
+                일시정지
+              </button>
+              <button type="button" className={BUTTON_CLASS} onClick={() => void handleResume()} disabled={!canResume}>
+                재개
+              </button>
+              <button type="button" className={BUTTON_CLASS} onClick={() => void handleStopAndSummarize()} disabled={!canStop}>
+                중지
+              </button>
+              <button type="button" className={SUB_BUTTON_CLASS} onClick={handleClear} disabled={!canClear}>
+                clear
+              </button>
+            </div>
           </div>
 
           {!recorder.isSupported && (
@@ -324,11 +343,11 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
                   ? (
                     <>
                       <pre className="m-0 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{documentText}</pre>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-end gap-2">
+                        {documentCopyNotice && <span className="text-xs text-slate-600">{documentCopyNotice}</span>}
                         <button type="button" className={BUTTON_CLASS} onClick={() => void handleCopyDocument()}>
                           문서 복사
                         </button>
-                        {documentCopyNotice && <span className="text-xs text-slate-600">{documentCopyNotice}</span>}
                       </div>
                     </>
                   )
