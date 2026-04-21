@@ -39,6 +39,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   const [summaryError, setSummaryError] = useState('');
   const [transcriptCopyNotice, setTranscriptCopyNotice] = useState('');
   const [documentCopyNotice, setDocumentCopyNotice] = useState('');
+  const [audioSaveNotice, setAudioSaveNotice] = useState('');
   const autoSummaryTriggeredRef = useRef(false);
   const transcriptScrollRef = useRef<HTMLPreElement | null>(null);
   const [isTranscriptPinnedToBottom, setIsTranscriptPinnedToBottom] = useState(true);
@@ -91,6 +92,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     setSummaryError('');
     setTranscriptCopyNotice('');
     setDocumentCopyNotice('');
+    setAudioSaveNotice('');
     setIsTranscriptPinnedToBottom(true);
     autoSummaryTriggeredRef.current = false;
     recorder.resetSession();
@@ -108,6 +110,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   async function handleStopAndSummarize() {
     setTranscriptCopyNotice('');
     setDocumentCopyNotice('');
+    setAudioSaveNotice('');
     const result = await recorder.stop();
     await summarizeFromTranscript({
       transcript: String(result?.transcript || ''),
@@ -125,6 +128,7 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     setSummaryError('');
     setTranscriptCopyNotice('');
     setDocumentCopyNotice('');
+    setAudioSaveNotice('');
     setIsTranscriptPinnedToBottom(true);
     autoSummaryTriggeredRef.current = false;
   }
@@ -152,6 +156,19 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     } catch {
       setDocumentCopyNotice('복사에 실패했습니다. 브라우저 권한을 확인해 주세요.');
     }
+  }
+
+  function handleSaveAudioRecording() {
+    if (!recorder.hasAudioRecording) {
+      setAudioSaveNotice('저장 가능한 녹음 파일이 없습니다. 회의를 중지한 뒤 다시 시도해 주세요.');
+      return;
+    }
+    const saved = recorder.downloadAudioRecording();
+    if (!saved) {
+      setAudioSaveNotice('녹음 파일 저장에 실패했습니다. 브라우저 권한을 확인해 주세요.');
+      return;
+    }
+    setAudioSaveNotice('녹음 파일을 저장했습니다.');
   }
 
   useEffect(() => {
@@ -249,7 +266,17 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
                     연결 재개 시도: {recorder.retryCount}/{recorder.maxResumeAttempts}
                   </span>
                 )}
-
+                {!recorder.isAudioRecordingSupported && (
+                  <p className="text-xs text-amber-700">
+                    현재 브라우저에서는 녹음 파일 저장 기능을 지원하지 않습니다.
+                  </p>
+                )}
+                {recorder.audioError && (
+                  <p className="text-xs text-rose-700">{recorder.audioError}</p>
+                )}
+                {audioSaveNotice && (
+                  <p className="text-xs text-slate-600">{audioSaveNotice}</p>
+                )}
 
                 {!recorder.isSupported && (
                   <p className="text-sm text-rose-700">
@@ -280,6 +307,14 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
               </button>
               <button type="button" className={BUTTON_CLASS} onClick={handleClear} disabled={!canClear}>
                 초기화
+              </button>
+              <button
+                type="button"
+                className={BUTTON_CLASS}
+                onClick={handleSaveAudioRecording}
+                disabled={!recorder.hasAudioRecording}
+              >
+                녹음 파일 저장
               </button>
             </div>
           </div>
