@@ -302,6 +302,20 @@ export function createCodeExecutionDomain({
     codex: codexCliRunner || null,
     claude: claudeCliRunner || null
   };
+  const normalizedGitHubRepositoryAllowlist = new Set(
+    compactStrings(config.github?.repositories || []).map((name) => name.toLowerCase())
+  );
+
+  function isGitHubRepositoryAllowed(repoName) {
+    if (normalizedGitHubRepositoryAllowlist.size === 0) {
+      return true;
+    }
+    const normalizedRepoName = normalizeWhitespace(repoName).toLowerCase();
+    if (!normalizedRepoName) {
+      return false;
+    }
+    return normalizedGitHubRepositoryAllowlist.has(normalizedRepoName);
+  }
 
   function defaultAgentProvider() {
     return normalizeAgentProvider(config.agent?.defaultProvider || 'codex');
@@ -443,13 +457,11 @@ export function createCodeExecutionDomain({
     }
 
     const parsedRemote = parseRemoteUrl(remoteUrl);
-    if (config.github.repositories.length > 0 && parsedRemote.name && !config.github.repositories.includes(parsedRemote.name)) {
-      throw new Error(`저장소가 GITHUB_REPOSITORIES 허용 목록에 없습니다: ${parsedRemote.name}`);
-    }
 
     const statusOutput = await runGit(root, ['status', '--porcelain']);
     const scripts = readScripts(root);
     const fileSample = await listWorkspaceFiles(root);
+    const githubRepositoryAllowed = isGitHubRepositoryAllowed(parsedRemote.name);
 
     return {
       git: {
@@ -460,6 +472,7 @@ export function createCodeExecutionDomain({
         owner: parsedRemote.owner,
         name: parsedRemote.name,
         repoSlug: parsedRemote.repoSlug,
+        githubRepositoryAllowed,
         isDirty: Boolean(statusOutput.trim()),
         statusLines: statusOutput.split(/\r?\n/).filter(Boolean)
       },
@@ -997,6 +1010,7 @@ export function createCodeExecutionDomain({
         repoOwner: workspace.git.owner,
         repoName: workspace.git.name,
         repoSlug: workspace.git.repoSlug,
+        githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
         remoteUrl: workspace.git.remoteUrl,
         agentProvider: selectedAgent.provider,
         needsPlanning: parseBoolean(input.needsPlanning),
@@ -1022,6 +1036,7 @@ export function createCodeExecutionDomain({
       baseBranch: workspace.git.baseBranch,
       currentBranch: workspace.git.currentBranch,
       remoteUrl: workspace.git.remoteUrl,
+      githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
       recommendedChecks: workspace.recommendedChecks,
       scripts: workspace.scripts,
       statusLines: workspace.git.statusLines,
@@ -1037,6 +1052,7 @@ export function createCodeExecutionDomain({
       response: {
         repoSlug: workspace.git.repoSlug,
         baseBranch: workspace.git.baseBranch,
+        githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
         agentProvider: selectedAgent.provider
       }
     });
@@ -1436,6 +1452,17 @@ export function createCodeExecutionDomain({
     };
 
     try {
+      if (!isGitHubRepositoryAllowed(repoName)) {
+        const repoDisplay = normalizeWhitespace(repoName)
+          || normalizeWhitespace(task.payload?.repoSlug)
+          || workspace.git.repoSlug
+          || path.basename(workspace.git.root);
+        throw new Error(
+          `현재 저장소는 GITHUB_REPOSITORIES 허용 목록에 없어 PR 생성을 지원하지 않습니다: ${repoDisplay}. `
+          + 'WORKSPACE_ALLOWLIST 기준 코드 작업 실행은 계속 가능합니다.'
+        );
+      }
+
       const branchRestoreResult = await checkoutTaskBranchFromSourceCommit(task, workspace, sourceBranch);
       await assertCleanWorktree(workspace.git.root, 'PR 생성 전에 작업 트리가 깨끗해야 합니다');
       if (sourceBranch === remoteBranch) {

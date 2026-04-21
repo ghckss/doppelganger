@@ -144,6 +144,8 @@ Notes:
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
 7. In task detail, `PR 생성` appears only after step `8/8` is complete.
 8. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
+9. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
+10. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
 
 ### PR creation rules
 - Source template: `<selected repository>/.github/PULL_REQUEST_TEMPLATE.md`
