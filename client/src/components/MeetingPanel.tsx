@@ -237,16 +237,34 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
 
       {!collapsedSections.panel_meeting && (
         <div className="grid gap-4">
-          <div className="grid gap-2">
-            <span className="text-sm text-slate-600">
-              상태: <strong>{mapRecorderStatusLabel(recorder.status)}</strong>
-            </span>
-            {isRecording && <span className="text-xs text-indigo-700">실시간 갱신: 10초</span>}
-            {recorder.retryCount > 0 && (
-              <span className="text-xs text-amber-700">
-                연결 재개 시도: {recorder.retryCount}/{recorder.maxResumeAttempts}
-              </span>
-            )}
+          <div className="flex flex-row justify-between items-center">
+            <div>
+              <div className="grid gap-2">
+                <span className="text-sm text-slate-600">
+                  상태: <strong>{mapRecorderStatusLabel(recorder.status)}</strong>
+                </span>
+                {isRecording && <span className="text-xs text-indigo-700">실시간 갱신: 10초</span>}
+                {recorder.retryCount > 0 && (
+                  <span className="text-xs text-amber-700">
+                    연결 재개 시도: {recorder.retryCount}/{recorder.maxResumeAttempts}
+                  </span>
+                )}
+
+
+                {!recorder.isSupported && (
+                  <p className="text-sm text-rose-700">
+                    이 브라우저는 음성 인식을 지원하지 않습니다. Chrome 계열 브라우저를 사용해 주세요.
+                  </p>
+                )}
+                {recorder.error && <p className="text-sm text-rose-700">{recorder.error}</p>}
+                {recorder.startedAt && (
+                  <p className="text-xs text-slate-600">
+                    시작: {formatDateTime(recorder.startedAt)}
+                    {recorder.endedAt ? ` · 종료: ${formatDateTime(recorder.endedAt)}` : ''}
+                  </p>
+                )}
+              </div>
+            </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
               <button type="button" className={BUTTON_CLASS} onClick={() => void handleStart()} disabled={!canStart}>
                 시작
@@ -260,25 +278,11 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
               <button type="button" className={BUTTON_CLASS} onClick={() => void handleStopAndSummarize()} disabled={!canStop}>
                 중지
               </button>
-              <button type="button" className={SUB_BUTTON_CLASS} onClick={handleClear} disabled={!canClear}>
-                clear
+              <button type="button" className={BUTTON_CLASS} onClick={handleClear} disabled={!canClear}>
+                초기화
               </button>
             </div>
           </div>
-
-          {!recorder.isSupported && (
-            <p className="text-sm text-rose-700">
-              이 브라우저는 음성 인식을 지원하지 않습니다. Chrome 계열 브라우저를 사용해 주세요.
-            </p>
-          )}
-          {recorder.error && <p className="text-sm text-rose-700">{recorder.error}</p>}
-          {recorder.startedAt && (
-            <p className="text-xs text-slate-600">
-              시작: {formatDateTime(recorder.startedAt)}
-              {recorder.endedAt ? ` · 종료: ${formatDateTime(recorder.endedAt)}` : ''}
-            </p>
-          )}
-
           <section className="grid gap-2 border-t border-dashed border-slate-300 pt-4">
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm font-semibold text-slate-900">실시간 전사</h4>

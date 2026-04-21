@@ -530,7 +530,7 @@ export function CodeExecutionPanel({
                     <option value="claude">Claude</option>
                   </select>
                 </label>
-                <label className={`${LABEL_CLASS} md:col-span-3`}>
+                <label className={`${LABEL_CLASS} md:col-span-4`}>
                   명령
                   <textarea
                     className={INPUT_CLASS}
@@ -541,14 +541,16 @@ export function CodeExecutionPanel({
                     required
                   />
                 </label>
-                <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={needsPlanning} onChange={(event) => onSetNeedsPlanning(event.target.checked)} />
-                  기획 단계 실행
-                </label>
-                <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" checked={needsDesign} onChange={(event) => onSetNeedsDesign(event.target.checked)} />
-                  디자인 단계 실행
-                </label>
+                <div className='flex gap-2'>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" checked={needsPlanning} onChange={(event) => onSetNeedsPlanning(event.target.checked)} />
+                    기획 단계 실행
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" checked={needsDesign} onChange={(event) => onSetNeedsDesign(event.target.checked)} />
+                    디자인 단계 실행
+                  </label>
+                </div>
                 <div className="md:col-span-3 flex justify-end">
                   <button type="submit" className={BUTTON_CLASS} disabled={Boolean(busyAction)}>실행</button>
                 </div>
