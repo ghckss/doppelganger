@@ -20,6 +20,10 @@ type CapturedEntry = {
   text: string;
 };
 
+type StartAudioCaptureOptions = {
+  preserveSession?: boolean;
+};
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -48,6 +52,68 @@ function mapRecognitionErrorMessage(errorCode: string): string {
     return '음성 인식 중 오류가 발생했습니다.';
   }
   return `음성 인식 오류: ${reason}`;
+}
+
+function mapAudioRecordingErrorMessage(error: unknown): string {
+  const name = normalizeLine((error as { name?: string })?.name || '').toLowerCase();
+  if (name === 'notallowederror' || name === 'securityerror') {
+    return '녹음 권한이 거부되어 파일 저장용 녹음을 진행할 수 없습니다. 브라우저 마이크 권한을 허용해 주세요.';
+  }
+  if (name === 'notfounderror' || name === 'devicesnotfounderror') {
+    return '녹음 장치를 찾을 수 없어 파일 저장용 녹음을 시작하지 못했습니다.';
+  }
+  if (name === 'notreadableerror') {
+    return '마이크 장치를 현재 사용할 수 없어 파일 저장용 녹음을 시작하지 못했습니다.';
+  }
+  const message = normalizeLine((error as { message?: string })?.message || '');
+  if (message) {
+    return `녹음 파일 저장 기능 오류: ${message}`;
+  }
+  return '녹음 파일 저장 기능을 시작하지 못했습니다.';
+}
+
+function sanitizeIsoForFilename(value: string): string {
+  const source = String(value || '');
+  if (!source) {
+    return '';
+  }
+  return source
+    .replace(/[-:]/g, '')
+    .replace(/\..*$/, '')
+    .replace('T', '-')
+    .trim();
+}
+
+function resolveAudioExtension(mimeType: string): string {
+  const type = String(mimeType || '').toLowerCase();
+  if (type.includes('ogg')) {
+    return 'ogg';
+  }
+  if (type.includes('mp4') || type.includes('m4a')) {
+    return 'm4a';
+  }
+  return 'webm';
+}
+
+function pickPreferredAudioMimeType(): string {
+  if (typeof window === 'undefined' || typeof window.MediaRecorder === 'undefined') {
+    return '';
+  }
+  if (typeof window.MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/mp4'
+  ];
+  for (const candidate of candidates) {
+    if (window.MediaRecorder.isTypeSupported(candidate)) {
+      return candidate;
+    }
+  }
+  return '';
 }
 
 function composeTranscript(finalLines: string[], interimLine: string): string {
@@ -92,6 +158,11 @@ export function useMeetingRecorder({
   }, []);
 
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const audioMimeTypeRef = useRef('');
+  const audioRecordingUrlRef = useRef('');
   const tickTimerRef = useRef<number | null>(null);
   const retryTimerRef = useRef<number | null>(null);
   const statusRef = useRef<MeetingRecorderStatus>('idle');
@@ -111,8 +182,17 @@ export function useMeetingRecorder({
   const [startedAt, setStartedAt] = useState('');
   const [endedAt, setEndedAt] = useState('');
   const [snapshotTranscript, setSnapshotTranscript] = useState('');
+  const [audioError, setAudioError] = useState('');
+  const [audioRecordingUrl, setAudioRecordingUrl] = useState('');
+  const [audioFileName, setAudioFileName] = useState('');
   const [retryCount, setRetryCount] = useState(0);
   const [shouldAutoSummarize, setShouldAutoSummarize] = useState(false);
+  const isAudioRecordingSupported = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return Boolean(window.MediaRecorder && navigator?.mediaDevices?.getUserMedia);
+  }, []);
 
   function setRetryCountState(value: number) {
     const normalized = Math.max(0, Math.trunc(Number(value) || 0));
@@ -168,6 +248,182 @@ export function useMeetingRecorder({
     }
     window.clearInterval(tickTimerRef.current);
     tickTimerRef.current = null;
+  }
+
+  function updateAudioRecordingUrl(nextUrl: string) {
+    if (audioRecordingUrlRef.current && audioRecordingUrlRef.current !== nextUrl) {
+      URL.revokeObjectURL(audioRecordingUrlRef.current);
+    }
+    audioRecordingUrlRef.current = nextUrl;
+    setAudioRecordingUrl(nextUrl);
+  }
+
+  function stopAudioTracks() {
+    const stream = mediaStreamRef.current;
+    if (!stream) {
+      return;
+    }
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+    mediaStreamRef.current = null;
+  }
+
+  function teardownMediaRecorder() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) {
+      return;
+    }
+    recorder.ondataavailable = null;
+    recorder.onstop = null;
+    recorder.onerror = null;
+    mediaRecorderRef.current = null;
+  }
+
+  function finalizeAudioRecording() {
+    if (audioChunksRef.current.length === 0) {
+      return;
+    }
+
+    const mimeType = audioMimeTypeRef.current || 'audio/webm';
+    const blob = new Blob(audioChunksRef.current, {
+      type: mimeType
+    });
+    if (!blob.size) {
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    const baseTimestamp = sanitizeIsoForFilename(startedAtRef.current) || sanitizeIsoForFilename(nowIso());
+    const extension = resolveAudioExtension(mimeType);
+    updateAudioRecordingUrl(objectUrl);
+    setAudioFileName(`meeting-recording-${baseTimestamp}.${extension}`);
+  }
+
+  async function stopAudioCapture() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) {
+      stopAudioTracks();
+      return;
+    }
+
+    if (recorder.state === 'inactive') {
+      finalizeAudioRecording();
+      teardownMediaRecorder();
+      stopAudioTracks();
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      const handleStop = () => {
+        recorder.removeEventListener('stop', handleStop);
+        resolve();
+      };
+      recorder.addEventListener('stop', handleStop, { once: true });
+      try {
+        recorder.stop();
+      } catch {
+        recorder.removeEventListener('stop', handleStop);
+        resolve();
+      }
+    });
+  }
+
+  function pauseAudioCapture() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== 'recording') {
+      return;
+    }
+    try {
+      recorder.pause();
+    } catch {
+      // Ignore pause errors from unsupported recorder states.
+    }
+  }
+
+  function resumeAudioCapture() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== 'paused') {
+      return;
+    }
+    try {
+      recorder.resume();
+    } catch {
+      // Ignore resume errors from unsupported recorder states.
+    }
+  }
+
+  async function startAudioCapture({ preserveSession = false }: StartAudioCaptureOptions = {}) {
+    if (!isAudioRecordingSupported) {
+      return;
+    }
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      return;
+    }
+
+    if (!preserveSession) {
+      audioChunksRef.current = [];
+      audioMimeTypeRef.current = '';
+      setAudioFileName('');
+      updateAudioRecordingUrl('');
+      setAudioError('');
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
+      const preferredMimeType = pickPreferredAudioMimeType();
+      const recorder = preferredMimeType
+        ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+        : new MediaRecorder(stream);
+
+      audioMimeTypeRef.current = recorder.mimeType || preferredMimeType || 'audio/webm';
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (!event.data || event.data.size <= 0) {
+          return;
+        }
+        audioChunksRef.current.push(event.data);
+      };
+      recorder.onerror = (event: Event) => {
+        const message = normalizeLine((event as { error?: { message?: string } })?.error?.message || '');
+        setAudioError(message ? `녹음 중 오류가 발생했습니다: ${message}` : '녹음 중 오류가 발생했습니다.');
+      };
+      recorder.onstop = () => {
+        finalizeAudioRecording();
+        teardownMediaRecorder();
+        stopAudioTracks();
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+    } catch (error) {
+      setAudioError(mapAudioRecordingErrorMessage(error));
+      stopAudioTracks();
+    }
+  }
+
+  function resetAudioCaptureState() {
+    const recorder = mediaRecorderRef.current;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.onerror = null;
+      try {
+        if (recorder.state !== 'inactive') {
+          recorder.stop();
+        }
+      } catch {
+        // Ignore stop errors while clearing session.
+      }
+    }
+    mediaRecorderRef.current = null;
+    stopAudioTracks();
+    audioChunksRef.current = [];
+    audioMimeTypeRef.current = '';
+    setAudioFileName('');
+    updateAudioRecordingUrl('');
+    setAudioError('');
   }
 
   function startTicker() {
@@ -320,6 +576,7 @@ export function useMeetingRecorder({
       setError(`${message} 연결 재개 시도 ${maxResumeAttempts}회 실패로 지금까지 기록한 내용으로 정리를 진행합니다.`);
       setShouldAutoSummarize(true);
       stoppingRef.current = false;
+      void stopAudioCapture();
       resolveStop(finalizeStop());
     };
 
@@ -341,6 +598,7 @@ export function useMeetingRecorder({
         teardownRecognition();
         stoppingRef.current = false;
         setStatus('idle');
+        void stopAudioCapture();
         resolveStop(result);
         return;
       }
@@ -354,6 +612,7 @@ export function useMeetingRecorder({
         setStatus('error');
         setError(`${message} 연결 재개 시도 ${maxResumeAttempts}회 실패로 지금까지 기록한 내용으로 정리를 진행합니다.`);
         setShouldAutoSummarize(true);
+        void stopAudioCapture();
         resolveStop(finalizeStop());
       }
     };
@@ -383,6 +642,7 @@ export function useMeetingRecorder({
       setStatus('error');
       setError(`${message} 연결 재개 시도 ${maxResumeAttempts}회 실패로 지금까지 기록한 내용으로 정리를 진행합니다.`);
       setShouldAutoSummarize(true);
+      void stopAudioCapture();
       resolveStop(finalizeStop());
     }
   }
@@ -401,6 +661,8 @@ export function useMeetingRecorder({
         // Ignore abort errors during cleanup.
       }
     }
+
+    resetAudioCaptureState();
 
     stoppingRef.current = false;
     pauseRequestedRef.current = false;
@@ -431,7 +693,11 @@ export function useMeetingRecorder({
       return;
     }
 
+    await startAudioCapture({ preserveSession: false });
     await startRecognitionSession({ preserveSession: false });
+    if (statusRef.current !== 'recording') {
+      await stopAudioCapture();
+    }
   }
 
   async function stop(): Promise<MeetingStopResult> {
@@ -444,6 +710,7 @@ export function useMeetingRecorder({
       stopRetryTimer();
       const result = finalizeStop();
       setStatus('idle');
+      await stopAudioCapture();
       return result;
     }
 
@@ -456,11 +723,16 @@ export function useMeetingRecorder({
       const result = finalizeStop();
       setStatus('idle');
       stoppingRef.current = false;
+      await stopAudioCapture();
       return result;
     }
 
     return new Promise((resolve) => {
-      stopResolverRef.current = resolve;
+      stopResolverRef.current = (result) => {
+        void stopAudioCapture().finally(() => {
+          resolve(result);
+        });
+      };
       try {
         recognition.stop();
       } catch (caught) {
@@ -468,7 +740,10 @@ export function useMeetingRecorder({
         setStatus('error');
         setError(message || '음성 인식을 중지하지 못했습니다.');
         stoppingRef.current = false;
-        resolve(finalizeStop());
+        const result = finalizeStop();
+        void stopAudioCapture().finally(() => {
+          resolve(result);
+        });
       }
 
       window.setTimeout(() => {
@@ -491,6 +766,7 @@ export function useMeetingRecorder({
     stopRetryTimer();
     stopTicker();
     setStatus('paused');
+    pauseAudioCapture();
 
     const recognition = recognitionRef.current;
     if (!recognition) {
@@ -515,6 +791,21 @@ export function useMeetingRecorder({
     }
     setError('');
     await startRecognitionSession({ preserveSession: true });
+    resumeAudioCapture();
+  }
+
+  function downloadAudioRecording(): boolean {
+    if (!audioRecordingUrl || !audioFileName || typeof document === 'undefined') {
+      return false;
+    }
+    const anchor = document.createElement('a');
+    anchor.href = audioRecordingUrl;
+    anchor.download = audioFileName;
+    anchor.rel = 'noopener';
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    return true;
   }
 
   useEffect(() => {
@@ -534,6 +825,11 @@ export function useMeetingRecorder({
         // Ignore abort errors during cleanup.
       }
     }
+    resetAudioCaptureState();
+    if (audioRecordingUrlRef.current) {
+      URL.revokeObjectURL(audioRecordingUrlRef.current);
+      audioRecordingUrlRef.current = '';
+    }
   }, []);
 
   return {
@@ -543,9 +839,15 @@ export function useMeetingRecorder({
     startedAt,
     endedAt,
     transcript: snapshotTranscript,
+    audioError,
+    audioRecordingUrl,
+    audioFileName,
+    hasAudioRecording: Boolean(audioRecordingUrl && audioFileName),
+    isAudioRecordingSupported,
     retryCount,
     maxResumeAttempts,
     shouldAutoSummarize,
+    downloadAudioRecording,
     start,
     pause,
     resume,
