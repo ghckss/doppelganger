@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { approveTask, createCodeTask, createPullRequest, ignoreTask, resumeCodeTask, runTask } from '../api';
+import { createCodeTask, createPullRequest, resumeCodeTask } from '../api';
 import type { MetaResponse, Task, TaskDetail } from '../types';
 import type {
   CollapsibleSectionId,
@@ -9,19 +9,15 @@ import type {
 import {
   getExecutionProgress,
   getExecutionStepElapsedSeconds,
-  mapDomainLabel,
   mapStatusLabel,
   summarizeExecutionStep
 } from '../task-view';
 import {
   BUTTON_CLASS,
-  DomainBadge,
   EMPTY_CLASS,
   INPUT_CLASS,
   LABEL_CLASS,
   PANEL_CLASS,
-  SECTION_COUNT_CLASS,
-  SECTION_HEADER_CLASS,
   StatusBadge,
   SUB_BUTTON_CLASS
 } from './common';
@@ -56,6 +52,30 @@ type ReviewRoundView = {
   } | null;
 };
 
+type CodeExecutionPanelProps = {
+  meta: MetaResponse | null;
+  tasks: Task[];
+  runningDetails: TaskDetail[];
+  collapsedSections: CollapsibleState;
+  busyAction: string;
+  command: string;
+  projectId: string;
+  baseBranch: string;
+  branchName: string;
+  agentProvider: string;
+  needsPlanning: boolean;
+  needsDesign: boolean;
+  onToggleSection: (sectionId: CollapsibleSectionId) => void;
+  onSetCommand: (value: string) => void;
+  onSetProjectId: (value: string) => void;
+  onSetBaseBranch: (value: string) => void;
+  onSetBranchName: (value: string) => void;
+  onSetAgentProvider: (value: string) => void;
+  onSetNeedsPlanning: (value: boolean) => void;
+  onSetNeedsDesign: (value: boolean) => void;
+  onRunAction: (label: string, action: () => Promise<string | string[] | void>) => void;
+};
+
 const EXECUTION_STEP_ITEMS = [
   { step: 1, label: '작업 환경 점검 + 브랜치 준비' },
   { step: 2, label: '프롬프트/기획/디자인 계획 생성' },
@@ -66,6 +86,16 @@ const EXECUTION_STEP_ITEMS = [
   { step: 7, label: 'PR 초안 정리' },
   { step: 8, label: '코드 작업 완료' }
 ] as const;
+
+const DEFAULT_PROGRESS: ExecutionProgress = {
+  phase: '',
+  label: '',
+  currentStep: 0,
+  totalSteps: 8,
+  percent: 0,
+  reviewRound: 0,
+  reviewTotalRounds: 3
+};
 
 function stepState(currentStep: number, step: number): 'done' | 'current' | 'pending' {
   if (currentStep > step) {
@@ -183,11 +213,7 @@ function extractRoundFromTitle(value: unknown): number {
   return parseRoundNumber(matched[1]);
 }
 
-function mergeReviewRoundList(detail: TaskDetail | null): ReviewRoundView[] {
-  if (!detail) {
-    return [];
-  }
-
+function mergeReviewRoundList(detail: TaskDetail): ReviewRoundView[] {
   const taskResult = toRecord(detail.task.result);
   const map = new Map<number, ReviewRoundView>();
   const roundsFromResult = Array.isArray(taskResult.reviewRounds) ? taskResult.reviewRounds : [];
@@ -239,39 +265,26 @@ function mergeReviewRoundList(detail: TaskDetail | null): ReviewRoundView[] {
   return Array.from(map.values()).sort((left, right) => left.round - right.round);
 }
 
-type CodeExecutionPanelProps = {
-  meta: MetaResponse | null;
-  tasks: Task[];
-  selectedTaskId: string;
-  detail: TaskDetail | null;
-  executionProgress: ExecutionProgress | null;
-  collapsedSections: CollapsibleState;
-  busyAction: string;
-  command: string;
-  projectId: string;
-  baseBranch: string;
-  branchName: string;
-  agentProvider: string;
-  needsPlanning: boolean;
-  needsDesign: boolean;
-  onToggleSection: (sectionId: CollapsibleSectionId) => void;
-  onSelectTask: (taskId: string) => void;
-  onSetCommand: (value: string) => void;
-  onSetProjectId: (value: string) => void;
-  onSetBaseBranch: (value: string) => void;
-  onSetBranchName: (value: string) => void;
-  onSetAgentProvider: (value: string) => void;
-  onSetNeedsPlanning: (value: boolean) => void;
-  onSetNeedsDesign: (value: boolean) => void;
-  onRunAction: (label: string, action: () => Promise<string | string[] | void>) => void;
-};
+function resolveCommand(task: Task): string {
+  return toText(toRecord(task.payload).command);
+}
+
+function resolveTaskBranch(task: Task): string {
+  const payload = toRecord(task.payload);
+  const result = toRecord(task.result);
+  return toText(result.branch) || toText(payload.branchName);
+}
+
+function resolvePullRequestUrl(task: Task): string {
+  const result = toRecord(task.result);
+  const pullRequest = toRecord(result.pullRequest);
+  return toText(pullRequest.url);
+}
 
 export function CodeExecutionPanel({
   meta,
   tasks,
-  selectedTaskId,
-  detail,
-  executionProgress,
+  runningDetails,
   collapsedSections,
   busyAction,
   command,
@@ -282,7 +295,6 @@ export function CodeExecutionPanel({
   needsPlanning,
   needsDesign,
   onToggleSection,
-  onSelectTask,
   onSetCommand,
   onSetProjectId,
   onSetBaseBranch,
@@ -293,121 +305,108 @@ export function CodeExecutionPanel({
   onRunAction
 }: CodeExecutionPanelProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [showCreatePrModal, setShowCreatePrModal] = useState(false);
+  const [collapsedTaskById, setCollapsedTaskById] = useState<Record<string, boolean>>({});
+  const [collapsedTimelineByTaskId, setCollapsedTimelineByTaskId] = useState<Record<string, boolean>>({});
+  const [createPrTaskId, setCreatePrTaskId] = useState('');
   const [prBranchName, setPrBranchName] = useState('');
-  const [collapsedRunningTaskById, setCollapsedRunningTaskById] = useState<Record<string, boolean>>({});
-  const sortedTasks = useMemo(() => {
-    const list = [...tasks];
-    list.sort((left, right) => {
-      const leftRunning = String(left.status || '').toLowerCase() === 'running';
-      const rightRunning = String(right.status || '').toLowerCase() === 'running';
-      if (leftRunning !== rightRunning) {
-        return leftRunning ? -1 : 1;
-      }
 
-      const leftUpdated = String(left.updated_at || '');
-      const rightUpdated = String(right.updated_at || '');
-      return rightUpdated.localeCompare(leftUpdated);
-    });
+  const detailByTaskId = useMemo(() => {
+    const next: Record<string, TaskDetail> = {};
+    for (const detail of runningDetails) {
+      next[detail.task.id] = detail;
+    }
+    return next;
+  }, [runningDetails]);
+
+  const runningTasks = useMemo(() => {
+    const list = tasks
+      .filter((task) => String(task.status || '').toLowerCase() === 'running')
+      .slice();
+    list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
     return list;
   }, [tasks]);
-  const runningTasks = useMemo(
-    () => sortedTasks.filter((task) => String(task.status || '').toLowerCase() === 'running'),
-    [sortedTasks]
-  );
+
   const runningTaskViews = useMemo(
     () => runningTasks.map((task) => {
-      const rawProgress = getExecutionProgress(task);
-      const progress = rawProgress || {
-        phase: '',
-        label: '',
-        currentStep: 0,
-        totalSteps: 8,
-        percent: 0,
-        reviewRound: 0,
-        reviewTotalRounds: 3
-      };
+      const detail = detailByTaskId[task.id] || null;
+      const sourceTask = detail?.task || task;
+      const progress = getExecutionProgress(sourceTask) || DEFAULT_PROGRESS;
+      const currentStep = Math.max(0, Number(progress.currentStep || 0));
+      const reviewRoundList = detail ? mergeReviewRoundList(detail) : [];
+      const commandText = resolveCommand(sourceTask);
+      const taskMessage = toText(sourceTask.summary) || toText(sourceTask.title);
+      const pullRequestUrl = resolvePullRequestUrl(sourceTask);
+      const canResumeTask = ['failed', 'running'].includes(String(sourceTask.status || '').toLowerCase());
+      const hasTokenOrAuthError = /token|auth|unauthorized|forbidden|401|403|인증/i.test(String(sourceTask.last_error || ''));
       return {
-        task,
+        task: sourceTask,
+        detail,
         progress,
+        currentStep,
+        elapsedSeconds: getExecutionStepElapsedSeconds(sourceTask, progress, nowMs),
         summary: summarizeExecutionStep(progress),
-        elapsedSeconds: getExecutionStepElapsedSeconds(task, rawProgress, nowMs)
+        reviewRoundList,
+        commandText,
+        taskMessage,
+        pullRequestUrl,
+        currentTaskBranch: resolveTaskBranch(sourceTask),
+        canShowCreatePrButton: currentStep >= 8 && !pullRequestUrl,
+        canResumeTask,
+        hasTokenOrAuthError
       };
     }),
-    [runningTasks, nowMs]
-  );
-  const executionStepSummary = executionProgress
-    ? summarizeExecutionStep(executionProgress)
-    : '';
-  const executionStepElapsedSeconds = detail && executionProgress
-    ? getExecutionStepElapsedSeconds(detail.task, executionProgress, nowMs)
-    : null;
-  const taskPayload = detail?.task.payload && typeof detail.task.payload === 'object'
-    ? detail.task.payload
-    : {};
-  const detailCommandText = toText((taskPayload as Record<string, unknown>).command);
-  const taskResult = detail?.task.result && typeof detail.task.result === 'object'
-    ? detail.task.result
-    : {};
-  const currentTaskBranch = String(taskResult.branch || taskPayload.branchName || '').trim();
-  const pullRequestRecord = taskResult.pullRequest && typeof taskResult.pullRequest === 'object'
-    ? taskResult.pullRequest as Record<string, unknown>
-    : null;
-  const pullRequestUrl = pullRequestRecord ? String(pullRequestRecord.url || '').trim() : '';
-  const canShowCreatePrButton = Boolean(
-    detail
-    && executionProgress
-    && Number(executionProgress.currentStep || 0) >= 8
-    && !pullRequestUrl
+    [detailByTaskId, nowMs, runningTasks]
   );
 
-  const canResumeSelectedTask = Boolean(
-    detail
-    && ['failed', 'running'].includes(String(detail.task.status || '').toLowerCase())
+  const createPrTarget = useMemo(
+    () => runningTaskViews.find((view) => view.task.id === createPrTaskId) || null,
+    [createPrTaskId, runningTaskViews]
   );
-  const hasTokenOrAuthError = Boolean(
-    detail
-    && /token|auth|unauthorized|forbidden|401|403|인증/i.test(String(detail.task.last_error || ''))
-  );
-  const reviewRoundList = useMemo(() => mergeReviewRoundList(detail), [detail]);
 
   useEffect(() => {
-    setCollapsedRunningTaskById((current) => {
+    setCollapsedTaskById((current) => {
       const next: Record<string, boolean> = {};
       let changed = false;
-
       for (const task of runningTasks) {
         if (Object.prototype.hasOwnProperty.call(current, task.id)) {
           next[task.id] = current[task.id];
-          continue;
-        }
-        next[task.id] = false;
-        changed = true;
-      }
-
-      for (const taskId of Object.keys(current)) {
-        if (!runningTasks.some((task) => task.id === taskId)) {
+        } else {
+          next[task.id] = false;
           changed = true;
-          break;
         }
       }
-
-      if (!changed) {
-        const currentKeys = Object.keys(current);
-        if (currentKeys.length === Object.keys(next).length) {
-          return current;
-        }
+      const hasRemoved = Object.keys(current).some((taskId) => !runningTasks.some((task) => task.id === taskId));
+      if (!changed && !hasRemoved && Object.keys(current).length === Object.keys(next).length) {
+        return current;
       }
-
       return next;
     });
   }, [runningTasks]);
 
   useEffect(() => {
+    setCollapsedTimelineByTaskId((current) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+      for (const task of runningTasks) {
+        if (Object.prototype.hasOwnProperty.call(current, task.id)) {
+          next[task.id] = current[task.id];
+        } else {
+          next[task.id] = collapsedSections.code_timeline;
+          changed = true;
+        }
+      }
+      const hasRemoved = Object.keys(current).some((taskId) => !runningTasks.some((task) => task.id === taskId));
+      if (!changed && !hasRemoved && Object.keys(current).length === Object.keys(next).length) {
+        return current;
+      }
+      return next;
+    });
+  }, [collapsedSections.code_timeline, runningTasks]);
+
+  useEffect(() => {
     if (runningTasks.length === 0) {
       return;
     }
-
     setNowMs(Date.now());
     const timerId = window.setInterval(() => {
       setNowMs(Date.now());
@@ -415,44 +414,53 @@ export function CodeExecutionPanel({
     return () => {
       window.clearInterval(timerId);
     };
-  }, [
-    runningTasks
-  ]);
+  }, [runningTasks]);
 
   useEffect(() => {
-    setShowCreatePrModal(false);
-    setPrBranchName(currentTaskBranch);
-  }, [detail?.task.id, currentTaskBranch]);
+    if (createPrTaskId && !runningTaskViews.some((view) => view.task.id === createPrTaskId)) {
+      setCreatePrTaskId('');
+      setPrBranchName('');
+    }
+  }, [createPrTaskId, runningTaskViews]);
 
-  function openCreatePrModal() {
-    setPrBranchName(currentTaskBranch);
-    setShowCreatePrModal(true);
+  function toggleRunningTask(taskId: string) {
+    setCollapsedTaskById((current) => ({
+      ...current,
+      [taskId]: !current[taskId]
+    }));
+  }
+
+  function toggleTaskTimeline(taskId: string) {
+    setCollapsedTimelineByTaskId((current) => ({
+      ...current,
+      [taskId]: !current[taskId]
+    }));
+  }
+
+  function openCreatePrModal(taskId: string, suggestedBranch: string) {
+    setCreatePrTaskId(taskId);
+    setPrBranchName(suggestedBranch);
+  }
+
+  function closeCreatePrModal() {
+    setCreatePrTaskId('');
+    setPrBranchName('');
   }
 
   function submitCreatePullRequest() {
-    if (!detail) {
-      return;
-    }
-
+    const taskId = createPrTarget?.task.id || '';
     const normalizedBranchName = prBranchName.trim();
-    if (!normalizedBranchName) {
+    if (!taskId || !normalizedBranchName) {
       return;
     }
 
     onRunAction('PR 생성', async () => {
-      await createPullRequest(detail.task.id, {
+      await createPullRequest(taskId, {
         branchName: normalizedBranchName
       });
-      return detail.task.id;
+      return taskId;
     });
-    setShowCreatePrModal(false);
-  }
-
-  function toggleRunningTask(taskId: string) {
-    setCollapsedRunningTaskById((current) => ({
-      ...current,
-      [taskId]: !current[taskId]
-    }));
+    closeCreatePrModal();
   }
 
   return (
@@ -550,307 +558,216 @@ export function CodeExecutionPanel({
 
           <section className="mt-4 border-t border-slate-200 pt-4">
             <div className="mb-4 flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-900">실행 중 코드 작업</h3>
+              <h3 className="text-sm font-semibold text-slate-900">실행 중 코드 작업 ({runningTasks.length})</h3>
               <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('code_tasks')}>
                 {collapsedSections.code_tasks ? '펼치기' : '접기'}
               </button>
             </div>
-            {!collapsedSections.code_tasks && (
-              <>
-                <div className={`${SECTION_HEADER_CLASS} border-amber-200 bg-amber-100/80`}>
-                  <h2 className="text-base font-semibold text-slate-800">실행 중 작업</h2>
-                  <span className={`${SECTION_COUNT_CLASS} border-amber-200`}>{runningTasks.length}건</span>
-                </div>
 
-                <div className="mb-4">
-                  <p className="mb-2 text-xs text-slate-600">
-                    실행 중인 태스크만 표시합니다.
-                  </p>
-                  <div className="max-h-[34rem] space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
-                    {runningTaskViews.length === 0 && (
-                      <p className={EMPTY_CLASS}>현재 실행 중인 코드 작업이 없습니다.</p>
-                    )}
-                    {runningTaskViews.map(({ task, progress, summary, elapsedSeconds }) => {
-                      const isCollapsed = Boolean(collapsedRunningTaskById[task.id]);
-                      const isSelected = task.id === selectedTaskId;
-                      const taskCommand = toText(toRecord(task.payload).command) || task.title;
-                      const currentStep = Math.max(0, Number(progress.currentStep || 0));
-                      return (
-                        <article
-                          key={task.id}
-                          className={`rounded-lg border p-3 ${isSelected ? 'border-amber-300 bg-amber-50/70' : 'border-slate-200 bg-white'}`}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-900">{taskCommand}</p>
-                              <p className="mt-1 text-xs text-slate-500">{mapStatusLabel(task.status)}</p>
+            {!collapsedSections.code_tasks && (
+              <div className="space-y-3">
+                {runningTaskViews.length === 0 && (
+                  <p className={EMPTY_CLASS}>현재 실행 중인 코드 작업이 없습니다.</p>
+                )}
+
+                {runningTaskViews.map((view) => {
+                  const isCollapsed = Boolean(collapsedTaskById[view.task.id]);
+                  const timelineCollapsed = collapsedTimelineByTaskId[view.task.id] ?? collapsedSections.code_timeline;
+                  return (
+                    <article key={view.task.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                      <header className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-900">
+                            {view.commandText || view.task.title || view.task.id}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">{mapStatusLabel(view.task.status)}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <StatusBadge status={view.task.status} label={mapStatusLabel(view.task.status)} />
+                          <button type="button" className={SUB_BUTTON_CLASS} onClick={() => toggleRunningTask(view.task.id)}>
+                            {isCollapsed ? '펼치기' : '접기'}
+                          </button>
+                        </div>
+                      </header>
+
+                      {!isCollapsed && (
+                        <div className="mt-3 grid gap-3">
+                          <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <h4 className="text-sm font-semibold text-slate-900">작업 메시지</h4>
+                            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">
+                              {view.taskMessage || '작업 메시지가 아직 없습니다.'}
+                            </p>
+                          </section>
+
+                          <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <h4 className="text-sm font-semibold text-slate-900">작업 요청 메시지</h4>
+                            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">
+                              {view.commandText || '작업 요청 메시지가 아직 없습니다.'}
+                            </p>
+                          </section>
+
+                          <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <h4 className="text-sm font-semibold text-slate-900">세부 진행현황</h4>
+                              {view.elapsedSeconds !== null && (
+                                <p className="text-xs font-medium text-slate-600">{view.elapsedSeconds}초째 진행 중</p>
+                              )}
                             </div>
-                            <div className="flex items-center gap-2">
-                              <StatusBadge status={task.status} label={mapStatusLabel(task.status)} />
+                            <p className="mt-1 text-xs text-slate-500">
+                              {view.progress.currentStep}/{view.progress.totalSteps}
+                              {view.progress.reviewTotalRounds > 0 && ` · 리뷰 ${view.progress.reviewRound}/${view.progress.reviewTotalRounds}`}
+                              {view.progress.label ? ` · ${view.progress.label}` : ''}
+                            </p>
+                            <p className="mt-1 text-xs text-slate-700">{view.summary}</p>
+                            <ul className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-xs">
+                              {EXECUTION_STEP_ITEMS.map((item) => {
+                                const state = stepState(view.currentStep, item.step);
+                                return (
+                                  <li key={`${view.task.id}-step-${item.step}`} className={`py-0.5 ${stepStateClass(state)}`}>
+                                    {String(item.step).padStart(2, '0')}. {item.label}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </section>
+
+                          <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                              <h4 className="text-sm font-semibold text-slate-900">리뷰 라운드 내용</h4>
+                              <p className="text-xs text-slate-500">{view.reviewRoundList.length}건</p>
+                            </div>
+                            {view.reviewRoundList.length === 0 && (
+                              <p className="text-xs text-slate-600">
+                                리뷰 라운드가 시작되면 검토 결과와 수정 내역이 여기에 표시됩니다.
+                              </p>
+                            )}
+                            <div className="grid gap-2">
+                              {view.reviewRoundList.map((round) => {
+                                const findings = round.review?.findings || [];
+                                return (
+                                  <details key={`${view.task.id}-round-${round.round}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2" open>
+                                    <summary className="cursor-pointer text-sm font-semibold text-slate-900">
+                                      라운드 {round.round}
+                                      {round.review?.approval ? ` · ${round.review.approval}` : ''}
+                                      {findings.length > 0 ? ` · 발견사항 ${findings.length}건` : ''}
+                                    </summary>
+                                    <div className="mt-2 grid gap-2 text-sm text-slate-700">
+                                      {round.review?.summary && (
+                                        <p>
+                                          <strong>리뷰 요약:</strong> {round.review.summary}
+                                        </p>
+                                      )}
+                                      {findings.length > 0 && (
+                                        <div className="rounded-md border border-amber-200 bg-amber-50 p-2">
+                                          <p className="text-xs font-semibold text-amber-900">발견사항</p>
+                                          <ul className="mt-1 list-disc pl-5 text-xs text-amber-900">
+                                            {findings.map((finding, index) => (
+                                              <li key={`${view.task.id}-round-${round.round}-${finding.id || finding.title || index}`}>
+                                                <strong>{finding.severity || '-'}</strong>
+                                                {finding.mustFix ? ' [Must Fix]' : ''}
+                                                {finding.title ? ` · ${finding.title}` : ''}
+                                                {finding.description ? ` — ${finding.description}` : ''}
+                                                {finding.fileRefs.length > 0 ? ` (${finding.fileRefs.join(', ')})` : ''}
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+                                      {round.patch?.summary && (
+                                        <p>
+                                          <strong>수정 요약:</strong> {round.patch.summary}
+                                        </p>
+                                      )}
+                                      {round.patch && (
+                                        <div className="grid gap-1 text-xs text-slate-600">
+                                          {round.patch.resolvedFindings.length > 0 && (
+                                            <p>해결한 항목: {round.patch.resolvedFindings.join(', ')}</p>
+                                          )}
+                                          {round.patch.declinedFindings.length > 0 && (
+                                            <p>보류/미해결 항목: {round.patch.declinedFindings.join(', ')}</p>
+                                          )}
+                                          {round.patch.testsRun.length > 0 && (
+                                            <p>실행한 테스트: {round.patch.testsRun.join(', ')}</p>
+                                          )}
+                                          {round.patch.newCommits.length > 0 && (
+                                            <p>라운드 커밋: {round.patch.newCommits.join(', ')}</p>
+                                          )}
+                                          {round.patch.notes.length > 0 && (
+                                            <p>노트: {round.patch.notes.join(', ')}</p>
+                                          )}
+                                        </div>
+                                      )}
+                                      {round.review?.residualRisks.length ? (
+                                        <p className="text-xs text-rose-700">잔여 리스크: {round.review.residualRisks.join(', ')}</p>
+                                      ) : null}
+                                    </div>
+                                  </details>
+                                );
+                              })}
+                            </div>
+                          </section>
+
+                          {view.detail ? (
+                            <TaskTimeline
+                              executions={view.detail.executions}
+                              collapsed={timelineCollapsed}
+                              onToggle={() => toggleTaskTimeline(view.task.id)}
+                            />
+                          ) : (
+                            <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                              <h4 className="text-sm font-semibold text-slate-900">작업 타임라인</h4>
+                              <p className="mt-1 text-xs text-slate-600">타임라인 상세를 불러오는 중입니다.</p>
+                            </section>
+                          )}
+
+                          {view.task.last_error && (
+                            <p className="text-sm text-rose-700">오류: {view.task.last_error}</p>
+                          )}
+
+                          <section className="flex flex-wrap justify-end gap-2">
+                            {view.canShowCreatePrButton && (
                               <button
                                 type="button"
-                                className={SUB_BUTTON_CLASS}
-                                onClick={() => toggleRunningTask(task.id)}
+                                className={BUTTON_CLASS}
+                                onClick={() => openCreatePrModal(view.task.id, view.currentTaskBranch)}
+                                disabled={Boolean(busyAction)}
                               >
-                                {isCollapsed ? '펼치기' : '접기'}
+                                PR 생성
                               </button>
-                            </div>
-                          </div>
-
-                          {!isCollapsed && (
-                            <div className="mt-3 space-y-2">
-                              <p className="text-xs text-slate-500">
-                                {progress.currentStep}/{progress.totalSteps}
-                                {progress.reviewTotalRounds > 0 && ` · 리뷰 ${progress.reviewRound}/${progress.reviewTotalRounds}`}
-                                {progress.label ? ` · ${progress.label}` : ''}
-                              </p>
-                              <div className="flex items-start justify-between gap-3">
-                                <p className="text-xs text-slate-700">{summary}</p>
-                                {elapsedSeconds !== null && (
-                                  <p className="text-xs font-medium text-slate-600">{elapsedSeconds}초째 진행 중</p>
-                                )}
-                              </div>
-                              <ul className="rounded-md border border-slate-200 bg-slate-50 p-2 text-xs">
-                                {EXECUTION_STEP_ITEMS.map((item) => {
-                                  const state = stepState(currentStep, item.step);
-                                  return (
-                                    <li key={`${task.id}-step-${item.step}`} className={`py-0.5 ${stepStateClass(state)}`}>
-                                      {String(item.step).padStart(2, '0')}. {item.label}
-                                    </li>
-                                  );
+                            )}
+                            {view.canResumeTask && (
+                              <button
+                                type="button"
+                                className={BUTTON_CLASS}
+                                onClick={() => onRunAction('코드 작업 재개', async () => {
+                                  await resumeCodeTask(view.task.id);
+                                  return view.task.id;
                                 })}
-                              </ul>
-                              <div className="flex justify-end">
-                                <button
-                                  type="button"
-                                  className={SUB_BUTTON_CLASS}
-                                  onClick={() => onSelectTask(task.id)}
-                                >
-                                  상세 보기
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </article>
-                      );
-                    })}
-                  </div>
-                </div>
+                                disabled={Boolean(busyAction)}
+                              >
+                                코드 작업 재개
+                              </button>
+                            )}
+                          </section>
 
-                {!selectedTaskId && <p className={EMPTY_CLASS}>코드 작업이 없습니다.</p>}
-                {selectedTaskId && !detail && <p className={EMPTY_CLASS}>코드 작업 상세를 불러오는 중입니다.</p>}
-
-                {selectedTaskId && detail && (
-                  <article className="grid gap-4 border-t border-slate-200 pt-4">
-                    <header className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
-                      <h3 className="text-lg font-semibold text-slate-900">{detail.task.title}</h3>
-                      <div className="flex flex-wrap gap-1.5">
-                        <StatusBadge status={detail.task.status} label={mapStatusLabel(detail.task.status)} />
-                        <StatusBadge status={detail.task.approval_state} label={mapStatusLabel(detail.task.approval_state)} />
-                        <DomainBadge label={mapDomainLabel(detail.task.domain)} />
-                      </div>
-                    </header>
-
-                    {detailCommandText && (
-                      <section className="rounded-xl border border-slate-200 bg-white p-3">
-                        <h4 className="text-sm font-semibold text-slate-900">작업 요청 메시지</h4>
-                        <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">{detailCommandText}</p>
-                      </section>
-                    )}
-
-                    <p className="text-sm text-slate-600">{detail.task.summary || '요약이 아직 없습니다.'}</p>
-                    {detail.task.last_error && <p className="text-sm text-rose-700">오류: {detail.task.last_error}</p>}
-
-                    {executionProgress && (
-                      <section className="rounded-xl border border-slate-200 bg-white p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <h4 className="text-sm font-semibold text-slate-900">세부 진행 현황</h4>
-                          {executionStepElapsedSeconds !== null && (
-                            <p className="text-xs font-medium text-slate-600">{executionStepElapsedSeconds}초째 진행 중</p>
+                          {view.canResumeTask && (
+                            <p className="text-xs text-slate-600">
+                              실행이 중단/정체된 경우 <strong>코드 작업 재개</strong>로 이어서 진행할 수 있습니다.
+                              {view.hasTokenOrAuthError ? ' 토큰/인증 오류가 원인이면 토큰 갱신 후 재개하세요.' : ''}
+                            </p>
                           )}
                         </div>
-                        <p className="mt-2 text-xs text-slate-500">
-                          {executionProgress.currentStep}/{executionProgress.totalSteps}
-                          {executionProgress.reviewTotalRounds > 0 && ` · 리뷰 ${executionProgress.reviewRound}/${executionProgress.reviewTotalRounds}`}
-                          {executionProgress.label ? ` · ${executionProgress.label}` : ''}
-                        </p>
-                        <div className="mt-1 flex items-start justify-between gap-3">
-                          <p className="text-xs text-slate-700">{executionStepSummary}</p>
-                          {canShowCreatePrButton && (
-                            <button
-                              type="button"
-                              className={BUTTON_CLASS}
-                              onClick={openCreatePrModal}
-                              disabled={Boolean(busyAction)}
-                            >
-                              PR 생성
-                            </button>
-                          )}
-                        </div>
-                        <ul className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs">
-                          {EXECUTION_STEP_ITEMS.map((item) => {
-                            const state = stepState(Math.max(0, Number(executionProgress.currentStep || 0)), item.step);
-                            return (
-                              <li key={`detail-step-${item.step}`} className={`py-0.5 ${stepStateClass(state)}`}>
-                                {String(item.step).padStart(2, '0')}. {item.label}
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </section>
-                    )}
-
-                    <section className="rounded-xl border border-slate-200 bg-white p-3">
-                      <div className="mb-2 flex items-center justify-between gap-3">
-                        <h4 className="text-sm font-semibold text-slate-900">리뷰 라운드 내용</h4>
-                        <p className="text-xs text-slate-500">{reviewRoundList.length}건</p>
-                      </div>
-                      {reviewRoundList.length === 0 && (
-                        <p className="text-xs text-slate-600">
-                          리뷰 라운드가 시작되면 검토 결과와 수정 내역이 여기에 표시됩니다.
-                        </p>
                       )}
-                      <div className="grid gap-2">
-                        {reviewRoundList.map((round) => {
-                          const findings = round.review?.findings || [];
-                          return (
-                            <details key={round.round} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2" open>
-                              <summary className="cursor-pointer text-sm font-semibold text-slate-900">
-                                라운드 {round.round}
-                                {round.review?.approval ? ` · ${round.review.approval}` : ''}
-                                {findings.length > 0 ? ` · 발견사항 ${findings.length}건` : ''}
-                              </summary>
-
-                              <div className="mt-2 grid gap-2 text-sm text-slate-700">
-                                {round.review?.summary && (
-                                  <p>
-                                    <strong>리뷰 요약:</strong> {round.review.summary}
-                                  </p>
-                                )}
-
-                                {findings.length > 0 && (
-                                  <div className="rounded-md border border-amber-200 bg-amber-50 p-2">
-                                    <p className="text-xs font-semibold text-amber-900">발견사항</p>
-                                    <ul className="mt-1 list-disc pl-5 text-xs text-amber-900">
-                                      {findings.map((finding, index) => (
-                                        <li key={`${round.round}-${finding.id || finding.title || index}`}>
-                                          <strong>{finding.severity || '-'}</strong>
-                                          {finding.mustFix ? ' [Must Fix]' : ''}
-                                          {finding.title ? ` · ${finding.title}` : ''}
-                                          {finding.description ? ` — ${finding.description}` : ''}
-                                          {finding.fileRefs.length > 0 ? ` (${finding.fileRefs.join(', ')})` : ''}
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                )}
-
-                                {round.patch?.summary && (
-                                  <p>
-                                    <strong>수정 요약:</strong> {round.patch.summary}
-                                  </p>
-                                )}
-
-                                {round.patch && (
-                                  <div className="grid gap-1 text-xs text-slate-600">
-                                    {round.patch.resolvedFindings.length > 0 && (
-                                      <p>해결한 항목: {round.patch.resolvedFindings.join(', ')}</p>
-                                    )}
-                                    {round.patch.declinedFindings.length > 0 && (
-                                      <p>보류/미해결 항목: {round.patch.declinedFindings.join(', ')}</p>
-                                    )}
-                                    {round.patch.testsRun.length > 0 && (
-                                      <p>실행한 테스트: {round.patch.testsRun.join(', ')}</p>
-                                    )}
-                                    {round.patch.newCommits.length > 0 && (
-                                      <p>라운드 커밋: {round.patch.newCommits.join(', ')}</p>
-                                    )}
-                                    {round.patch.notes.length > 0 && (
-                                      <p>노트: {round.patch.notes.join(', ')}</p>
-                                    )}
-                                  </div>
-                                )}
-
-                                {round.review?.residualRisks && round.review.residualRisks.length > 0 && (
-                                  <p className="text-xs text-rose-700">잔여 리스크: {round.review.residualRisks.join(', ')}</p>
-                                )}
-                              </div>
-                            </details>
-                          );
-                        })}
-                      </div>
-                    </section>
-
-                    <TaskTimeline
-                      executions={detail.executions}
-                      collapsed={collapsedSections.code_timeline}
-                      onToggle={() => onToggleSection('code_timeline')}
-                    />
-
-                    <section className="flex flex-wrap gap-2 justify-end">
-                      <button
-                        type="button"
-                        className={BUTTON_CLASS}
-                        onClick={() => onRunAction('코드 작업 실행', async () => {
-                          await runTask(detail.task.id);
-                          return detail.task.id;
-                        })}
-                        disabled={Boolean(busyAction)}
-                      >
-                        코드 작업 실행
-                      </button>
-                      {canResumeSelectedTask && (
-                        <button
-                          type="button"
-                          className={BUTTON_CLASS}
-                          onClick={() => onRunAction('코드 작업 재개', async () => {
-                            await resumeCodeTask(detail.task.id);
-                            return detail.task.id;
-                          })}
-                          disabled={Boolean(busyAction)}
-                        >
-                          코드 작업 재개
-                        </button>
-                      )}
-                    </section>
-                    <section className="flex flex-wrap gap-2 justify-end">
-                      <button
-                        type="button"
-                        className={BUTTON_CLASS}
-                        onClick={() => onRunAction('작업 승인', async () => {
-                          await approveTask(detail.task.id);
-                          return detail.task.id;
-                        })}
-                        disabled={Boolean(busyAction)}
-                      >
-                        승인
-                      </button>
-                      <button
-                        type="button"
-                        className={BUTTON_CLASS}
-                        onClick={() => onRunAction('작업 무시', async () => {
-                          await ignoreTask(detail.task.id);
-                          return detail.task.id;
-                        })}
-                        disabled={Boolean(busyAction)}
-                      >
-                        무시
-                      </button>
-                    </section>
-                    {canResumeSelectedTask && (
-                      <p className="text-xs text-slate-600">
-                        실행 중 중단/오류가 발생한 작업은 <strong>코드 작업 재개</strong>로 이어서 진행할 수 있습니다.
-                        {hasTokenOrAuthError ? ' 토큰/인증 오류가 원인이면 토큰 갱신 후 재개하세요.' : ''}
-                      </p>
-                    )}
-                  </article>
-                )}
-              </>
+                    </article>
+                  );
+                })}
+              </div>
             )}
           </section>
         </>
       )}
-      {showCreatePrModal && detail && (
+
+      {createPrTarget && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/55 p-4">
           <section className="w-full max-w-xl rounded-xl border border-slate-200 bg-white p-4 shadow-lg">
             <h4 className="text-base font-semibold text-slate-900">PR 생성</h4>
@@ -871,7 +788,7 @@ export function CodeExecutionPanel({
               <button
                 type="button"
                 className={SUB_BUTTON_CLASS}
-                onClick={() => setShowCreatePrModal(false)}
+                onClick={closeCreatePrModal}
                 disabled={Boolean(busyAction)}
               >
                 취소

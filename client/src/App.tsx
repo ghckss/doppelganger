@@ -22,7 +22,6 @@ import {
   type DraftEditorState,
   findDomain,
   getCodeReviewStatus,
-  getExecutionProgress,
   toDraftEditor
 } from './task-view';
 
@@ -91,11 +90,19 @@ export default function App() {
   const slackTasks = tasks.filter((task) => task.domain === 'slack_mention');
   const githubReviewTasks = tasks.filter((task) => task.domain === 'github_review');
   const codeExecutionTasks = codeTasks.filter((task) => task.domain === 'code_execution');
+  const runningCodeTaskIds = useMemo(
+    () => codeExecutionTasks
+      .filter((task) => String(task.status || '').toLowerCase() === 'running')
+      .map((task) => task.id),
+    [codeExecutionTasks]
+  );
 
   const selectedSlackTaskId = selectedTaskIdByDomain.slack_mention || '';
   const selectedGitHubTaskId = selectedTaskIdByDomain.github_review || '';
-  const selectedCodeTaskId = selectedTaskIdByDomain.code_execution || '';
-  const selectedDetailTaskIds = [selectedSlackTaskId, selectedGitHubTaskId, selectedCodeTaskId].filter(Boolean);
+  const selectedDetailTaskIds = useMemo(
+    () => Array.from(new Set([selectedSlackTaskId, selectedGitHubTaskId, ...runningCodeTaskIds].filter(Boolean))),
+    [runningCodeTaskIds, selectedGitHubTaskId, selectedSlackTaskId]
+  );
 
   const detailQueries = useQueries({
     queries: selectedDetailTaskIds.map((taskId) => ({
@@ -119,7 +126,12 @@ export default function App() {
 
   const slackDetail = selectedSlackTaskId ? detailMap[selectedSlackTaskId] || null : null;
   const githubDetail = selectedGitHubTaskId ? detailMap[selectedGitHubTaskId] || null : null;
-  const codeDetail = selectedCodeTaskId ? detailMap[selectedCodeTaskId] || null : null;
+  const runningCodeDetails = useMemo(
+    () => runningCodeTaskIds
+      .map((taskId) => detailMap[taskId])
+      .filter((detail): detail is TaskDetail => Boolean(detail)),
+    [detailMap, runningCodeTaskIds]
+  );
 
   const slackEditor = slackDetail ? draftEditorsByTaskId[slackDetail.task.id] : null;
   const githubEditor = githubDetail ? draftEditorsByTaskId[githubDetail.task.id] : null;
@@ -142,7 +154,6 @@ export default function App() {
     )
   );
 
-  const codeExecutionProgress = codeDetail ? getExecutionProgress(codeDetail.task) : null;
   const loadingTasks = tasksQuery.isFetching || codeTasksQuery.isFetching;
   const anyDetailLoading = detailQueries.some((query) => query.isFetching);
   const queryErrorMessage = asText((metaQuery.error as Error | undefined)?.message)
@@ -392,9 +403,7 @@ export default function App() {
           <CodeExecutionPanel
             meta={metaQuery.data || null}
             tasks={codeExecutionTasks}
-            selectedTaskId={selectedCodeTaskId}
-            detail={codeDetail}
-            executionProgress={codeExecutionProgress}
+            runningDetails={runningCodeDetails}
             collapsedSections={collapsedSections}
             busyAction={busyAction}
             command={command}
@@ -405,12 +414,6 @@ export default function App() {
             needsPlanning={needsPlanning}
             needsDesign={needsDesign}
             onToggleSection={toggleSection}
-            onSelectTask={(taskId) => {
-              setSelectedTaskIdByDomain((current) => ({
-                ...current,
-                code_execution: taskId
-              }));
-            }}
             onSetCommand={setCommand}
             onSetProjectId={setProjectId}
             onSetBaseBranch={setBaseBranch}
