@@ -7,6 +7,7 @@ import type {
   ExecutionProgress
 } from '../task-view';
 import {
+  getExecutionProgress,
   getExecutionStepElapsedSeconds,
   mapDomainLabel,
   mapStatusLabel,
@@ -260,6 +261,7 @@ export function CodeExecutionPanel({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [showCreatePrModal, setShowCreatePrModal] = useState(false);
   const [prBranchName, setPrBranchName] = useState('');
+  const [collapsedRunningTaskById, setCollapsedRunningTaskById] = useState<Record<string, boolean>>({});
   const sortedTasks = useMemo(() => {
     const list = [...tasks];
     list.sort((left, right) => {
@@ -275,7 +277,31 @@ export function CodeExecutionPanel({
     });
     return list;
   }, [tasks]);
-  const runningTaskCount = sortedTasks.filter((task) => String(task.status || '').toLowerCase() === 'running').length;
+  const runningTasks = useMemo(
+    () => sortedTasks.filter((task) => String(task.status || '').toLowerCase() === 'running'),
+    [sortedTasks]
+  );
+  const runningTaskViews = useMemo(
+    () => runningTasks.map((task) => {
+      const rawProgress = getExecutionProgress(task);
+      const progress = rawProgress || {
+        phase: '',
+        label: '',
+        currentStep: 0,
+        totalSteps: 8,
+        percent: 0,
+        reviewRound: 0,
+        reviewTotalRounds: 3
+      };
+      return {
+        task,
+        progress,
+        summary: summarizeExecutionStep(progress),
+        elapsedSeconds: getExecutionStepElapsedSeconds(task, rawProgress, nowMs)
+      };
+    }),
+    [runningTasks, nowMs]
+  );
   const executionStepSummary = executionProgress
     ? summarizeExecutionStep(executionProgress)
     : '';
@@ -311,13 +337,39 @@ export function CodeExecutionPanel({
   const reviewRoundList = useMemo(() => mergeReviewRoundList(detail), [detail]);
 
   useEffect(() => {
-    const isRunningStep = Boolean(
-      detail
-      && executionProgress
-      && String(detail.task.status || '').toLowerCase() === 'running'
-      && Number(executionProgress.currentStep || 0) > 0
-    );
-    if (!isRunningStep) {
+    setCollapsedRunningTaskById((current) => {
+      const next: Record<string, boolean> = {};
+      let changed = false;
+
+      for (const task of runningTasks) {
+        if (Object.prototype.hasOwnProperty.call(current, task.id)) {
+          next[task.id] = current[task.id];
+          continue;
+        }
+        next[task.id] = false;
+        changed = true;
+      }
+
+      for (const taskId of Object.keys(current)) {
+        if (!runningTasks.some((task) => task.id === taskId)) {
+          changed = true;
+          break;
+        }
+      }
+
+      if (!changed) {
+        const currentKeys = Object.keys(current);
+        if (currentKeys.length === Object.keys(next).length) {
+          return current;
+        }
+      }
+
+      return next;
+    });
+  }, [runningTasks]);
+
+  useEffect(() => {
+    if (runningTasks.length === 0) {
       return;
     }
 
@@ -329,11 +381,7 @@ export function CodeExecutionPanel({
       window.clearInterval(timerId);
     };
   }, [
-    detail?.task.id,
-    detail?.task.status,
-    detail?.task.updated_at,
-    executionProgress?.currentStep,
-    executionProgress?.phase
+    runningTasks
   ]);
 
   useEffect(() => {
@@ -363,6 +411,13 @@ export function CodeExecutionPanel({
       return detail.task.id;
     });
     setShowCreatePrModal(false);
+  }
+
+  function toggleRunningTask(taskId: string) {
+    setCollapsedRunningTaskById((current) => ({
+      ...current,
+      [taskId]: !current[taskId]
+    }));
   }
 
   return (
@@ -450,7 +505,7 @@ export function CodeExecutionPanel({
 
           <section className="mt-4 border-t border-slate-200 pt-4">
             <div className="mb-4 flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-900">코드 작업 목록</h3>
+              <h3 className="text-sm font-semibold text-slate-900">실행 중 코드 작업</h3>
               <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('code_tasks')}>
                 {collapsedSections.code_tasks ? '펼치기' : '접기'}
               </button>
@@ -458,34 +513,70 @@ export function CodeExecutionPanel({
             {!collapsedSections.code_tasks && (
               <>
                 <div className={`${SECTION_HEADER_CLASS} border-amber-200 bg-amber-100/80`}>
-                  <h2 className="text-base font-semibold text-slate-800">코드 작업</h2>
-                  <span className={`${SECTION_COUNT_CLASS} border-amber-200`}>{sortedTasks.length}건</span>
+                  <h2 className="text-base font-semibold text-slate-800">진행 현황</h2>
+                  <span className={`${SECTION_COUNT_CLASS} border-amber-200`}>{runningTasks.length}건</span>
                 </div>
 
                 <div className="mb-4">
                   <p className="mb-2 text-xs text-slate-600">
-                    진행 중 {runningTaskCount}건
+                    실행 중인 태스크만 표시합니다.
                   </p>
-                  <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
-                    {sortedTasks.length === 0 && (
-                      <p className={EMPTY_CLASS}>선택 가능한 작업이 없습니다.</p>
+                  <div className="max-h-[34rem] space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
+                    {runningTaskViews.length === 0 && (
+                      <p className={EMPTY_CLASS}>현재 실행 중인 코드 작업이 없습니다.</p>
                     )}
-                    {sortedTasks.map((task) => {
-                      const isSelected = selectedTaskId === task.id;
+                    {runningTaskViews.map(({ task, progress, summary, elapsedSeconds }) => {
+                      const isCollapsed = Boolean(collapsedRunningTaskById[task.id]);
+                      const isSelected = task.id === selectedTaskId;
                       return (
-                        <button
+                        <article
                           key={task.id}
-                          type="button"
-                          className={`w-full rounded-lg border px-3 py-2 text-left transition ${
-                            isSelected
-                              ? 'border-amber-300 bg-amber-50'
-                              : 'border-slate-200 bg-white hover:border-amber-200 hover:bg-amber-50/40'
-                          }`}
-                          onClick={() => onSelectTask(task.id)}
+                          className={`rounded-lg border p-3 ${isSelected ? 'border-amber-300 bg-amber-50/70' : 'border-slate-200 bg-white'}`}
                         >
-                          <p className="text-xs text-slate-500">{mapStatusLabel(task.status)}</p>
-                          <p className="mt-0.5 truncate text-sm font-medium text-slate-900">{task.title}</p>
-                        </button>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-slate-900">{task.title}</p>
+                              <p className="mt-1 text-xs text-slate-500">{mapStatusLabel(task.status)}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <StatusBadge status={task.status} label={mapStatusLabel(task.status)} />
+                              <button
+                                type="button"
+                                className={SUB_BUTTON_CLASS}
+                                onClick={() => toggleRunningTask(task.id)}
+                              >
+                                {isCollapsed ? '펼치기' : '접기'}
+                              </button>
+                            </div>
+                          </div>
+
+                          {!isCollapsed && (
+                            <div className="mt-3 space-y-2">
+                              <p className="text-xs text-slate-700">{progress.phase || '-'}</p>
+                              <ProgressBar percent={progress.percent} />
+                              <p className="text-xs text-slate-500">
+                                {progress.currentStep}/{progress.totalSteps}
+                                {progress.reviewTotalRounds > 0 && ` · 리뷰 ${progress.reviewRound}/${progress.reviewTotalRounds}`}
+                                {progress.label ? ` · ${progress.label}` : ''}
+                              </p>
+                              <div className="flex items-start justify-between gap-3">
+                                <p className="text-xs text-slate-700">{summary}</p>
+                                {elapsedSeconds !== null && (
+                                  <p className="text-xs font-medium text-slate-600">{elapsedSeconds}초째 진행 중</p>
+                                )}
+                              </div>
+                              <div className="flex justify-end">
+                                <button
+                                  type="button"
+                                  className={SUB_BUTTON_CLASS}
+                                  onClick={() => onSelectTask(task.id)}
+                                >
+                                  상세 보기
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </article>
                       );
                     })}
                   </div>
