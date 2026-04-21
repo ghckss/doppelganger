@@ -89,7 +89,20 @@ export function GitHubPanel({
           {selectedTaskId && detail && editor && (
             <article className="grid gap-4 border-t border-slate-200 pt-4">
               <header className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
-                <h3 className="text-lg font-semibold text-slate-900">{detail.task.title}</h3>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  {String(detail.task.source_url || '').trim()
+                    ? (
+                      <a
+                        className="underline decoration-slate-300 underline-offset-4 transition hover:text-emerald-700 hover:decoration-emerald-400"
+                        href={String(detail.task.source_url || '').trim()}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {detail.task.title}
+                      </a>
+                    )
+                    : detail.task.title}
+                </h3>
                 <div className="flex flex-wrap gap-1.5">
                   <StatusBadge status={detail.task.status} label={mapStatusLabel(detail.task.status)} />
                   <StatusBadge status={detail.task.approval_state} label={mapStatusLabel(detail.task.approval_state)} />
