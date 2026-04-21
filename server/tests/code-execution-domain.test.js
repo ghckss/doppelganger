@@ -359,6 +359,8 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(repo.listArtifacts(task.id, 'patch_round').length, 3);
   assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
   assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
+  assert.equal(read('git', ['show', 'main:README.md'], workspace.repoDir), '# Demo\n\nImplemented by agent.');
+  assert.equal(read('git', ['show', 'main:src/index.js'], workspace.repoDir), 'export const value = 2;');
   assert.equal(typeof finishedTask.result.sourceCommit, 'string');
   assert.ok(finishedTask.result.sourceCommit.length > 0);
   assert.equal(finishedTask.result.branchCleanup?.deleted, true);

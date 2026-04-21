@@ -669,6 +669,63 @@ export function createCodeExecutionDomain({
     };
   }
 
+  async function mergeTaskBranchIntoBase(taskId, workspace, {
+    workBranch,
+    baseBranch
+  } = {}) {
+    const normalizedWorkBranch = normalizeWhitespace(workBranch);
+    const normalizedBaseBranch = normalizeWhitespace(baseBranch || workspace.git.baseBranch);
+    if (!normalizedWorkBranch || !normalizedBaseBranch) {
+      return {
+        merged: false,
+        workBranch: normalizedWorkBranch || null,
+        baseBranch: normalizedBaseBranch || null,
+        head: ''
+      };
+    }
+
+    try {
+      await assertCleanWorktree(workspace.git.root, '작업 브랜치 병합 전에 작업 트리가 깨끗해야 합니다');
+      await checkoutTaskBranchFromSourceCommit(repo.getTask(taskId), workspace, normalizedWorkBranch);
+      await assertCleanWorktree(workspace.git.root, '작업 브랜치 병합 전에 작업 트리가 깨끗해야 합니다');
+
+      if (normalizedBaseBranch !== normalizedWorkBranch) {
+        const baseExists = await localBranchExists(workspace.git.root, normalizedBaseBranch);
+        if (!baseExists) {
+          throw new Error(`기준 브랜치를 찾을 수 없습니다: ${normalizedBaseBranch}`);
+        }
+
+        await runGit(workspace.git.root, ['checkout', normalizedBaseBranch]);
+        await runGit(workspace.git.root, ['merge', '--ff-only', normalizedWorkBranch]);
+      }
+
+      const head = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
+      repo.logExecution(taskId, 'merge_task_branch', 'success', {
+        response: {
+          workBranch: normalizedWorkBranch,
+          baseBranch: normalizedBaseBranch,
+          head
+        }
+      });
+      return {
+        merged: true,
+        workBranch: normalizedWorkBranch,
+        baseBranch: normalizedBaseBranch,
+        head
+      };
+    } catch (error) {
+      const formattedError = formatExecutionError(error);
+      repo.logExecution(taskId, 'merge_task_branch', 'failed', {
+        response: {
+          workBranch: normalizedWorkBranch,
+          baseBranch: normalizedBaseBranch
+        },
+        error: formattedError
+      });
+      throw new Error(`기준 브랜치(${normalizedBaseBranch}) 병합에 실패했습니다: ${formattedError}`);
+    }
+  }
+
   async function ensureBranch(task, workspace) {
     const currentTask = repo.getTask(task.id);
     const existingBranch = normalizeWhitespace(currentTask.payload?.branchName);
@@ -1349,14 +1406,18 @@ export function createCodeExecutionDomain({
         response: pullRequest
       });
       const sourceCommit = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
+      const mergeResult = await mergeTaskBranchIntoBase(taskId, workspace, {
+        workBranch: branchName,
+        baseBranch: workspace.git.baseBranch
+      });
       const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
         workBranch: branchName,
-        preferredRestoreBranch: branchState.restoreBranch,
+        preferredRestoreBranch: workspace.git.baseBranch,
         deleteWorkBranch: branchState.branchManaged
       });
-      const completionSummary = workspaceCleanup.deleted
-        ? `${branchName} 브랜치에서 구현을 마쳤고 ${workspaceCleanup.restoreBranch || workspace.git.baseBranch} 브랜치로 복귀 후 작업 브랜치를 정리했습니다. PR 생성 준비가 되었습니다.`
-        : `${branchName} 브랜치에서 구현을 마쳤습니다. PR 생성 준비가 되었습니다.`;
+      const completionSummary = `${branchName} 브랜치 커밋을 ${mergeResult.baseBranch || workspace.git.baseBranch}에 병합했고 `
+        + `${workspaceCleanup.restoreBranch || workspace.git.baseBranch} 브랜치로 복귀 후 작업 브랜치를 정리했습니다. `
+        + 'PR 생성 준비가 되었습니다.';
 
       repo.updateTask(taskId, {
         status: 'awaiting_approval',
@@ -1367,6 +1428,7 @@ export function createCodeExecutionDomain({
           baseBranch: workspace.git.baseBranch,
           sourceCommit,
           restoreBranch: workspaceCleanup.restoreBranch || branchState.restoreBranch || workspace.git.baseBranch,
+          merge: mergeResult,
           branchCleanup: workspaceCleanup,
           repoSlug: workspace.git.repoSlug,
           promptPlan: plans.promptPlan,
@@ -1536,7 +1598,7 @@ export function createCodeExecutionDomain({
       }
       const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
         workBranch: sourceBranch,
-        preferredRestoreBranch: normalizeWhitespace(task.payload?.restoreBranch),
+        preferredRestoreBranch: normalizeWhitespace(task.result?.restoreBranch || task.payload?.restoreBranch),
         deleteWorkBranch: Boolean(task.payload?.branchManaged)
       });
 

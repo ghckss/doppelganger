@@ -176,8 +176,8 @@ Resume behavior:
 - UI에서는 진행 카드의 `n/8` 표시 아래에 현재 단계에서 수행 중인 작업 요약 한 줄을 함께 표시합니다.
 - UI에서는 진행 카드 우상단에 현재 단계 기준 경과 시간(초 단위, `task.updated_at` 기반)을 표시합니다.
 - UI에서는 코드 작업 상세에 `리뷰 라운드 내용` 영역이 표시되며, `result.reviewRounds`와 `review_round/patch_round` 아티팩트를 합쳐 각 라운드의 검토/수정 내역을 확인할 수 있습니다.
-- 코드 작업 완료 시 로컬 저장소는 `restoreBranch`(기존 브랜치)로 자동 복귀하며, 자동 생성된 작업 브랜치(`doppelganger/...`)는 로컬에서 삭제됩니다.
-- PR 생성 시 작업 브랜치가 이미 삭제된 상태면 `result.sourceCommit` 기준으로 임시 복구해 push/PR 생성 후 다시 정리합니다.
+- 코드 작업 완료 시 작업 브랜치 커밋을 `baseBranch`(기준 브랜치)에 `--ff-only`로 먼저 병합한 뒤, 작업 브랜치(`doppelganger/...`)를 로컬에서 삭제하고 기준 브랜치로 복귀합니다.
+- 병합에 실패하면 작업은 `failed`로 전환되고 작업 브랜치는 보존됩니다.
 
 ## Notes
 - 현재 서버는 기존 Node.js 런타임을 유지하고, TypeScript 전환 기반(`server/tsconfig.json`)만 먼저 적용했습니다.
