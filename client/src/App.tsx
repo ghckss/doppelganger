@@ -78,11 +78,18 @@ export default function App() {
     refetchInterval: REFRESH_INTERVAL_MS,
     refetchIntervalInBackground: true
   });
+  const codeTasksQuery = useQuery({
+    queryKey: ['tasks', true],
+    queryFn: () => fetchTasks(true),
+    refetchInterval: REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: true
+  });
 
   const tasks = tasksQuery.data?.tasks || [];
+  const codeTasks = codeTasksQuery.data?.tasks || tasks;
   const slackTasks = tasks.filter((task) => task.domain === 'slack_mention');
   const githubReviewTasks = tasks.filter((task) => task.domain === 'github_review');
-  const codeExecutionTasks = tasks.filter((task) => task.domain === 'code_execution');
+  const codeExecutionTasks = codeTasks.filter((task) => task.domain === 'code_execution');
 
   const selectedSlackTaskId = selectedTaskIdByDomain.slack_mention || '';
   const selectedGitHubTaskId = selectedTaskIdByDomain.github_review || '';
@@ -135,10 +142,11 @@ export default function App() {
   );
 
   const codeExecutionProgress = codeDetail ? getExecutionProgress(codeDetail.task) : null;
-  const loadingTasks = tasksQuery.isFetching;
+  const loadingTasks = tasksQuery.isFetching || codeTasksQuery.isFetching;
   const anyDetailLoading = detailQueries.some((query) => query.isFetching);
   const queryErrorMessage = asText((metaQuery.error as Error | undefined)?.message)
     || asText((tasksQuery.error as Error | undefined)?.message)
+    || asText((codeTasksQuery.error as Error | undefined)?.message)
     || asText((detailQueries.find((query) => query.error)?.error as Error | undefined)?.message);
   const displayError = error || queryErrorMessage;
 
@@ -161,6 +169,7 @@ export default function App() {
           : [];
 
       await queryClient.invalidateQueries({ queryKey: ['tasks', false] });
+      await queryClient.invalidateQueries({ queryKey: ['tasks', true] });
       await queryClient.invalidateQueries({ queryKey: ['meta'] });
 
       const selectedTaskIds = Object.values(selectedTaskIdByDomain).filter(Boolean);
