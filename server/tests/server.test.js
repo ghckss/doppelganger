@@ -91,6 +91,32 @@ test('meeting summarize endpoint validates transcript input', async (t) => {
   }
 });
 
+test('root path redirects to /tasks', async (t) => {
+  try {
+    await withTestServer({
+      llmService: {
+        generateMeetingSummary: async () => ({
+          summary: '',
+          polishedTranscript: '',
+          document: ''
+        })
+      }
+    }, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/`, {
+        redirect: 'manual'
+      });
+      assert.equal(response.status, 303);
+      assert.equal(response.headers.get('location'), '/tasks');
+    });
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'EPERM') {
+      t.skip('sandbox 환경에서 로컬 포트 바인딩이 제한되어 skip');
+      return;
+    }
+    throw error;
+  }
+});
+
 test('meeting summarize endpoint returns generated confluence draft', async (t) => {
   try {
     await withTestServer({
