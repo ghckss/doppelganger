@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-export type MeetingRecorderStatus = 'idle' | 'recording' | 'stopping' | 'error';
+export type MeetingRecorderStatus = 'idle' | 'recording' | 'paused' | 'stopping' | 'error';
 
 export type MeetingStopResult = {
   transcript: string;
@@ -66,9 +66,10 @@ function formatCapturedTime(isoString: string): string {
   if (Number.isNaN(value.valueOf())) {
     return '';
   }
-  return value.toLocaleTimeString('ko-KR', {
-    hour12: false
-  });
+  const hour = String(value.getHours()).padStart(2, '0');
+  const minute = String(value.getMinutes()).padStart(2, '0');
+  const second = String(value.getSeconds()).padStart(2, '0');
+  return `${hour}:${minute}:${second}`;
 }
 
 function renderCapturedTranscript(entries: CapturedEntry[]): string {
@@ -79,7 +80,7 @@ function renderCapturedTranscript(entries: CapturedEntry[]): string {
 
 export function useMeetingRecorder({
   language = 'ko-KR',
-  tickMs = 1000,
+  tickMs = 10000,
   maxResumeAttempts = 3,
   resumeDelayMs = 900
 }: MeetingRecorderOptions = {}) {
@@ -95,11 +96,13 @@ export function useMeetingRecorder({
   const retryTimerRef = useRef<number | null>(null);
   const statusRef = useRef<MeetingRecorderStatus>('idle');
   const stoppingRef = useRef(false);
+  const pauseRequestedRef = useRef(false);
   const stopResolverRef = useRef<((value: MeetingStopResult) => void) | null>(null);
   const startedAtRef = useRef('');
   const finalLinesRef = useRef<string[]>([]);
   const interimLineRef = useRef('');
   const capturedEntriesRef = useRef<CapturedEntry[]>([]);
+  const pendingEntriesRef = useRef<CapturedEntry[]>([]);
   const lastCapturedTextRef = useRef('');
   const retryCountRef = useRef(0);
 
@@ -134,6 +137,15 @@ export function useMeetingRecorder({
     setSnapshotTranscript(renderCapturedTranscript(capturedEntriesRef.current));
   }
 
+  function flushPendingTranscriptEntries() {
+    if (pendingEntriesRef.current.length === 0) {
+      return;
+    }
+    capturedEntriesRef.current = [...capturedEntriesRef.current, ...pendingEntriesRef.current];
+    pendingEntriesRef.current = [];
+    syncCapturedTranscriptState();
+  }
+
   function captureTranscriptLine(value: string, { allowDuplicate = false } = {}) {
     const normalized = normalizeLine(value);
     if (!normalized) {
@@ -143,12 +155,11 @@ export function useMeetingRecorder({
       return;
     }
 
-    capturedEntriesRef.current.push({
+    pendingEntriesRef.current.push({
       capturedAt: nowIso(),
       text: normalized
     });
     lastCapturedTextRef.current = normalized;
-    syncCapturedTranscriptState();
   }
 
   function stopTicker() {
@@ -163,6 +174,7 @@ export function useMeetingRecorder({
     stopTicker();
     tickTimerRef.current = window.setInterval(() => {
       captureTranscriptLine(interimLineRef.current);
+      flushPendingTranscriptEntries();
     }, Math.max(200, tickMs));
   }
 
@@ -190,6 +202,7 @@ export function useMeetingRecorder({
     stopTicker();
     stopRetryTimer();
     captureTranscriptLine(interimLineRef.current);
+    flushPendingTranscriptEntries();
 
     const composedTranscript = composeTranscript(finalLinesRef.current, interimLineRef.current);
     let finalTranscript = capturedEntriesRef.current
@@ -207,6 +220,7 @@ export function useMeetingRecorder({
         capturedAt: nowIso(),
         text: line
       }));
+      pendingEntriesRef.current = [];
       lastCapturedTextRef.current = lines.length > 0 ? lines[lines.length - 1] : '';
       finalTranscript = composedTranscript;
       syncCapturedTranscriptState();
@@ -249,12 +263,14 @@ export function useMeetingRecorder({
 
     stopRetryTimer();
     stopResolverRef.current = null;
+    pauseRequestedRef.current = false;
     teardownRecognition();
 
     if (!preserveSession) {
       finalLinesRef.current = [];
       interimLineRef.current = '';
       capturedEntriesRef.current = [];
+      pendingEntriesRef.current = [];
       lastCapturedTextRef.current = '';
       startedAtRef.current = '';
       setStartedAt('');
@@ -278,7 +294,7 @@ export function useMeetingRecorder({
         }
         if (event.results[index].isFinal) {
           finalLinesRef.current.push(transcript);
-          captureTranscriptLine(transcript);
+          captureTranscriptLine(transcript, { allowDuplicate: true });
           continue;
         }
         interimLine = transcript;
@@ -287,6 +303,9 @@ export function useMeetingRecorder({
     };
 
     recognition.onerror = (event) => {
+      if (pauseRequestedRef.current) {
+        return;
+      }
       if (stoppingRef.current) {
         return;
       }
@@ -305,6 +324,18 @@ export function useMeetingRecorder({
     };
 
     recognition.onend = () => {
+      if (pauseRequestedRef.current) {
+        captureTranscriptLine(interimLineRef.current);
+        flushPendingTranscriptEntries();
+        teardownRecognition();
+        pauseRequestedRef.current = false;
+        stopTicker();
+        stopRetryTimer();
+        setStatus('paused');
+        setError('');
+        return;
+      }
+
       if (stoppingRef.current) {
         const result = finalizeStop();
         teardownRecognition();
@@ -372,9 +403,11 @@ export function useMeetingRecorder({
     }
 
     stoppingRef.current = false;
+    pauseRequestedRef.current = false;
     finalLinesRef.current = [];
     interimLineRef.current = '';
     capturedEntriesRef.current = [];
+    pendingEntriesRef.current = [];
     lastCapturedTextRef.current = '';
     startedAtRef.current = '';
     setStartedAt('');
@@ -402,8 +435,16 @@ export function useMeetingRecorder({
   }
 
   async function stop(): Promise<MeetingStopResult> {
-    if (statusRef.current !== 'recording') {
+    if (statusRef.current !== 'recording' && statusRef.current !== 'paused') {
       return null;
+    }
+
+    if (statusRef.current === 'paused') {
+      pauseRequestedRef.current = false;
+      stopRetryTimer();
+      const result = finalizeStop();
+      setStatus('idle');
+      return result;
     }
 
     setStatus('stopping');
@@ -441,6 +482,41 @@ export function useMeetingRecorder({
     });
   }
 
+  async function pause() {
+    if (statusRef.current !== 'recording') {
+      return;
+    }
+
+    pauseRequestedRef.current = true;
+    stopRetryTimer();
+    stopTicker();
+    setStatus('paused');
+
+    const recognition = recognitionRef.current;
+    if (!recognition) {
+      captureTranscriptLine(interimLineRef.current);
+      flushPendingTranscriptEntries();
+      return;
+    }
+
+    try {
+      recognition.stop();
+    } catch (caught) {
+      pauseRequestedRef.current = false;
+      const message = normalizeLine((caught as Error)?.message || '');
+      setStatus('error');
+      setError(message || '음성 인식을 일시정지하지 못했습니다.');
+    }
+  }
+
+  async function resume() {
+    if (statusRef.current !== 'paused') {
+      return;
+    }
+    setError('');
+    await startRecognitionSession({ preserveSession: true });
+  }
+
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
@@ -471,6 +547,8 @@ export function useMeetingRecorder({
     maxResumeAttempts,
     shouldAutoSummarize,
     start,
+    pause,
+    resume,
     stop,
     resetSession,
     clearAutoSummarizeRequest: () => setShouldAutoSummarize(false)

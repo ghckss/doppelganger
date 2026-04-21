@@ -629,11 +629,10 @@ function normalizeMeetingActionItems(values, { maxItems = 12 } = {}) {
   }];
 }
 
-function normalizeMeetingTranscriptLines(value, { maxLines = 500, maxLineLength = 220 } = {}) {
+function normalizeMeetingTranscriptLines(value, { maxLines = 500, maxLineLength = 320 } = {}) {
   return String(value || '')
     .split(/\r?\n/)
-    .map((line) => normalizeWhitespace(line))
-    .map((line) => line.replace(/^\[\d{1,2}:\d{2}:\d{2}\]\s*/, ''))
+    .map((line) => String(line || '').trim())
     .map((line) => truncateText(line, maxLineLength))
     .filter(Boolean)
     .slice(0, maxLines);
@@ -641,13 +640,45 @@ function normalizeMeetingTranscriptLines(value, { maxLines = 500, maxLineLength 
 
 function buildPolishedTranscript(value) {
   const lines = normalizeMeetingTranscriptLines(value, {
-    maxLines: 600,
-    maxLineLength: 260
+    maxLines: 800,
+    maxLineLength: 360
   });
   if (lines.length === 0) {
     return '';
   }
   return lines.join('\n');
+}
+
+function resolvePolishedTranscript(sourceTranscript, candidateTranscript) {
+  const source = buildPolishedTranscript(sourceTranscript);
+  if (!source) {
+    return buildPolishedTranscript(candidateTranscript);
+  }
+
+  const candidate = buildPolishedTranscript(candidateTranscript);
+  if (!candidate) {
+    return source;
+  }
+
+  const sourceLines = source.split('\n').filter(Boolean);
+  const candidateLines = candidate.split('\n').filter(Boolean);
+  if (sourceLines.length >= 3) {
+    const lineRatio = candidateLines.length / sourceLines.length;
+    if (lineRatio < 0.6) {
+      return source;
+    }
+  }
+
+  const sourceLength = source.length;
+  const candidateLength = candidate.length;
+  if (sourceLength >= 120) {
+    const lengthRatio = candidateLength / sourceLength;
+    if (lengthRatio < 0.55) {
+      return source;
+    }
+  }
+
+  return candidate;
 }
 
 function formatMeetingDocument({
@@ -1837,7 +1868,9 @@ export class LlmService {
       '항상 한국어로 작성한다.',
       '전사 원문에 없는 사실은 추정하지 않는다. 불명확하면 "미확정"으로 둔다.',
       '비개발자도 이해 가능한 쉬운 문장으로 정리한다.',
-      'transcriptPolished에는 전사 내용을 문맥/문법/맞춤법 기준으로 다듬은 본문을 줄바꿈 형태로 제공한다.',
+      'transcriptPolished에는 전사 원문을 요약하지 말고, 원문 흐름/발화 순서를 유지한 채 오인식 단어·문법·맞춤법만 교정해 제공한다.',
+      'transcriptPolished는 가능한 원문 줄 수를 유지하고, 시각 태그([HH:MM:SS])가 있으면 그대로 보존한다.',
+      'transcriptPolished에서 새 정보 추가/삭제/요약 표현으로 재작성하지 않는다.',
       '출력은 반드시 JSON 객체 하나로만 반환한다.',
       '액션 아이템은 task/owner/due/status 필드를 모두 채운다. 모르면 "미확정".',
       'Use this JSON shape:',
@@ -1864,7 +1897,7 @@ export class LlmService {
       const parsed = extractJsonObject(generated.text);
       const title = truncateText(normalizeWhitespace(parsed.title) || fallbackSummary.title, 120);
       const summary = truncateText(normalizeWhitespace(parsed.summary) || fallbackSummary.summary, 260);
-      const polishedTranscript = buildPolishedTranscript(parsed.transcriptPolished || normalizedTranscript);
+      const polishedTranscript = resolvePolishedTranscript(normalizedTranscript, parsed.transcriptPolished);
       const keyPoints = normalizeMeetingList(parsed.keyPoints, {
         fallback: fallbackSummary.document ? [] : ['핵심 논의 정리 필요'],
         maxItems: 10,

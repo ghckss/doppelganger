@@ -75,9 +75,10 @@ A practical setup is often:
 ## Meeting recording workflow
 1. Open the `회의 기록` panel in `/app`.
 2. Click `시작` to begin browser speech recognition (`ko-KR`).
-3. During recording, transcript updates every second in `실시간 전사`.
-4. Click `중지` to stop recording. The transcript panel is refined once for context/grammar/spelling, then the Confluence draft is generated automatically.
-5. Review `Confluence 문서 초안` and click `문서 복사` to paste into Confluence.
+3. During recording, transcript updates every 10 seconds in `실시간 전사`.
+4. Use `일시정지` / `재개` for breaks without ending the session.
+5. Click `중지` to stop recording. The transcript panel is refined for word-level recognition/grammar/spelling while preserving original line flow, then the Confluence draft is generated automatically.
+6. Review `Confluence 문서 초안` and click `문서 복사` to paste into Confluence.
 
 Notes:
 - Transcript and generated document are session-local UI state (not persisted to DB).

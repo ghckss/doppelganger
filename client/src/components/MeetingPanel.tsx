@@ -21,6 +21,7 @@ type SummaryStatus = 'idle' | 'loading' | 'done' | 'error';
 
 function mapRecorderStatusLabel(value: string): string {
   if (value === 'recording') return '녹음 중';
+  if (value === 'paused') return '일시정지';
   if (value === 'stopping') return '종료 중';
   if (value === 'error') return '오류';
   return '대기';
@@ -29,7 +30,7 @@ function mapRecorderStatusLabel(value: string): string {
 export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPanelProps) {
   const recorder = useMeetingRecorder({
     language: 'ko-KR',
-    tickMs: 1000
+    tickMs: 10000
   });
   const [summaryStatus, setSummaryStatus] = useState<SummaryStatus>('idle');
   const [summary, setSummary] = useState('');
@@ -39,6 +40,8 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   const [transcriptCopyNotice, setTranscriptCopyNotice] = useState('');
   const [documentCopyNotice, setDocumentCopyNotice] = useState('');
   const autoSummaryTriggeredRef = useRef(false);
+  const transcriptScrollRef = useRef<HTMLPreElement | null>(null);
+  const [isTranscriptPinnedToBottom, setIsTranscriptPinnedToBottom] = useState(true);
 
   async function summarizeFromTranscript({
     transcript,
@@ -88,9 +91,18 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
     setSummaryError('');
     setTranscriptCopyNotice('');
     setDocumentCopyNotice('');
+    setIsTranscriptPinnedToBottom(true);
     autoSummaryTriggeredRef.current = false;
     recorder.resetSession();
     await recorder.start();
+  }
+
+  async function handlePause() {
+    await recorder.pause();
+  }
+
+  async function handleResume() {
+    await recorder.resume();
   }
 
   async function handleStopAndSummarize() {
@@ -156,8 +168,46 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
   const transcriptText = recorder.transcript || '';
   const transcriptDisplayText = polishedTranscript || transcriptText;
   const isRecording = recorder.status === 'recording';
-  const canStart = recorder.isSupported && recorder.status !== 'recording' && recorder.status !== 'stopping';
-  const canStop = recorder.status === 'recording';
+  const canStart = recorder.isSupported && !['recording', 'paused', 'stopping'].includes(recorder.status);
+  const canPause = recorder.status === 'recording';
+  const canResume = recorder.status === 'paused';
+  const canStop = recorder.status === 'recording' || recorder.status === 'paused';
+
+  function updateTranscriptPinnedState(element: HTMLPreElement) {
+    const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+    setIsTranscriptPinnedToBottom(distanceToBottom <= 20);
+  }
+
+  function handleTranscriptScroll() {
+    const element = transcriptScrollRef.current;
+    if (!element) {
+      return;
+    }
+    updateTranscriptPinnedState(element);
+  }
+
+  function scrollTranscriptToBottom() {
+    const element = transcriptScrollRef.current;
+    if (!element) {
+      return;
+    }
+    element.scrollTop = element.scrollHeight;
+    setIsTranscriptPinnedToBottom(true);
+  }
+
+  useEffect(() => {
+    if (collapsedSections.meeting_transcript) {
+      return;
+    }
+    if (!isTranscriptPinnedToBottom) {
+      return;
+    }
+    const element = transcriptScrollRef.current;
+    if (!element) {
+      return;
+    }
+    element.scrollTop = element.scrollHeight;
+  }, [collapsedSections.meeting_transcript, isTranscriptPinnedToBottom, transcriptDisplayText]);
 
   return (
     <section className={`${PANEL_CLASS} border-indigo-200 bg-indigo-50/70`}>
@@ -177,13 +227,19 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
             <button type="button" className={BUTTON_CLASS} onClick={() => void handleStart()} disabled={!canStart}>
               시작
             </button>
+            <button type="button" className={BUTTON_CLASS} onClick={() => void handlePause()} disabled={!canPause}>
+              일시정지
+            </button>
+            <button type="button" className={BUTTON_CLASS} onClick={() => void handleResume()} disabled={!canResume}>
+              재개
+            </button>
             <button type="button" className={BUTTON_CLASS} onClick={() => void handleStopAndSummarize()} disabled={!canStop}>
               중지
             </button>
             <span className="text-sm text-slate-600">
               상태: <strong>{mapRecorderStatusLabel(recorder.status)}</strong>
             </span>
-            {isRecording && <span className="text-xs text-indigo-700">실시간 갱신: 1초</span>}
+            {isRecording && <span className="text-xs text-indigo-700">실시간 갱신: 10초</span>}
             {recorder.retryCount > 0 && (
               <span className="text-xs text-amber-700">
                 연결 재개 시도: {recorder.retryCount}/{recorder.maxResumeAttempts}
@@ -225,11 +281,29 @@ export function MeetingPanel({ collapsedSections, onToggleSection }: MeetingPane
               transcriptDisplayText
                 ? (
                   <>
-                    <pre className="m-0 min-h-40 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-700">{transcriptDisplayText}</pre>
+                    <div className="relative">
+                      <pre
+                        ref={transcriptScrollRef}
+                        onScroll={handleTranscriptScroll}
+                        className="m-0 min-h-40 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 pr-12 text-sm text-slate-700"
+                      >
+                        {transcriptDisplayText}
+                      </pre>
+                      {!isTranscriptPinnedToBottom && (
+                        <button
+                          type="button"
+                          className="absolute bottom-2 right-2 rounded-full border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 shadow-sm transition hover:bg-slate-100"
+                          onClick={scrollTranscriptToBottom}
+                          aria-label="실시간 전사 맨 아래로 이동"
+                        >
+                          ↓
+                        </button>
+                      )}
+                    </div>
                     {transcriptCopyNotice && <p className="text-xs text-slate-600">{transcriptCopyNotice}</p>}
                   </>
                 )
-                : <p className={EMPTY_CLASS}>`시작`을 누르면 1초 단위로 전사 내용이 표시됩니다.</p>
+                : <p className={EMPTY_CLASS}>`시작`을 누르면 10초 단위로 전사 내용이 표시됩니다.</p>
             )}
           </section>
 

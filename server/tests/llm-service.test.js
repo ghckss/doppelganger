@@ -905,6 +905,44 @@ test('LlmService generates Confluence-ready meeting document from transcript', a
   assert.match(result.document, /\| 결제 화면 QA 테스트 케이스 정리 \| 지민 \| 2026-04-23 \| 진행 예정 \|/);
 });
 
+test('LlmService keeps original transcript lines when transcriptPolished is summarized too aggressively', async () => {
+  const service = new LlmService({
+    getMode: () => 'cli',
+    isConfigured: () => true,
+    createTextResponse: async () => ({
+      text: JSON.stringify({
+        title: '회의 기록',
+        summary: '핵심 안건 요약입니다.',
+        transcriptPolished: '핵심 안건은 일정 조정과 QA 준비입니다.',
+        keyPoints: [],
+        decisions: [],
+        actionItems: [],
+        openIssues: [],
+        notes: []
+      }),
+      provider: 'cli:codex',
+      agentProvider: 'codex'
+    })
+  });
+
+  const sourceTranscript = [
+    '[09:00:01] 결제 화면 일정은 다음 주로 조정합니다.',
+    '[09:00:12] QA 시작일은 수요일로 확정할까요?',
+    '[09:00:25] 네, 수요일 시작으로 진행하겠습니다.',
+    '[09:00:37] 예외 케이스는 내일까지 공유드립니다.'
+  ].join('\n');
+
+  const result = await service.generateMeetingSummary({
+    transcript: sourceTranscript,
+    startedAt: '2026-04-21T01:00:00.000Z',
+    endedAt: '2026-04-21T01:20:00.000Z',
+    language: 'ko-KR'
+  });
+
+  assert.equal(result.provider, 'cli:codex');
+  assert.equal(result.polishedTranscript, sourceTranscript);
+});
+
 test('LlmService falls back to deterministic meeting document on generation error', async () => {
   const service = new LlmService({
     getMode: () => 'cli',
