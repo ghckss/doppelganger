@@ -328,6 +328,7 @@ export function createHttpServer({ cwd, taskService, llmService }) {
           command: body.command,
           projectId: body.projectId,
           baseBranch: body.baseBranch,
+          branchName: body.branchName,
           agentProvider: body.agentProvider,
           needsPlanning: body.needsPlanning,
           needsDesign: body.needsDesign

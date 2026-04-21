@@ -729,6 +729,7 @@ export function createCodeExecutionDomain({
   async function ensureBranch(task, workspace) {
     const currentTask = repo.getTask(task.id);
     const existingBranch = normalizeWhitespace(currentTask.payload?.branchName);
+    const requestedBranchName = normalizeWhitespace(currentTask.payload?.requestedBranchName);
     const restoreBranch = normalizeWhitespace(
       currentTask.payload?.restoreBranch || workspace.git.currentBranch || workspace.git.baseBranch
     );
@@ -754,7 +755,34 @@ export function createCodeExecutionDomain({
       throw new Error(buildDirtyWorkspaceError(workspace.git.statusLines));
     }
 
-    const branchName = `doppelganger/${slugify(currentTask.payload?.command)}-${Date.now().toString(36)}`;
+    if (requestedBranchName && requestedBranchName === workspace.git.baseBranch) {
+      throw new Error('작업 브랜치는 기준 브랜치와 다르게 입력해 주세요');
+    }
+
+    const branchName = requestedBranchName
+      ? await assertBranchNameValid(workspace.git.root, requestedBranchName)
+      : `doppelganger/${slugify(currentTask.payload?.command)}-${Date.now().toString(36)}`;
+    const branchExists = requestedBranchName
+      ? await localBranchExists(workspace.git.root, branchName)
+      : false;
+
+    if (branchExists) {
+      await runGit(workspace.git.root, ['checkout', branchName]);
+      repo.updateTask(task.id, {
+        payload: {
+          ...currentTask.payload,
+          branchName,
+          restoreBranch,
+          branchManaged: false
+        }
+      });
+      return {
+        branchName,
+        restoreBranch,
+        branchManaged: false
+      };
+    }
+
     await runGit(workspace.git.root, ['checkout', '-b', branchName, workspace.git.baseBranch]);
     repo.updateTask(task.id, {
       payload: {
@@ -1045,6 +1073,7 @@ export function createCodeExecutionDomain({
   async function createTask(input) {
     const command = normalizeWhitespace(input.command);
     const project = resolveProjectInput(input);
+    const requestedBranchName = normalizeWhitespace(input.branchName);
     if (!command) {
       throw new Error('작업 지시가 필요합니다');
     }
@@ -1055,7 +1084,7 @@ export function createCodeExecutionDomain({
     const task = repo.upsertTask({
       domain: 'code_execution',
       kind: 'implementation',
-      title: `[코드] ${truncateText(command, 90)}`,
+      title: `[코드] ${command}`,
       status: 'new',
       approvalState: 'pending',
       payload: {
@@ -1072,6 +1101,7 @@ export function createCodeExecutionDomain({
         agentProvider: selectedAgent.provider,
         needsPlanning: parseBoolean(input.needsPlanning),
         needsDesign: parseBoolean(input.needsDesign),
+        requestedBranchName,
         branchName: '',
         restoreBranch: workspace.git.currentBranch || workspace.git.baseBranch,
         branchManaged: false
@@ -1104,7 +1134,8 @@ export function createCodeExecutionDomain({
       request: {
         command,
         projectId: project.id,
-        workdir: workspace.git.root
+        workdir: workspace.git.root,
+        branchName: requestedBranchName
       },
       response: {
         repoSlug: workspace.git.repoSlug,

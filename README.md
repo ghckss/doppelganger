@@ -140,6 +140,7 @@ Notes:
    - Codex: `CODEX_COMMAND` (default `codex`)
    - Claude: `CLAUDE_COMMAND` (default `claude`)
 4. Open `http://127.0.0.1:4318/app` and use the project picker in the "코드 작업 생성" 영역.
+   - 필요하면 `작업 브랜치(선택)`에 원하는 브랜치명을 직접 입력할 수 있습니다.
 5. Select the agent (`Codex` or `Claude`) per task.
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
 7. In task detail, `PR 생성` appears only after step `8/8` is complete.

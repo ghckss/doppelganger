@@ -326,6 +326,7 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
     agentProvider: 'claude',
     workdir: workspace.repoDir,
     baseBranch: 'main',
+    branchName: 'feature/custom-demo-branch',
     needsPlanning: true,
     needsDesign: true
   });
@@ -345,6 +346,7 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
 
   const finishedTask = repo.getTask(task.id);
   assert.equal(finishedTask.status, 'awaiting_approval');
+  assert.equal(finishedTask.result.branch, 'feature/custom-demo-branch');
   assert.equal(finishedTask.result.commits.length, 2);
   assert.equal(finishedTask.result.reviewRounds.length, 3);
   assert.equal(finishedTask.result.executionProgress.phase, 'completed');

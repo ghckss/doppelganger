@@ -73,6 +73,7 @@ export function createCodeTask(input: {
   command: string;
   projectId: string;
   baseBranch: string;
+  branchName: string;
   agentProvider: string;
   needsPlanning: boolean;
   needsDesign: boolean;

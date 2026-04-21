@@ -20,7 +20,6 @@ import {
   INPUT_CLASS,
   LABEL_CLASS,
   PANEL_CLASS,
-  ProgressBar,
   SECTION_COUNT_CLASS,
   SECTION_HEADER_CLASS,
   StatusBadge,
@@ -56,6 +55,37 @@ type ReviewRoundView = {
     newCommits: string[];
   } | null;
 };
+
+const EXECUTION_STEP_ITEMS = [
+  { step: 1, label: '작업 환경 점검 + 브랜치 준비' },
+  { step: 2, label: '프롬프트/기획/디자인 계획 생성' },
+  { step: 3, label: '코딩 에이전트 실행' },
+  { step: 4, label: '리뷰/수정 라운드 1' },
+  { step: 5, label: '리뷰/수정 라운드 2' },
+  { step: 6, label: '리뷰/수정 라운드 3' },
+  { step: 7, label: 'PR 초안 정리' },
+  { step: 8, label: '코드 작업 완료' }
+] as const;
+
+function stepState(currentStep: number, step: number): 'done' | 'current' | 'pending' {
+  if (currentStep > step) {
+    return 'done';
+  }
+  if (currentStep === step) {
+    return 'current';
+  }
+  return 'pending';
+}
+
+function stepStateClass(state: 'done' | 'current' | 'pending'): string {
+  if (state === 'done') {
+    return 'text-emerald-700';
+  }
+  if (state === 'current') {
+    return 'text-amber-800 font-semibold';
+  }
+  return 'text-slate-500';
+}
 
 function toRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -220,6 +250,7 @@ type CodeExecutionPanelProps = {
   command: string;
   projectId: string;
   baseBranch: string;
+  branchName: string;
   agentProvider: string;
   needsPlanning: boolean;
   needsDesign: boolean;
@@ -228,6 +259,7 @@ type CodeExecutionPanelProps = {
   onSetCommand: (value: string) => void;
   onSetProjectId: (value: string) => void;
   onSetBaseBranch: (value: string) => void;
+  onSetBranchName: (value: string) => void;
   onSetAgentProvider: (value: string) => void;
   onSetNeedsPlanning: (value: boolean) => void;
   onSetNeedsDesign: (value: boolean) => void;
@@ -245,6 +277,7 @@ export function CodeExecutionPanel({
   command,
   projectId,
   baseBranch,
+  branchName,
   agentProvider,
   needsPlanning,
   needsDesign,
@@ -253,6 +286,7 @@ export function CodeExecutionPanel({
   onSetCommand,
   onSetProjectId,
   onSetBaseBranch,
+  onSetBranchName,
   onSetAgentProvider,
   onSetNeedsPlanning,
   onSetNeedsDesign,
@@ -311,6 +345,7 @@ export function CodeExecutionPanel({
   const taskPayload = detail?.task.payload && typeof detail.task.payload === 'object'
     ? detail.task.payload
     : {};
+  const detailCommandText = toText((taskPayload as Record<string, unknown>).command);
   const taskResult = detail?.task.result && typeof detail.task.result === 'object'
     ? detail.task.result
     : {};
@@ -440,7 +475,7 @@ export function CodeExecutionPanel({
             </div>
             {!collapsedSections.code_create && (
               <form
-                className="grid gap-3 md:grid-cols-3"
+                className="grid gap-3 md:grid-cols-4"
                 onSubmit={(event) => {
                   event.preventDefault();
                   onRunAction('코드 작업 생성', async () => {
@@ -448,6 +483,7 @@ export function CodeExecutionPanel({
                       command,
                       projectId,
                       baseBranch,
+                      branchName,
                       agentProvider,
                       needsPlanning,
                       needsDesign
@@ -469,6 +505,15 @@ export function CodeExecutionPanel({
                 <label className={LABEL_CLASS}>
                   기준 브랜치
                   <input className={INPUT_CLASS} value={baseBranch} onChange={(event) => onSetBaseBranch(event.target.value)} />
+                </label>
+                <label className={LABEL_CLASS}>
+                  작업 브랜치(선택)
+                  <input
+                    className={INPUT_CLASS}
+                    value={branchName}
+                    onChange={(event) => onSetBranchName(event.target.value)}
+                    placeholder="예: feature/FROMM-1234"
+                  />
                 </label>
                 <label className={LABEL_CLASS}>
                   에이전트
@@ -513,7 +558,7 @@ export function CodeExecutionPanel({
             {!collapsedSections.code_tasks && (
               <>
                 <div className={`${SECTION_HEADER_CLASS} border-amber-200 bg-amber-100/80`}>
-                  <h2 className="text-base font-semibold text-slate-800">진행 현황</h2>
+                  <h2 className="text-base font-semibold text-slate-800">실행 중 작업</h2>
                   <span className={`${SECTION_COUNT_CLASS} border-amber-200`}>{runningTasks.length}건</span>
                 </div>
 
@@ -528,6 +573,8 @@ export function CodeExecutionPanel({
                     {runningTaskViews.map(({ task, progress, summary, elapsedSeconds }) => {
                       const isCollapsed = Boolean(collapsedRunningTaskById[task.id]);
                       const isSelected = task.id === selectedTaskId;
+                      const taskCommand = toText(toRecord(task.payload).command) || task.title;
+                      const currentStep = Math.max(0, Number(progress.currentStep || 0));
                       return (
                         <article
                           key={task.id}
@@ -535,7 +582,7 @@ export function CodeExecutionPanel({
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold text-slate-900">{task.title}</p>
+                              <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-900">{taskCommand}</p>
                               <p className="mt-1 text-xs text-slate-500">{mapStatusLabel(task.status)}</p>
                             </div>
                             <div className="flex items-center gap-2">
@@ -552,8 +599,6 @@ export function CodeExecutionPanel({
 
                           {!isCollapsed && (
                             <div className="mt-3 space-y-2">
-                              <p className="text-xs text-slate-700">{progress.phase || '-'}</p>
-                              <ProgressBar percent={progress.percent} />
                               <p className="text-xs text-slate-500">
                                 {progress.currentStep}/{progress.totalSteps}
                                 {progress.reviewTotalRounds > 0 && ` · 리뷰 ${progress.reviewRound}/${progress.reviewTotalRounds}`}
@@ -565,6 +610,16 @@ export function CodeExecutionPanel({
                                   <p className="text-xs font-medium text-slate-600">{elapsedSeconds}초째 진행 중</p>
                                 )}
                               </div>
+                              <ul className="rounded-md border border-slate-200 bg-slate-50 p-2 text-xs">
+                                {EXECUTION_STEP_ITEMS.map((item) => {
+                                  const state = stepState(currentStep, item.step);
+                                  return (
+                                    <li key={`${task.id}-step-${item.step}`} className={`py-0.5 ${stepStateClass(state)}`}>
+                                      {String(item.step).padStart(2, '0')}. {item.label}
+                                    </li>
+                                  );
+                                })}
+                              </ul>
                               <div className="flex justify-end">
                                 <button
                                   type="button"
@@ -596,20 +651,23 @@ export function CodeExecutionPanel({
                       </div>
                     </header>
 
+                    {detailCommandText && (
+                      <section className="rounded-xl border border-slate-200 bg-white p-3">
+                        <h4 className="text-sm font-semibold text-slate-900">작업 요청 메시지</h4>
+                        <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">{detailCommandText}</p>
+                      </section>
+                    )}
+
                     <p className="text-sm text-slate-600">{detail.task.summary || '요약이 아직 없습니다.'}</p>
                     {detail.task.last_error && <p className="text-sm text-rose-700">오류: {detail.task.last_error}</p>}
 
                     {executionProgress && (
                       <section className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="flex items-start justify-between gap-3">
-                          <h4 className="text-sm font-semibold text-slate-900">코드 작업 진행</h4>
+                          <h4 className="text-sm font-semibold text-slate-900">세부 진행 현황</h4>
                           {executionStepElapsedSeconds !== null && (
                             <p className="text-xs font-medium text-slate-600">{executionStepElapsedSeconds}초째 진행 중</p>
                           )}
-                        </div>
-                        <p className="mt-1 text-sm text-slate-700">{executionProgress.phase || '-'}</p>
-                        <div className="mt-2">
-                          <ProgressBar percent={executionProgress.percent} />
                         </div>
                         <p className="mt-2 text-xs text-slate-500">
                           {executionProgress.currentStep}/{executionProgress.totalSteps}
@@ -629,6 +687,16 @@ export function CodeExecutionPanel({
                             </button>
                           )}
                         </div>
+                        <ul className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs">
+                          {EXECUTION_STEP_ITEMS.map((item) => {
+                            const state = stepState(Math.max(0, Number(executionProgress.currentStep || 0)), item.step);
+                            return (
+                              <li key={`detail-step-${item.step}`} className={`py-0.5 ${stepStateClass(state)}`}>
+                                {String(item.step).padStart(2, '0')}. {item.label}
+                              </li>
+                            );
+                          })}
+                        </ul>
                       </section>
                     )}
 

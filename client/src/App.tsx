@@ -43,6 +43,7 @@ export default function App() {
   const [command, setCommand] = useState('');
   const [projectId, setProjectId] = useState('');
   const [baseBranch, setBaseBranch] = useState('master');
+  const [branchName, setBranchName] = useState('');
   const [agentProvider, setAgentProvider] = useState('codex');
   const [needsPlanning, setNeedsPlanning] = useState(false);
   const [needsDesign, setNeedsDesign] = useState(false);
@@ -399,6 +400,7 @@ export default function App() {
             command={command}
             projectId={projectId}
             baseBranch={baseBranch}
+            branchName={branchName}
             agentProvider={agentProvider}
             needsPlanning={needsPlanning}
             needsDesign={needsDesign}
@@ -412,6 +414,7 @@ export default function App() {
             onSetCommand={setCommand}
             onSetProjectId={setProjectId}
             onSetBaseBranch={setBaseBranch}
+            onSetBranchName={setBranchName}
             onSetAgentProvider={setAgentProvider}
             onSetNeedsPlanning={setNeedsPlanning}
             onSetNeedsDesign={setNeedsDesign}
