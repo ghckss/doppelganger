@@ -1,4 +1,10 @@
-import type { MetaResponse, TaskDetail, TaskListResponse } from './types';
+import type {
+  MeetingSummaryRequest,
+  MeetingSummaryResponse,
+  MetaResponse,
+  TaskDetail,
+  TaskListResponse
+} from './types';
 
 type JsonValue = Record<string, unknown> | Array<unknown> | string | number | boolean | null;
 
@@ -67,6 +73,7 @@ export function createCodeTask(input: {
   command: string;
   projectId: string;
   baseBranch: string;
+  branchName: string;
   agentProvider: string;
   needsPlanning: boolean;
   needsDesign: boolean;
@@ -155,6 +162,13 @@ export function sendTask(taskId: string, input: {
   reactionName: string;
 }): Promise<{ ok: boolean }> {
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/send`, {
+    method: 'POST',
+    body: input
+  });
+}
+
+export function summarizeMeeting(input: MeetingSummaryRequest): Promise<MeetingSummaryResponse> {
+  return requestJson<MeetingSummaryResponse>('/api/meetings/summarize', {
     method: 'POST',
     body: input
   });

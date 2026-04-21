@@ -302,6 +302,20 @@ export function createCodeExecutionDomain({
     codex: codexCliRunner || null,
     claude: claudeCliRunner || null
   };
+  const normalizedGitHubRepositoryAllowlist = new Set(
+    compactStrings(config.github?.repositories || []).map((name) => name.toLowerCase())
+  );
+
+  function isGitHubRepositoryAllowed(repoName) {
+    if (normalizedGitHubRepositoryAllowlist.size === 0) {
+      return true;
+    }
+    const normalizedRepoName = normalizeWhitespace(repoName).toLowerCase();
+    if (!normalizedRepoName) {
+      return false;
+    }
+    return normalizedGitHubRepositoryAllowlist.has(normalizedRepoName);
+  }
 
   function defaultAgentProvider() {
     return normalizeAgentProvider(config.agent?.defaultProvider || 'codex');
@@ -443,13 +457,11 @@ export function createCodeExecutionDomain({
     }
 
     const parsedRemote = parseRemoteUrl(remoteUrl);
-    if (config.github.repositories.length > 0 && parsedRemote.name && !config.github.repositories.includes(parsedRemote.name)) {
-      throw new Error(`저장소가 GITHUB_REPOSITORIES 허용 목록에 없습니다: ${parsedRemote.name}`);
-    }
 
     const statusOutput = await runGit(root, ['status', '--porcelain']);
     const scripts = readScripts(root);
     const fileSample = await listWorkspaceFiles(root);
+    const githubRepositoryAllowed = isGitHubRepositoryAllowed(parsedRemote.name);
 
     return {
       git: {
@@ -460,6 +472,7 @@ export function createCodeExecutionDomain({
         owner: parsedRemote.owner,
         name: parsedRemote.name,
         repoSlug: parsedRemote.repoSlug,
+        githubRepositoryAllowed,
         isDirty: Boolean(statusOutput.trim()),
         statusLines: statusOutput.split(/\r?\n/).filter(Boolean)
       },
@@ -656,9 +669,67 @@ export function createCodeExecutionDomain({
     };
   }
 
+  async function mergeTaskBranchIntoBase(taskId, workspace, {
+    workBranch,
+    baseBranch
+  } = {}) {
+    const normalizedWorkBranch = normalizeWhitespace(workBranch);
+    const normalizedBaseBranch = normalizeWhitespace(baseBranch || workspace.git.baseBranch);
+    if (!normalizedWorkBranch || !normalizedBaseBranch) {
+      return {
+        merged: false,
+        workBranch: normalizedWorkBranch || null,
+        baseBranch: normalizedBaseBranch || null,
+        head: ''
+      };
+    }
+
+    try {
+      await assertCleanWorktree(workspace.git.root, '작업 브랜치 병합 전에 작업 트리가 깨끗해야 합니다');
+      await checkoutTaskBranchFromSourceCommit(repo.getTask(taskId), workspace, normalizedWorkBranch);
+      await assertCleanWorktree(workspace.git.root, '작업 브랜치 병합 전에 작업 트리가 깨끗해야 합니다');
+
+      if (normalizedBaseBranch !== normalizedWorkBranch) {
+        const baseExists = await localBranchExists(workspace.git.root, normalizedBaseBranch);
+        if (!baseExists) {
+          throw new Error(`기준 브랜치를 찾을 수 없습니다: ${normalizedBaseBranch}`);
+        }
+
+        await runGit(workspace.git.root, ['checkout', normalizedBaseBranch]);
+        await runGit(workspace.git.root, ['merge', '--ff-only', normalizedWorkBranch]);
+      }
+
+      const head = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
+      repo.logExecution(taskId, 'merge_task_branch', 'success', {
+        response: {
+          workBranch: normalizedWorkBranch,
+          baseBranch: normalizedBaseBranch,
+          head
+        }
+      });
+      return {
+        merged: true,
+        workBranch: normalizedWorkBranch,
+        baseBranch: normalizedBaseBranch,
+        head
+      };
+    } catch (error) {
+      const formattedError = formatExecutionError(error);
+      repo.logExecution(taskId, 'merge_task_branch', 'failed', {
+        response: {
+          workBranch: normalizedWorkBranch,
+          baseBranch: normalizedBaseBranch
+        },
+        error: formattedError
+      });
+      throw new Error(`기준 브랜치(${normalizedBaseBranch}) 병합에 실패했습니다: ${formattedError}`);
+    }
+  }
+
   async function ensureBranch(task, workspace) {
     const currentTask = repo.getTask(task.id);
     const existingBranch = normalizeWhitespace(currentTask.payload?.branchName);
+    const requestedBranchName = normalizeWhitespace(currentTask.payload?.requestedBranchName);
     const restoreBranch = normalizeWhitespace(
       currentTask.payload?.restoreBranch || workspace.git.currentBranch || workspace.git.baseBranch
     );
@@ -684,7 +755,34 @@ export function createCodeExecutionDomain({
       throw new Error(buildDirtyWorkspaceError(workspace.git.statusLines));
     }
 
-    const branchName = `doppelganger/${slugify(currentTask.payload?.command)}-${Date.now().toString(36)}`;
+    if (requestedBranchName && requestedBranchName === workspace.git.baseBranch) {
+      throw new Error('작업 브랜치는 기준 브랜치와 다르게 입력해 주세요');
+    }
+
+    const branchName = requestedBranchName
+      ? await assertBranchNameValid(workspace.git.root, requestedBranchName)
+      : `doppelganger/${slugify(currentTask.payload?.command)}-${Date.now().toString(36)}`;
+    const branchExists = requestedBranchName
+      ? await localBranchExists(workspace.git.root, branchName)
+      : false;
+
+    if (branchExists) {
+      await runGit(workspace.git.root, ['checkout', branchName]);
+      repo.updateTask(task.id, {
+        payload: {
+          ...currentTask.payload,
+          branchName,
+          restoreBranch,
+          branchManaged: false
+        }
+      });
+      return {
+        branchName,
+        restoreBranch,
+        branchManaged: false
+      };
+    }
+
     await runGit(workspace.git.root, ['checkout', '-b', branchName, workspace.git.baseBranch]);
     repo.updateTask(task.id, {
       payload: {
@@ -975,6 +1073,7 @@ export function createCodeExecutionDomain({
   async function createTask(input) {
     const command = normalizeWhitespace(input.command);
     const project = resolveProjectInput(input);
+    const requestedBranchName = normalizeWhitespace(input.branchName);
     if (!command) {
       throw new Error('작업 지시가 필요합니다');
     }
@@ -985,7 +1084,7 @@ export function createCodeExecutionDomain({
     const task = repo.upsertTask({
       domain: 'code_execution',
       kind: 'implementation',
-      title: `[코드] ${truncateText(command, 90)}`,
+      title: `[코드] ${command}`,
       status: 'new',
       approvalState: 'pending',
       payload: {
@@ -997,10 +1096,12 @@ export function createCodeExecutionDomain({
         repoOwner: workspace.git.owner,
         repoName: workspace.git.name,
         repoSlug: workspace.git.repoSlug,
+        githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
         remoteUrl: workspace.git.remoteUrl,
         agentProvider: selectedAgent.provider,
         needsPlanning: parseBoolean(input.needsPlanning),
         needsDesign: parseBoolean(input.needsDesign),
+        requestedBranchName,
         branchName: '',
         restoreBranch: workspace.git.currentBranch || workspace.git.baseBranch,
         branchManaged: false
@@ -1022,6 +1123,7 @@ export function createCodeExecutionDomain({
       baseBranch: workspace.git.baseBranch,
       currentBranch: workspace.git.currentBranch,
       remoteUrl: workspace.git.remoteUrl,
+      githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
       recommendedChecks: workspace.recommendedChecks,
       scripts: workspace.scripts,
       statusLines: workspace.git.statusLines,
@@ -1032,11 +1134,13 @@ export function createCodeExecutionDomain({
       request: {
         command,
         projectId: project.id,
-        workdir: workspace.git.root
+        workdir: workspace.git.root,
+        branchName: requestedBranchName
       },
       response: {
         repoSlug: workspace.git.repoSlug,
         baseBranch: workspace.git.baseBranch,
+        githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
         agentProvider: selectedAgent.provider
       }
     });
@@ -1333,14 +1437,18 @@ export function createCodeExecutionDomain({
         response: pullRequest
       });
       const sourceCommit = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
+      const mergeResult = await mergeTaskBranchIntoBase(taskId, workspace, {
+        workBranch: branchName,
+        baseBranch: workspace.git.baseBranch
+      });
       const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
         workBranch: branchName,
-        preferredRestoreBranch: branchState.restoreBranch,
+        preferredRestoreBranch: workspace.git.baseBranch,
         deleteWorkBranch: branchState.branchManaged
       });
-      const completionSummary = workspaceCleanup.deleted
-        ? `${branchName} 브랜치에서 구현을 마쳤고 ${workspaceCleanup.restoreBranch || workspace.git.baseBranch} 브랜치로 복귀 후 작업 브랜치를 정리했습니다. PR 생성 준비가 되었습니다.`
-        : `${branchName} 브랜치에서 구현을 마쳤습니다. PR 생성 준비가 되었습니다.`;
+      const completionSummary = `${branchName} 브랜치 커밋을 ${mergeResult.baseBranch || workspace.git.baseBranch}에 병합했고 `
+        + `${workspaceCleanup.restoreBranch || workspace.git.baseBranch} 브랜치로 복귀 후 작업 브랜치를 정리했습니다. `
+        + 'PR 생성 준비가 되었습니다.';
 
       repo.updateTask(taskId, {
         status: 'awaiting_approval',
@@ -1351,6 +1459,7 @@ export function createCodeExecutionDomain({
           baseBranch: workspace.git.baseBranch,
           sourceCommit,
           restoreBranch: workspaceCleanup.restoreBranch || branchState.restoreBranch || workspace.git.baseBranch,
+          merge: mergeResult,
           branchCleanup: workspaceCleanup,
           repoSlug: workspace.git.repoSlug,
           promptPlan: plans.promptPlan,
@@ -1436,6 +1545,17 @@ export function createCodeExecutionDomain({
     };
 
     try {
+      if (!isGitHubRepositoryAllowed(repoName)) {
+        const repoDisplay = normalizeWhitespace(repoName)
+          || normalizeWhitespace(task.payload?.repoSlug)
+          || workspace.git.repoSlug
+          || path.basename(workspace.git.root);
+        throw new Error(
+          `현재 저장소는 GITHUB_REPOSITORIES 허용 목록에 없어 PR 생성을 지원하지 않습니다: ${repoDisplay}. `
+          + 'WORKSPACE_ALLOWLIST 기준 코드 작업 실행은 계속 가능합니다.'
+        );
+      }
+
       const branchRestoreResult = await checkoutTaskBranchFromSourceCommit(task, workspace, sourceBranch);
       await assertCleanWorktree(workspace.git.root, 'PR 생성 전에 작업 트리가 깨끗해야 합니다');
       if (sourceBranch === remoteBranch) {
@@ -1509,7 +1629,7 @@ export function createCodeExecutionDomain({
       }
       const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
         workBranch: sourceBranch,
-        preferredRestoreBranch: normalizeWhitespace(task.payload?.restoreBranch),
+        preferredRestoreBranch: normalizeWhitespace(task.result?.restoreBranch || task.payload?.restoreBranch),
         deleteWorkBranch: Boolean(task.payload?.branchManaged)
       });
 

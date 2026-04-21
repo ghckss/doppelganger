@@ -55,7 +55,8 @@ export function createApplication({ cwd = process.cwd() } = {}) {
 
   const server = createHttpServer({
     cwd,
-    taskService
+    taskService,
+    llmService
   });
 
   return {

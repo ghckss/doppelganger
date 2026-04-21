@@ -300,12 +300,14 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   const generationScopeProviders = toScopeMap([
     ['slack', normalizeGenerationProviderOptional(readValue(mergedEnv, 'SLACK_GENERATION_PROVIDER', ''))],
     ['github_review', normalizeGenerationProviderOptional(readValue(mergedEnv, 'GITHUB_REVIEW_PROVIDER', ''))],
-    ['code_planning', normalizeGenerationProviderOptional(readValue(mergedEnv, 'CODE_PLANNING_PROVIDER', ''))]
+    ['code_planning', normalizeGenerationProviderOptional(readValue(mergedEnv, 'CODE_PLANNING_PROVIDER', ''))],
+    ['meeting_notes', normalizeGenerationProviderOptional(readValue(mergedEnv, 'MEETING_NOTES_PROVIDER', ''))]
   ]);
   const generationScopeAgentProviders = toScopeMap([
     ['slack', normalizeAgentProviderOptional(readValue(mergedEnv, 'SLACK_GENERATION_AGENT_PROVIDER', ''))],
     ['github_review', normalizeAgentProviderOptional(readValue(mergedEnv, 'GITHUB_REVIEW_AGENT_PROVIDER', ''))],
-    ['code_planning', normalizeAgentProviderOptional(readValue(mergedEnv, 'CODE_PLANNING_AGENT_PROVIDER', ''))]
+    ['code_planning', normalizeAgentProviderOptional(readValue(mergedEnv, 'CODE_PLANNING_AGENT_PROVIDER', ''))],
+    ['meeting_notes', normalizeAgentProviderOptional(readValue(mergedEnv, 'MEETING_NOTES_AGENT_PROVIDER', ''))]
   ]);
   const generationScopeTimeoutSeconds = {};
   const slackCodeKeywordConfig = loadSlackCodeKeywordRules(cwd, mergedEnv);
@@ -317,6 +319,7 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   const slackTimeout = readOptionalTimeoutSeconds(mergedEnv, 'SLACK_GENERATION_TIMEOUT_SECONDS');
   const githubReviewTimeout = readOptionalTimeoutSeconds(mergedEnv, 'GITHUB_REVIEW_TIMEOUT_SECONDS');
   const codePlanningTimeout = readOptionalTimeoutSeconds(mergedEnv, 'CODE_PLANNING_TIMEOUT_SECONDS');
+  const meetingNotesTimeout = readOptionalTimeoutSeconds(mergedEnv, 'MEETING_NOTES_TIMEOUT_SECONDS');
   if (slackTimeout !== undefined) {
     generationScopeTimeoutSeconds.slack = slackTimeout;
   }
@@ -325,6 +328,9 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   }
   if (codePlanningTimeout !== undefined) {
     generationScopeTimeoutSeconds.code_planning = codePlanningTimeout;
+  }
+  if (meetingNotesTimeout !== undefined) {
+    generationScopeTimeoutSeconds.meeting_notes = meetingNotesTimeout;
   }
 
   const config = {

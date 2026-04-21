@@ -326,6 +326,7 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
     agentProvider: 'claude',
     workdir: workspace.repoDir,
     baseBranch: 'main',
+    branchName: 'feature/custom-demo-branch',
     needsPlanning: true,
     needsDesign: true
   });
@@ -345,6 +346,7 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
 
   const finishedTask = repo.getTask(task.id);
   assert.equal(finishedTask.status, 'awaiting_approval');
+  assert.equal(finishedTask.result.branch, 'feature/custom-demo-branch');
   assert.equal(finishedTask.result.commits.length, 2);
   assert.equal(finishedTask.result.reviewRounds.length, 3);
   assert.equal(finishedTask.result.executionProgress.phase, 'completed');
@@ -359,6 +361,8 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(repo.listArtifacts(task.id, 'patch_round').length, 3);
   assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
   assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
+  assert.equal(read('git', ['show', 'main:README.md'], workspace.repoDir), '# Demo\n\nImplemented by agent.');
+  assert.equal(read('git', ['show', 'main:src/index.js'], workspace.repoDir), 'export const value = 2;');
   assert.equal(typeof finishedTask.result.sourceCommit, 'string');
   assert.ok(finishedTask.result.sourceCommit.length > 0);
   assert.equal(finishedTask.result.branchCleanup?.deleted, true);
@@ -627,6 +631,136 @@ test('createPullRequest formats title with FRM prefix and branch ticket token', 
   assert.equal(capturedTitle, '[FRM/FROMM-3372] Astro→React 마이그레이션 및 리다이렉트/사이트맵 안정화');
   assert.match(capturedBody, /## PR 개요/);
   assert.match(capturedBody, /## 작업 내용/);
+});
+
+test('code execution uses WORKSPACE_ALLOWLIST even when repository is outside GITHUB_REPOSITORIES and blocks only PR creation', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  let githubCreatePullRequestCalls = 0;
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'claude'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: 'acme',
+        repositories: ['fromm-web']
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        githubCreatePullRequestCalls += 1;
+        throw new Error('createPullRequest should not be called for disallowed repo');
+      },
+      async listOpenPullRequests() {
+        return [];
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('codex should not be selected in this test');
+      }
+    },
+    claudeCliRunner: {
+      async assertAvailable() {},
+      async runExec({ workdir, schema }) {
+        if (schema.required.includes('findings')) {
+          return {
+            parsed: {
+              summary: 'No issues found.',
+              findings: [],
+              approval: 'approved_with_no_changes',
+              residualRisks: []
+            },
+            stdout: '',
+            stderr: '',
+            durationMs: 1
+          };
+        }
+
+        if (schema.required.includes('resolvedFindingIds')) {
+          throw new Error('Patch step should not run when review has no findings');
+        }
+
+        writeFile(path.join(workdir, 'README.md'), '# Demo\n\nAllowlist-based run.\n');
+        run('git', ['add', 'README.md'], workdir);
+        run('git', ['commit', '-m', 'feat: allowlist code execution run'], workdir);
+
+        return {
+          parsed: {
+            summary: 'Implemented requested change.',
+            testsRun: ['npm test'],
+            notes: ['Completed in workspace allowlist project.']
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+    },
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        return {
+          summary: 'Allowlist execution test',
+          goal: 'Run coding workflow even when repo is not in GitHub repository allowlist.',
+          taskType: 'feature',
+          successCriteria: [],
+          deliverables: [],
+          constraints: [],
+          relevantContext: []
+        };
+      },
+      async createPullRequestDraft() {
+        return {
+          title: 'Allowlist workflow test',
+          body: '## Summary\n- Verify PR restriction scope\n'
+        };
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Run with workspace allowlist only',
+    agentProvider: 'claude',
+    workdir: workspace.repoDir,
+    baseBranch: 'main',
+    needsPlanning: false,
+    needsDesign: false
+  });
+
+  await domain.start(task.id);
+
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval';
+  }, 'Timed out waiting for allowlist code task to finish');
+
+  const finished = repo.getTask(task.id);
+  assert.equal(finished.status, 'awaiting_approval');
+  assert.equal(finished.payload.githubRepositoryAllowed, false);
+
+  await assert.rejects(
+    () => domain.createPullRequest(task.id, { branchName: 'feature/allowlist-test' }),
+    /GITHUB_REPOSITORIES 허용 목록/
+  );
+
+  const afterCreatePrFailure = repo.getTask(task.id);
+  assert.equal(afterCreatePrFailure.status, 'awaiting_approval');
+  assert.match(afterCreatePrFailure.last_error, /GITHUB_REPOSITORIES 허용 목록/);
+  assert.equal(githubCreatePullRequestCalls, 0);
+  assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
 });
 
 test('createTask falls back to codex when requested claude is unavailable', async () => {

@@ -584,6 +584,231 @@ function buildFallbackGitHubReview({ task, pullRequest, files, errorMessage = ''
   };
 }
 
+function escapeMarkdownTableCell(value) {
+  return String(value || '')
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, ' ')
+    .trim();
+}
+
+function normalizeMeetingList(values, { fallback = [], maxItems = 10, maxLength = 220 } = {}) {
+  const normalized = safeArray(values)
+    .map((value) => truncateText(normalizeWhitespace(value), maxLength))
+    .filter(Boolean);
+  if (normalized.length > 0) {
+    return normalized.slice(0, maxItems);
+  }
+  return safeArray(fallback).slice(0, maxItems);
+}
+
+function normalizeMeetingActionItems(values, { maxItems = 12 } = {}) {
+  const normalized = safeArray(values)
+    .map((item) => ({
+      task: truncateText(normalizeWhitespace(item?.task), 240),
+      owner: truncateText(normalizeWhitespace(item?.owner), 80),
+      due: truncateText(normalizeWhitespace(item?.due), 80),
+      status: truncateText(normalizeWhitespace(item?.status), 80)
+    }))
+    .filter((item) => item.task)
+    .slice(0, maxItems)
+    .map((item) => ({
+      task: item.task,
+      owner: item.owner || '미확정',
+      due: item.due || '미확정',
+      status: item.status || '미확정'
+    }));
+
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return [{
+    task: '추가 액션 아이템 확인 필요',
+    owner: '미확정',
+    due: '미확정',
+    status: '미확정'
+  }];
+}
+
+function normalizeMeetingTranscriptLines(value, { maxLines = 500, maxLineLength = 320 } = {}) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((line) => String(line || '').trim())
+    .map((line) => truncateText(line, maxLineLength))
+    .filter(Boolean)
+    .slice(0, maxLines);
+}
+
+function buildPolishedTranscript(value) {
+  const lines = normalizeMeetingTranscriptLines(value, {
+    maxLines: 800,
+    maxLineLength: 360
+  });
+  if (lines.length === 0) {
+    return '';
+  }
+  return lines.join('\n');
+}
+
+function resolvePolishedTranscript(sourceTranscript, candidateTranscript) {
+  const source = buildPolishedTranscript(sourceTranscript);
+  if (!source) {
+    return buildPolishedTranscript(candidateTranscript);
+  }
+
+  const candidate = buildPolishedTranscript(candidateTranscript);
+  if (!candidate) {
+    return source;
+  }
+
+  const sourceLines = source.split('\n').filter(Boolean);
+  const candidateLines = candidate.split('\n').filter(Boolean);
+  if (sourceLines.length >= 3) {
+    const lineRatio = candidateLines.length / sourceLines.length;
+    if (lineRatio < 0.6) {
+      return source;
+    }
+  }
+
+  const sourceLength = source.length;
+  const candidateLength = candidate.length;
+  if (sourceLength >= 120) {
+    const lengthRatio = candidateLength / sourceLength;
+    if (lengthRatio < 0.55) {
+      return source;
+    }
+  }
+
+  return candidate;
+}
+
+function formatMeetingDocument({
+  title,
+  summary,
+  keyPoints,
+  decisions,
+  actionItems,
+  openIssues,
+  notes,
+  startedAt,
+  endedAt,
+  language
+}) {
+  const output = [];
+  output.push(`# ${title}`);
+  output.push('');
+  output.push('## 회의 개요');
+  output.push(summary || '회의 개요가 제공되지 않았습니다.');
+  output.push('');
+  output.push(`- 언어: ${language || 'ko-KR'}`);
+  if (startedAt) {
+    output.push(`- 시작 시각: ${startedAt}`);
+  }
+  if (endedAt) {
+    output.push(`- 종료 시각: ${endedAt}`);
+  }
+  output.push('');
+  output.push('## 핵심 논의');
+  if (keyPoints.length === 0) {
+    output.push('- 핵심 논의 정리가 필요합니다.');
+  } else {
+    keyPoints.forEach((item) => output.push(`- ${item}`));
+  }
+  output.push('');
+  output.push('## 결정 사항');
+  if (decisions.length === 0) {
+    output.push('- 확정된 결정 사항이 없습니다.');
+  } else {
+    decisions.forEach((item) => output.push(`- ${item}`));
+  }
+  output.push('');
+  output.push('## 액션 아이템');
+  output.push('| 액션 | 담당자 | 기한 | 상태 |');
+  output.push('| --- | --- | --- | --- |');
+  actionItems.forEach((item) => {
+    output.push(`| ${escapeMarkdownTableCell(item.task)} | ${escapeMarkdownTableCell(item.owner)} | ${escapeMarkdownTableCell(item.due)} | ${escapeMarkdownTableCell(item.status)} |`);
+  });
+  output.push('');
+  output.push('## 미해결 이슈');
+  if (openIssues.length === 0) {
+    output.push('- 미해결 이슈 없음');
+  } else {
+    openIssues.forEach((item) => output.push(`- ${item}`));
+  }
+  output.push('');
+  output.push('## 원문 기반 참고 메모');
+  if (notes.length === 0) {
+    output.push('- 추가 메모 없음');
+  } else {
+    notes.forEach((item) => output.push(`- ${item}`));
+  }
+  return output.join('\n').trim();
+}
+
+function buildFallbackMeetingSummary({
+  transcript,
+  startedAt,
+  endedAt,
+  language = 'ko-KR',
+  errorMessage = ''
+}) {
+  const transcriptLines = String(transcript || '')
+    .split(/\r?\n/)
+    .map((line) => truncateText(normalizeWhitespace(line), 220))
+    .filter(Boolean);
+  const title = startedAt ? `회의 기록 (${String(startedAt).slice(0, 10)})` : '회의 기록';
+  const summary = transcriptLines.length > 0
+    ? truncateText(transcriptLines.slice(0, 2).join(' / '), 220)
+    : '회의 전사 원문을 바탕으로 정리가 필요합니다.';
+  const keyPoints = normalizeMeetingList(transcriptLines, {
+    fallback: ['전사 원문에서 핵심 논의를 수동 확인해 주세요.'],
+    maxItems: 8,
+    maxLength: 220
+  });
+  const decisions = normalizeMeetingList(
+    transcriptLines.filter((line) => /(결정|합의|확정|정한다|하기로|로 한다)/.test(line)),
+    { fallback: ['결정 사항 확인 필요'], maxItems: 6, maxLength: 220 }
+  );
+  const openIssues = normalizeMeetingList(
+    transcriptLines.filter((line) => /(확인 필요|미정|이슈|리스크|쟁점|추가 논의)/.test(line)),
+    { fallback: ['미해결 이슈 정리 필요'], maxItems: 6, maxLength: 220 }
+  );
+  const actionItems = normalizeMeetingActionItems(
+    transcriptLines
+      .filter((line) => /(TODO|할 일|액션|담당|기한|까지|공유|준비|진행)/i.test(line))
+      .map((line) => ({ task: line, owner: '미확정', due: '미확정', status: '미확정' })),
+    { maxItems: 8 }
+  );
+  const notes = normalizeMeetingList([
+    errorMessage ? `자동 생성 오류로 fallback 문서를 제공했습니다: ${truncateText(errorMessage, 120)}` : '',
+    transcriptLines.length > 0 ? '원문 주요 문장을 기반으로 임시 정리했습니다.' : ''
+  ], {
+    fallback: ['원문 추가 확인 필요'],
+    maxItems: 4,
+    maxLength: 220
+  });
+  const document = formatMeetingDocument({
+    title,
+    summary,
+    keyPoints,
+    decisions,
+    actionItems,
+    openIssues,
+    notes,
+    startedAt,
+    endedAt,
+    language
+  });
+
+  return {
+    title,
+    summary,
+    polishedTranscript: buildPolishedTranscript(transcript),
+    document,
+    provider: errorMessage ? `fallback:${errorMessage}` : 'fallback',
+    agentProvider: ''
+  };
+}
+
 function isGenerationTimeoutError(error) {
   return /(제한 시간을 초과|timeout|timed out)/i.test(String(error?.message || ''));
 }
@@ -1445,6 +1670,119 @@ export class LlmService {
       return buildFallbackGitHubReview({ task, pullRequest, files });
     }
 
+    const instructions = [
+      '당신은 한국어로 GitHub Pull Request를 리뷰하는 시니어 엔지니어다.',
+      '항상 한국어로만 작성한다.',
+      '요약 나열이 아니라 실제 리뷰 판단을 내려야 한다.',
+      '버그, 회귀, 누락된 테스트, 명세 불일치, 중요한 코드 품질 이슈만 지적한다.',
+      '보안/성능/유지보수성 관점도 점검한다.',
+      '사소한 스타일 취향은 제외한다.',
+      'findings는 심각도 순으로 정리한다. (critical/high=🔴, medium=🟡, low=🟢)',
+      '파일 근거가 없는 "확인 불가/수동 확인 필요" 류의 일반 문구는 금지한다.',
+      '문제가 없으면 findings를 빈 배열로 두고 approval은 approved_with_no_changes로 둔다.',
+      '문제가 있으면 approval은 changes_requested로 두고 mustFix를 정확히 표시한다.',
+      'Return valid JSON only.',
+      'Use this JSON shape:',
+      '{"summary":"string","approval":"approved_with_no_changes|changes_requested","findings":[{"id":"string","severity":"critical|high|medium|low","category":"bug|regression|missing_test|design_gap|spec_mismatch|security|performance|maintainability|code_quality","title":"string","description":"string","fileRefs":["string"],"suggestedFix":"string","mustFix":true}]}',
+      'Do not include markdown fences or any extra prose.'
+    ].join(' ');
+
+    const runReviewGeneration = async ({ compactContext = false, forceCliAgentProvider = '' } = {}) => {
+      const contextFiles = compactContext ? safeArray(files).slice(0, 8) : safeArray(files);
+      const input = [
+        `Task title: ${task.title}`,
+        `Repository: ${pullRequest.repoSlug}`,
+        `Pull request: #${pullRequest.number} ${pullRequest.title}`,
+        `Author: ${pullRequest.author}`,
+        `Base: ${pullRequest.baseRef}`,
+        `Head: ${pullRequest.headRef} (${pullRequest.headSha})`,
+        `Changed files: ${files.length}`,
+        `Review context files: ${contextFiles.length}`,
+        compactContext ? 'Note: timeout 방지를 위해 변경 파일 일부와 축약 패치로 재시도 중입니다.' : '',
+        `PR body: ${String(pullRequest.body || '').trim() || '(empty)'}`,
+        'Changed file patches:',
+        buildPullRequestTranscript(contextFiles, {
+          maxFiles: compactContext ? 8 : 20,
+          patchMaxLength: compactContext ? 700 : 1400
+        })
+      ].filter(Boolean).join('\n\n');
+
+      let response;
+      if (forceCliAgentProvider) {
+        const cliClient = this.generationClient?.cliClient;
+        if (!cliClient?.isConfigured?.()) {
+          throw new Error('CLI 생성기가 설정되지 않았습니다');
+        }
+        const cliGenerated = await cliClient.createTextResponse({
+          instructions,
+          input,
+          agentProvider: forceCliAgentProvider,
+          scope: 'github_review'
+        });
+        const resolvedCliProvider = normalizeWhitespace(cliGenerated?.provider) || forceCliAgentProvider;
+        response = {
+          text: String(cliGenerated?.text || ''),
+          provider: `cli:${resolvedCliProvider}`,
+          agentProvider: resolvedCliProvider
+        };
+      } else {
+        response = await this.generationClient.createTextResponse({
+          instructions,
+          input,
+          scope: 'github_review',
+          agentProvider: agentProvider || task.payload?.generationAgentProvider || ''
+        });
+      }
+      const generated = extractTextResponse(response);
+      const parsed = extractJsonObject(generated.text);
+      const findings = safeArray(parsed.findings).map(normalizeFinding);
+      const approval = parsed.approval === 'changes_requested' ? 'changes_requested' : 'approved_with_no_changes';
+      const summary = normalizeWhitespace(parsed.summary);
+
+      return {
+        summary,
+        approval,
+        findings,
+        reviewBody: formatGitHubReviewBody({
+          summary,
+          findings
+        }),
+        evidenceLinks: resolveGitHubEvidenceLinks({
+          pullRequest,
+          files: contextFiles,
+          findings
+        }),
+        provider: generated.provider,
+        agentProvider: generated.agentProvider || '',
+        usedCompactContext: compactContext
+      };
+    };
+
+    const runReviewGenerationWithRetry = async ({ forceCliAgentProvider = '' } = {}) => {
+      try {
+        const primary = await runReviewGeneration({
+          compactContext: false,
+          forceCliAgentProvider
+        });
+        return {
+          ...primary,
+          usedCompactContext: undefined
+        };
+      } catch (error) {
+        if (isGenerationTimeoutError(error)) {
+          const compact = await runReviewGeneration({
+            compactContext: true,
+            forceCliAgentProvider
+          });
+          return {
+            ...compact,
+            usedCompactContext: undefined
+          };
+        }
+        throw error;
+      }
+    };
+
     if (generationMode === 'external' || generationMode === 'hovis') {
       try {
         const response = await this.generationClient.createTextResponse({
@@ -1473,112 +1811,142 @@ export class LlmService {
           agentProvider: ''
         };
       } catch (error) {
-        return buildFallbackGitHubReview({
-          task,
-          pullRequest,
-          files,
-          errorMessage: error.message
-        });
-      }
-    }
-
-    const instructions = [
-      '당신은 한국어로 GitHub Pull Request를 리뷰하는 시니어 엔지니어다.',
-      '항상 한국어로만 작성한다.',
-      '요약 나열이 아니라 실제 리뷰 판단을 내려야 한다.',
-      '버그, 회귀, 누락된 테스트, 명세 불일치, 중요한 코드 품질 이슈만 지적한다.',
-      '보안/성능/유지보수성 관점도 점검한다.',
-      '사소한 스타일 취향은 제외한다.',
-      'findings는 심각도 순으로 정리한다. (critical/high=🔴, medium=🟡, low=🟢)',
-      '파일 근거가 없는 "확인 불가/수동 확인 필요" 류의 일반 문구는 금지한다.',
-      '문제가 없으면 findings를 빈 배열로 두고 approval은 approved_with_no_changes로 둔다.',
-      '문제가 있으면 approval은 changes_requested로 두고 mustFix를 정확히 표시한다.',
-      'Return valid JSON only.',
-      'Use this JSON shape:',
-      '{"summary":"string","approval":"approved_with_no_changes|changes_requested","findings":[{"id":"string","severity":"critical|high|medium|low","category":"bug|regression|missing_test|design_gap|spec_mismatch|security|performance|maintainability|code_quality","title":"string","description":"string","fileRefs":["string"],"suggestedFix":"string","mustFix":true}]}',
-      'Do not include markdown fences or any extra prose.'
-    ].join(' ');
-
-    const runReviewGeneration = async ({ compactContext = false } = {}) => {
-      const contextFiles = compactContext ? safeArray(files).slice(0, 8) : safeArray(files);
-      const input = [
-        `Task title: ${task.title}`,
-        `Repository: ${pullRequest.repoSlug}`,
-        `Pull request: #${pullRequest.number} ${pullRequest.title}`,
-        `Author: ${pullRequest.author}`,
-        `Base: ${pullRequest.baseRef}`,
-        `Head: ${pullRequest.headRef} (${pullRequest.headSha})`,
-        `Changed files: ${files.length}`,
-        `Review context files: ${contextFiles.length}`,
-        compactContext ? 'Note: timeout 방지를 위해 변경 파일 일부와 축약 패치로 재시도 중입니다.' : '',
-        `PR body: ${String(pullRequest.body || '').trim() || '(empty)'}`,
-        'Changed file patches:',
-        buildPullRequestTranscript(contextFiles, {
-          maxFiles: compactContext ? 8 : 20,
-          patchMaxLength: compactContext ? 700 : 1400
-        })
-      ].filter(Boolean).join('\n\n');
-
-      const response = await this.generationClient.createTextResponse({
-        instructions,
-        input,
-        scope: 'github_review',
-        agentProvider: agentProvider || task.payload?.generationAgentProvider || ''
-      });
-      const generated = extractTextResponse(response);
-      const parsed = extractJsonObject(generated.text);
-      const findings = safeArray(parsed.findings).map(normalizeFinding);
-      const approval = parsed.approval === 'changes_requested' ? 'changes_requested' : 'approved_with_no_changes';
-      const summary = normalizeWhitespace(parsed.summary);
-
-      return {
-        summary,
-        approval,
-        findings,
-        reviewBody: formatGitHubReviewBody({
-          summary,
-          findings
-        }),
-        evidenceLinks: resolveGitHubEvidenceLinks({
-          pullRequest,
-          files: contextFiles,
-          findings
-        }),
-        provider: generated.provider,
-        agentProvider: generated.agentProvider || '',
-        usedCompactContext: compactContext
-      };
-    };
-
-    try {
-      const primary = await runReviewGeneration({ compactContext: false });
-      return {
-        ...primary,
-        usedCompactContext: undefined
-      };
-    } catch (error) {
-      if (isGenerationTimeoutError(error)) {
+        const externalErrorMessage = normalizeWhitespace(error?.message || '외부 에이전트 리뷰 생성 실패');
         try {
-          const compact = await runReviewGeneration({ compactContext: true });
-          return {
-            ...compact,
-            usedCompactContext: undefined
-          };
-        } catch (retryError) {
+          const codexFallback = await runReviewGenerationWithRetry({
+            forceCliAgentProvider: 'codex'
+          });
+          return codexFallback;
+        } catch (cliFallbackError) {
           return buildFallbackGitHubReview({
             task,
             pullRequest,
             files,
-            errorMessage: retryError.message
+            errorMessage: `${externalErrorMessage} / codex fallback failed: ${cliFallbackError.message}`
           });
         }
       }
+    }
 
+    try {
+      return await runReviewGenerationWithRetry();
+    } catch (error) {
       return buildFallbackGitHubReview({
         task,
         pullRequest,
         files,
         errorMessage: error.message
+      });
+    }
+  }
+
+  async generateMeetingSummary({ transcript, startedAt, endedAt, language = 'ko-KR', agentProvider = '' }) {
+    const normalizedTranscript = String(transcript || '').trim();
+    const normalizedStartedAt = normalizeWhitespace(startedAt);
+    const normalizedEndedAt = normalizeWhitespace(endedAt);
+    const normalizedLanguage = normalizeWhitespace(language) || 'ko-KR';
+    const fallbackSummary = buildFallbackMeetingSummary({
+      transcript: normalizedTranscript,
+      startedAt: normalizedStartedAt,
+      endedAt: normalizedEndedAt,
+      language: normalizedLanguage
+    });
+
+    if (!normalizedTranscript) {
+      return {
+        ...fallbackSummary,
+        summary: '회의 전사 내용이 비어 있습니다.'
+      };
+    }
+
+    if (resolveGenerationMode(this.generationClient, 'meeting_notes') === 'fallback') {
+      return fallbackSummary;
+    }
+
+    const instructions = [
+      '당신은 한국어 회의록을 Confluence 문서로 정리하는 비서다.',
+      '항상 한국어로 작성한다.',
+      '전사 원문에 없는 사실은 추정하지 않는다. 불명확하면 "미확정"으로 둔다.',
+      '비개발자도 이해 가능한 쉬운 문장으로 정리한다.',
+      'transcriptPolished에는 전사 원문을 요약하지 말고, 원문 흐름/발화 순서를 유지한 채 오인식 단어·문법·맞춤법만 교정해 제공한다.',
+      'transcriptPolished는 가능한 원문 줄 수를 유지하고, 시각 태그([HH:MM:SS])가 있으면 그대로 보존한다.',
+      'transcriptPolished에서 새 정보 추가/삭제/요약 표현으로 재작성하지 않는다.',
+      '출력은 반드시 JSON 객체 하나로만 반환한다.',
+      '액션 아이템은 task/owner/due/status 필드를 모두 채운다. 모르면 "미확정".',
+      'Use this JSON shape:',
+      '{"title":"string","summary":"string","transcriptPolished":"string","keyPoints":["string"],"decisions":["string"],"actionItems":[{"task":"string","owner":"string","due":"string","status":"string"}],"openIssues":["string"],"notes":["string"]}',
+      'Do not include markdown fences or any extra prose.'
+    ].join(' ');
+
+    const input = [
+      `Language: ${normalizedLanguage}`,
+      `Started at: ${normalizedStartedAt || '(unknown)'}`,
+      `Ended at: ${normalizedEndedAt || '(unknown)'}`,
+      'Transcript:',
+      normalizedTranscript
+    ].join('\n\n');
+
+    try {
+      const response = await this.generationClient.createTextResponse({
+        instructions,
+        input,
+        scope: 'meeting_notes',
+        agentProvider
+      });
+      const generated = extractTextResponse(response);
+      const parsed = extractJsonObject(generated.text);
+      const title = truncateText(normalizeWhitespace(parsed.title) || fallbackSummary.title, 120);
+      const summary = truncateText(normalizeWhitespace(parsed.summary) || fallbackSummary.summary, 260);
+      const polishedTranscript = resolvePolishedTranscript(normalizedTranscript, parsed.transcriptPolished);
+      const keyPoints = normalizeMeetingList(parsed.keyPoints, {
+        fallback: fallbackSummary.document ? [] : ['핵심 논의 정리 필요'],
+        maxItems: 10,
+        maxLength: 220
+      });
+      const decisions = normalizeMeetingList(parsed.decisions, {
+        fallback: ['확정된 결정 사항이 없습니다.'],
+        maxItems: 8,
+        maxLength: 220
+      });
+      const actionItems = normalizeMeetingActionItems(parsed.actionItems, {
+        maxItems: 12
+      });
+      const openIssues = normalizeMeetingList(parsed.openIssues, {
+        fallback: ['미해결 이슈 확인 필요'],
+        maxItems: 8,
+        maxLength: 220
+      });
+      const notes = normalizeMeetingList(parsed.notes, {
+        fallback: ['원문 기반으로 확인된 추가 메모 없음'],
+        maxItems: 6,
+        maxLength: 220
+      });
+
+      return {
+        summary,
+        polishedTranscript,
+        document: formatMeetingDocument({
+          title,
+          summary,
+          keyPoints,
+          decisions,
+          actionItems,
+          openIssues,
+          notes,
+          startedAt: normalizedStartedAt,
+          endedAt: normalizedEndedAt,
+          language: normalizedLanguage
+        }),
+        provider: generated.provider,
+        agentProvider: generated.agentProvider || ''
+      };
+    } catch (error) {
+      return buildFallbackMeetingSummary({
+        transcript: normalizedTranscript,
+        startedAt: normalizedStartedAt,
+        endedAt: normalizedEndedAt,
+        language: normalizedLanguage,
+        errorMessage: error?.message || '회의 정리 생성 실패'
       });
     }
   }

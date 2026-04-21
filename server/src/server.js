@@ -3,22 +3,6 @@ import http from 'node:http';
 import path from 'node:path';
 import { renderErrorPage, renderTaskDetailPage, renderTaskListPage } from './web/render.js';
 
-const CONTENT_TYPE_BY_EXTENSION = {
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.map': 'application/json; charset=utf-8'
-};
-
 const DEFAULT_DEV_CORS_ORIGINS = new Set([
   'http://localhost:5173',
   'http://127.0.0.1:5173'
@@ -116,77 +100,7 @@ function applyCorsHeaders(request, response, allowedOrigins) {
   return true;
 }
 
-function resolveStaticFile(baseDir, requestPath) {
-  const resolved = path.resolve(baseDir, `.${requestPath}`);
-  if (resolved !== baseDir && !resolved.startsWith(`${baseDir}${path.sep}`)) {
-    return '';
-  }
-  return resolved;
-}
-
-function sendFile(response, filePath) {
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-    return false;
-  }
-
-  const extension = path.extname(filePath).toLowerCase();
-  const contentType = CONTENT_TYPE_BY_EXTENSION[extension] || 'application/octet-stream';
-  response.writeHead(200, { 'Content-Type': contentType });
-  response.end(fs.readFileSync(filePath));
-  return true;
-}
-
-function serveClientApp(requestPath, response, cwd) {
-  if (!/^\/app(?:\/|$)/.test(requestPath)) {
-    return false;
-  }
-
-  const distDir = path.join(cwd, 'client', 'dist');
-  const indexPath = path.join(distDir, 'index.html');
-  if (!fs.existsSync(indexPath)) {
-    sendHtml(response, 503, `
-      <!doctype html>
-      <html lang="ko">
-        <head>
-          <meta charset="utf-8" />
-          <title>클라이언트 준비 필요</title>
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0e1528; color: #edf2ff; margin: 0; padding: 2rem; }
-            .card { max-width: 720px; margin: 3rem auto; background: #172038; border: 1px solid #30406f; border-radius: 16px; padding: 1.5rem; }
-            code { background: #243259; border-radius: 6px; padding: 0.1rem 0.4rem; }
-          </style>
-        </head>
-        <body>
-          <article class="card">
-            <h1>React 클라이언트 빌드가 필요합니다</h1>
-            <p><code>npm run build:client</code> 또는 <code>npm run dev:client</code>를 실행한 뒤 다시 접속해 주세요.</p>
-          </article>
-        </body>
-      </html>
-    `);
-    return true;
-  }
-
-  if (requestPath === '/app' || requestPath === '/app/') {
-    return sendFile(response, indexPath);
-  }
-
-  if (requestPath.startsWith('/app/assets/')) {
-    const assetPath = resolveStaticFile(distDir, requestPath.replace('/app', ''));
-    if (!assetPath) {
-      return false;
-    }
-    return sendFile(response, assetPath);
-  }
-
-  return sendFile(response, indexPath);
-}
-
 function serveStatic(requestPath, response, cwd) {
-  if (serveClientApp(requestPath, response, cwd)) {
-    return true;
-  }
-
   if (requestPath !== '/static/styles.css') {
     return false;
   }
@@ -209,7 +123,7 @@ function redirectToTaskOrList(response, nextTaskId, message) {
   redirect(response, `/tasks?message=${encodeURIComponent(message)}`);
 }
 
-export function createHttpServer({ cwd, taskService }) {
+export function createHttpServer({ cwd, taskService, llmService }) {
   const allowedCorsOrigins = buildAllowedCorsOrigins(taskService?.config || {});
 
   return http.createServer(async (request, response) => {
@@ -241,12 +155,45 @@ export function createHttpServer({ cwd, taskService }) {
       }
 
       if (request.method === 'GET' && pathname === '/') {
-        redirect(response, '/app');
+        redirect(response, '/tasks');
         return;
       }
 
       if (request.method === 'GET' && pathname === '/healthz') {
         sendJson(response, 200, { ok: true, uptimeSeconds: Math.round(process.uptime()) });
+        return;
+      }
+
+      if (request.method === 'POST' && pathname === '/api/meetings/summarize') {
+        const body = await parseRequestBody(request);
+        const transcript = String(body.transcript || '').trim();
+        if (!transcript) {
+          sendJson(response, 400, {
+            ok: false,
+            error: '회의 전사 내용이 필요합니다'
+          });
+          return;
+        }
+
+        if (!llmService?.generateMeetingSummary) {
+          throw new Error('회의 정리 서비스를 사용할 수 없습니다');
+        }
+
+        const result = await llmService.generateMeetingSummary({
+          transcript,
+          startedAt: String(body.startedAt || '').trim(),
+          endedAt: String(body.endedAt || '').trim(),
+          language: String(body.language || 'ko-KR').trim() || 'ko-KR'
+        });
+
+        sendJson(response, 200, {
+          ok: true,
+          summary: result.summary,
+          polishedTranscript: result.polishedTranscript || '',
+          document: result.document,
+          provider: result.provider,
+          agentProvider: result.agentProvider || ''
+        });
         return;
       }
 
@@ -295,6 +242,7 @@ export function createHttpServer({ cwd, taskService }) {
           command: body.command,
           projectId: body.projectId,
           baseBranch: body.baseBranch,
+          branchName: body.branchName,
           agentProvider: body.agentProvider,
           needsPlanning: body.needsPlanning,
           needsDesign: body.needsDesign

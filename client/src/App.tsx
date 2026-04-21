@@ -9,6 +9,7 @@ import {
 } from './api';
 import { CodeExecutionPanel } from './components/CodeExecutionPanel';
 import { GitHubPanel } from './components/GitHubPanel';
+import { MeetingPanel } from './components/MeetingPanel';
 import { SlackPanel } from './components/SlackPanel';
 import { BUTTON_CLASS } from './components/common';
 import type { TaskDetail } from './types';
@@ -21,7 +22,6 @@ import {
   type DraftEditorState,
   findDomain,
   getCodeReviewStatus,
-  getExecutionProgress,
   toDraftEditor
 } from './task-view';
 
@@ -42,11 +42,15 @@ export default function App() {
   const [command, setCommand] = useState('');
   const [projectId, setProjectId] = useState('');
   const [baseBranch, setBaseBranch] = useState('master');
+  const [branchName, setBranchName] = useState('');
   const [agentProvider, setAgentProvider] = useState('codex');
   const [needsPlanning, setNeedsPlanning] = useState(false);
   const [needsDesign, setNeedsDesign] = useState(false);
   const [metaInitialized, setMetaInitialized] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<CollapsibleState>({
+    panel_meeting: false,
+    meeting_transcript: false,
+    meeting_document: false,
     panel_slack: false,
     panel_github: false,
     panel_code: false,
@@ -74,16 +78,31 @@ export default function App() {
     refetchInterval: REFRESH_INTERVAL_MS,
     refetchIntervalInBackground: true
   });
+  const codeTasksQuery = useQuery({
+    queryKey: ['tasks', true],
+    queryFn: () => fetchTasks(true),
+    refetchInterval: REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: true
+  });
 
   const tasks = tasksQuery.data?.tasks || [];
+  const codeTasks = codeTasksQuery.data?.tasks || tasks;
   const slackTasks = tasks.filter((task) => task.domain === 'slack_mention');
   const githubReviewTasks = tasks.filter((task) => task.domain === 'github_review');
-  const codeExecutionTasks = tasks.filter((task) => task.domain === 'code_execution');
+  const codeExecutionTasks = codeTasks.filter((task) => task.domain === 'code_execution');
+  const runningCodeTaskIds = useMemo(
+    () => codeExecutionTasks
+      .filter((task) => String(task.status || '').toLowerCase() === 'running')
+      .map((task) => task.id),
+    [codeExecutionTasks]
+  );
 
   const selectedSlackTaskId = selectedTaskIdByDomain.slack_mention || '';
   const selectedGitHubTaskId = selectedTaskIdByDomain.github_review || '';
-  const selectedCodeTaskId = selectedTaskIdByDomain.code_execution || '';
-  const selectedDetailTaskIds = [selectedSlackTaskId, selectedGitHubTaskId, selectedCodeTaskId].filter(Boolean);
+  const selectedDetailTaskIds = useMemo(
+    () => Array.from(new Set([selectedSlackTaskId, selectedGitHubTaskId, ...runningCodeTaskIds].filter(Boolean))),
+    [runningCodeTaskIds, selectedGitHubTaskId, selectedSlackTaskId]
+  );
 
   const detailQueries = useQueries({
     queries: selectedDetailTaskIds.map((taskId) => ({
@@ -107,7 +126,12 @@ export default function App() {
 
   const slackDetail = selectedSlackTaskId ? detailMap[selectedSlackTaskId] || null : null;
   const githubDetail = selectedGitHubTaskId ? detailMap[selectedGitHubTaskId] || null : null;
-  const codeDetail = selectedCodeTaskId ? detailMap[selectedCodeTaskId] || null : null;
+  const runningCodeDetails = useMemo(
+    () => runningCodeTaskIds
+      .map((taskId) => detailMap[taskId])
+      .filter((detail): detail is TaskDetail => Boolean(detail)),
+    [detailMap, runningCodeTaskIds]
+  );
 
   const slackEditor = slackDetail ? draftEditorsByTaskId[slackDetail.task.id] : null;
   const githubEditor = githubDetail ? draftEditorsByTaskId[githubDetail.task.id] : null;
@@ -130,11 +154,11 @@ export default function App() {
     )
   );
 
-  const codeExecutionProgress = codeDetail ? getExecutionProgress(codeDetail.task) : null;
-  const loadingTasks = tasksQuery.isFetching;
+  const loadingTasks = tasksQuery.isFetching || codeTasksQuery.isFetching;
   const anyDetailLoading = detailQueries.some((query) => query.isFetching);
   const queryErrorMessage = asText((metaQuery.error as Error | undefined)?.message)
     || asText((tasksQuery.error as Error | undefined)?.message)
+    || asText((codeTasksQuery.error as Error | undefined)?.message)
     || asText((detailQueries.find((query) => query.error)?.error as Error | undefined)?.message);
   const displayError = error || queryErrorMessage;
 
@@ -157,6 +181,7 @@ export default function App() {
           : [];
 
       await queryClient.invalidateQueries({ queryKey: ['tasks', false] });
+      await queryClient.invalidateQueries({ queryKey: ['tasks', true] });
       await queryClient.invalidateQueries({ queryKey: ['meta'] });
 
       const selectedTaskIds = Object.values(selectedTaskIdByDomain).filter(Boolean);
@@ -370,30 +395,29 @@ export default function App() {
             }}
           />
 
+          <MeetingPanel
+            collapsedSections={collapsedSections}
+            onToggleSection={toggleSection}
+          />
+
           <CodeExecutionPanel
             meta={metaQuery.data || null}
             tasks={codeExecutionTasks}
-            selectedTaskId={selectedCodeTaskId}
-            detail={codeDetail}
-            executionProgress={codeExecutionProgress}
+            runningDetails={runningCodeDetails}
             collapsedSections={collapsedSections}
             busyAction={busyAction}
             command={command}
             projectId={projectId}
             baseBranch={baseBranch}
+            branchName={branchName}
             agentProvider={agentProvider}
             needsPlanning={needsPlanning}
             needsDesign={needsDesign}
             onToggleSection={toggleSection}
-            onSelectTask={(taskId) => {
-              setSelectedTaskIdByDomain((current) => ({
-                ...current,
-                code_execution: taskId
-              }));
-            }}
             onSetCommand={setCommand}
             onSetProjectId={setProjectId}
             onSetBaseBranch={setBaseBranch}
+            onSetBranchName={setBranchName}
             onSetAgentProvider={setAgentProvider}
             onSetNeedsPlanning={setNeedsPlanning}
             onSetNeedsDesign={setNeedsDesign}

@@ -50,6 +50,9 @@ export type DraftEditorState = {
 };
 
 export type CollapsibleSectionId =
+  | 'panel_meeting'
+  | 'meeting_transcript'
+  | 'meeting_document'
   | 'panel_slack'
   | 'panel_github'
   | 'panel_code'

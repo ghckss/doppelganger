@@ -29,6 +29,79 @@ import {
 } from './common';
 import { TaskTimeline } from './TaskTimeline';
 
+function toText(value: unknown): string {
+  return String(value || '').trim();
+}
+
+function normalizeSlackTsForPermalink(value: unknown): string {
+  const raw = toText(value);
+  const match = raw.match(/^(\d+)\.(\d+)$/);
+  if (!match) {
+    return '';
+  }
+  const seconds = match[1];
+  const micros = String(match[2] || '').padEnd(6, '0').slice(0, 6);
+  return `${seconds}${micros}`;
+}
+
+function resolveSlackChannelId(sourceUrl: string, payloadChannelId: unknown): string {
+  const payloadValue = toText(payloadChannelId);
+  if (payloadValue) {
+    return payloadValue;
+  }
+
+  const raw = toText(sourceUrl);
+  if (!raw) {
+    return '';
+  }
+  try {
+    const parsed = new URL(raw);
+    const match = parsed.pathname.match(/\/archives\/([^/]+)/);
+    return toText(match?.[1]);
+  } catch {
+    return '';
+  }
+}
+
+function buildSlackArtifactLink({
+  taskSourceUrl,
+  channelId,
+  ts,
+  threadTs
+}: {
+  taskSourceUrl: string;
+  channelId: string;
+  ts: unknown;
+  threadTs: unknown;
+}): string {
+  const baseUrl = toText(taskSourceUrl);
+  if (!baseUrl) {
+    return '';
+  }
+  const normalizedTs = normalizeSlackTsForPermalink(ts);
+  if (!normalizedTs) {
+    return baseUrl;
+  }
+
+  try {
+    const base = new URL(baseUrl);
+    const resolvedChannelId = resolveSlackChannelId(baseUrl, channelId);
+    if (!resolvedChannelId) {
+      return baseUrl;
+    }
+
+    const permalink = new URL(`/archives/${resolvedChannelId}/p${normalizedTs}`, `${base.protocol}//${base.host}`);
+    const normalizedThreadTs = toText(threadTs);
+    if (normalizedThreadTs) {
+      permalink.searchParams.set('thread_ts', normalizedThreadTs);
+      permalink.searchParams.set('cid', resolvedChannelId);
+    }
+    return permalink.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
 type SlackPanelProps = {
   tasks: Task[];
   selectedTaskId: string;
@@ -119,7 +192,20 @@ export function SlackPanel({
           {selectedTaskId && detail && editor && (
             <article className="grid gap-4 border-t border-slate-200 pt-4">
               <header className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
-                <h3 className="text-lg font-semibold text-slate-900">{detail.task.title}</h3>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  {toText(detail.task.source_url)
+                    ? (
+                      <a
+                        className="underline decoration-slate-300 underline-offset-4 transition hover:text-sky-700 hover:decoration-sky-400"
+                        href={toText(detail.task.source_url)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {detail.task.title}
+                      </a>
+                    )
+                    : detail.task.title}
+                </h3>
                 <div className="flex flex-wrap gap-1.5">
                   <StatusBadge status={detail.task.status} label={mapStatusLabel(detail.task.status)} />
                   <StatusBadge status={detail.task.approval_state} label={mapStatusLabel(detail.task.approval_state)} />
@@ -335,15 +421,38 @@ export function SlackPanel({
                 </div>
                 {!collapsedSections.slack_artifacts && (
                   <ul className="grid gap-2">
-                    {messageArtifacts.map((artifact) => (
-                      <li key={artifact.id} className="grid gap-2 rounded-lg border border-slate-200 bg-white p-3">
-                        <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
-                          <strong className="text-slate-900">{artifact.title || '메시지'}</strong>
-                          <span className="text-xs text-slate-500">{formatDateTime(artifact.created_at)}</span>
-                        </div>
-                        <pre className="m-0 whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">{artifact.content || '(내용 없음)'}</pre>
-                      </li>
-                    ))}
+                    {messageArtifacts.map((artifact) => {
+                      const artifactLink = buildSlackArtifactLink({
+                        taskSourceUrl: toText(detail.task.source_url),
+                        channelId: resolveSlackChannelId(
+                          toText(detail.task.source_url),
+                          detail.task.payload?.channelId
+                        ),
+                        ts: artifact.metadata?.ts,
+                        threadTs: artifact.metadata?.threadTs || detail.task.payload?.threadTs
+                      });
+
+                      return (
+                        <li key={artifact.id} className="grid gap-2 rounded-lg border border-slate-200 bg-white p-3">
+                          <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                            {artifactLink
+                              ? (
+                                <a
+                                  className="font-semibold text-slate-900 underline decoration-slate-300 underline-offset-4 transition hover:text-sky-700 hover:decoration-sky-400"
+                                  href={artifactLink}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {artifact.title || '메시지'}
+                                </a>
+                              )
+                              : <strong className="text-slate-900">{artifact.title || '메시지'}</strong>}
+                            <span className="text-xs text-slate-500">{formatDateTime(artifact.created_at)}</span>
+                          </div>
+                          <pre className="m-0 whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">{artifact.content || '(내용 없음)'}</pre>
+                        </li>
+                      );
+                    })}
                     {messageArtifacts.length === 0 && <li className={EMPTY_CLASS}>표시할 메시지/답글 아티팩트가 없습니다.</li>}
                   </ul>
                 )}
