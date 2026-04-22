@@ -21,6 +21,7 @@ import {
   type DomainId,
   type DraftEditorState,
   findDomain,
+  formatDateTime,
   getCodeReviewStatus,
   toDraftEditor
 } from './task-view';
@@ -39,6 +40,8 @@ export default function App() {
   const [busyAction, setBusyAction] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [lastBatchUpdateAt, setLastBatchUpdateAt] = useState('');
+  const [lastBatchUpdateSummary, setLastBatchUpdateSummary] = useState('');
 
   const [command, setCommand] = useState('');
   const [projectId, setProjectId] = useState('');
@@ -151,9 +154,59 @@ export default function App() {
     || asText((detailQueries.find((query) => query.error)?.error as Error | undefined)?.message);
   const displayError = error || queryErrorMessage;
 
+  function summarizePollResult(label: string, payload: unknown): string {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return `${label}: 완료`;
+    }
+    const record = payload as Record<string, unknown>;
+    const metrics = [
+      ['matchesFound', '매치'],
+      ['pullRequestsFound', 'PR'],
+      ['tasksProcessed', '처리'],
+      ['draftsGenerated', '초안'],
+      ['alreadyReviewedSkipped', '기검토']
+    ]
+      .map(([key, text]) => {
+        const value = Number(record[key]);
+        return Number.isFinite(value) ? `${text} ${Math.max(0, Math.trunc(value))}` : '';
+      })
+      .filter(Boolean);
+    return metrics.length > 0 ? `${label}: ${metrics.join(', ')}` : `${label}: 완료`;
+  }
+
   async function runBatchUpdate() {
-    await pollSlackMentions();
-    await pollGitHubReviews();
+    const results = await Promise.allSettled([
+      pollSlackMentions(),
+      pollGitHubReviews()
+    ]);
+
+    const summaryParts: string[] = [];
+    const errors: string[] = [];
+    const [slackResult, githubResult] = results;
+
+    if (slackResult.status === 'fulfilled') {
+      summaryParts.push(summarizePollResult('Slack', slackResult.value));
+    } else {
+      errors.push(`Slack 업데이트 실패: ${asText(slackResult.reason?.message || slackResult.reason || '알 수 없는 오류')}`);
+    }
+
+    if (githubResult.status === 'fulfilled') {
+      summaryParts.push(summarizePollResult('GitHub', githubResult.value));
+    } else {
+      errors.push(`GitHub 업데이트 실패: ${asText(githubResult.reason?.message || githubResult.reason || '알 수 없는 오류')}`);
+    }
+
+    setLastBatchUpdateAt(new Date().toISOString());
+    setLastBatchUpdateSummary(summaryParts.join(' | ') || '변경 내역 없음');
+
+    await queryClient.invalidateQueries({ queryKey: ['tasks', false] });
+    await queryClient.invalidateQueries({ queryKey: ['tasks', true] });
+    await queryClient.invalidateQueries({ queryKey: ['meta'] });
+    await queryClient.invalidateQueries({ queryKey: ['taskDetail'] });
+
+    if (errors.length > 0) {
+      throw new Error(errors.join(' / '));
+    }
   }
 
   async function runAction(label: string, action: () => Promise<string | string[] | void>) {
@@ -322,7 +375,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const intervalId = setInterval(() => {
+    const tick = () => {
       if (autoBatchUpdateRunningRef.current || busyAction) {
         return;
       }
@@ -331,12 +384,6 @@ export default function App() {
       void (async () => {
         try {
           await runBatchUpdate();
-          if (cancelled) {
-            return;
-          }
-          await queryClient.invalidateQueries({ queryKey: ['tasks', false] });
-          await queryClient.invalidateQueries({ queryKey: ['tasks', true] });
-          await queryClient.invalidateQueries({ queryKey: ['meta'] });
         } catch (caught) {
           if (!cancelled) {
             setError(asText((caught as Error).message, '일괄 업데이트 처리에 실패했습니다.'));
@@ -345,13 +392,15 @@ export default function App() {
           autoBatchUpdateRunningRef.current = false;
         }
       })();
-    }, REFRESH_INTERVAL_MS);
+    };
+    tick();
+    const intervalId = setInterval(tick, 60 * 1000);
 
     return () => {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [busyAction, queryClient]);
+  }, [busyAction]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900">
@@ -365,7 +414,7 @@ export default function App() {
             <button type="button" className={BUTTON_CLASS} onClick={() => void runAction('일괄 업데이트', runBatchUpdate)} disabled={Boolean(busyAction)}>
               일괄 업데이트
             </button>
-            <button type="button" className={BUTTON_CLASS} onClick={() => void runAction('새로고침', async () => {})} disabled={Boolean(busyAction) || loadingTasks}>
+            <button type="button" className={BUTTON_CLASS} onClick={() => void runAction('새로고침', async () => { })} disabled={Boolean(busyAction) || loadingTasks}>
               새로고침
             </button>
           </div>
@@ -452,6 +501,12 @@ export default function App() {
         <footer className="flex flex-wrap items-center gap-4 border-t border-slate-700/60 py-3 text-sm text-slate-200">
           {loadingTasks || anyDetailLoading ? <span>데이터 동기화 중…</span> : <span>동기화 완료</span>}
           {busyAction && <span>실행 중: {busyAction}</span>}
+          {lastBatchUpdateAt && (
+            <span>
+              마지막 일괄 업데이트: {formatDateTime(lastBatchUpdateAt)}
+              {lastBatchUpdateSummary ? ` · ${lastBatchUpdateSummary}` : ''}
+            </span>
+          )}
           {notice && <span className="text-emerald-300">{notice}</span>}
           {displayError && <span className="text-rose-300">{displayError}</span>}
         </footer>
