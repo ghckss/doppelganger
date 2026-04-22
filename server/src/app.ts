@@ -1,18 +1,18 @@
-import { loadConfig } from './config.js';
-import { createRepository } from './db.js';
-import { createDomainRegistry } from './domain-registry.js';
-import { LlmService } from './llm-service.js';
-import { CodeTaskPlanner } from './code-task-planner.js';
-import { TaskService } from './task-service.js';
-import { CliGenerationClient } from './connectors/cli-generation-client.js';
-import { ClaudeCliRunner, CodexCliRunner } from './connectors/codex-cli.js';
-import { GitHubClient } from './connectors/github-client.js';
-import { OpenAIClient } from './connectors/openai-client.js';
-import { HovisReviewClient } from './connectors/hovis-review-client.js';
-import { GenerationClient } from './generation-client.js';
-import { SlackClient } from './connectors/slack-client.js';
-import { WorkspaceRunner } from './connectors/workspace-runner.js';
-import { createHttpServer } from './server.js';
+import { loadConfig } from './config.ts';
+import { createRepository } from './db.ts';
+import { createDomainRegistry } from './domain-registry.ts';
+import { LlmService } from './llm-service.ts';
+import { CodeTaskPlanner } from './code-task-planner.ts';
+import { TaskService } from './task-service.ts';
+import { CliGenerationClient } from './connectors/cli-generation-client.ts';
+import { ClaudeCliRunner, CodexCliRunner } from './connectors/codex-cli.ts';
+import { GitHubClient } from './connectors/github-client.ts';
+import { OpenAIClient } from './connectors/openai-client.ts';
+import { HovisReviewClient } from './connectors/hovis-review-client.ts';
+import { GenerationClient } from './generation-client.ts';
+import { SlackClient } from './connectors/slack-client.ts';
+import { WorkspaceRunner } from './connectors/workspace-runner.ts';
+import { createHttpServer } from './server.ts';
 
 interface CreateApplicationOptions {
   cwd?: string;

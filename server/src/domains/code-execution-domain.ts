@@ -10,8 +10,8 @@ import {
   patchAgentSchema,
   renderArtifactContent,
   reviewAgentSchema
-} from '../code-task-prompts.js';
-import { normalizeWhitespace, safeArray, truncateText } from '../utils.js';
+} from '../code-task-prompts.ts';
+import { normalizeWhitespace, safeArray, truncateText } from '../utils.ts';
 
 const CODE_REVIEW_ROUNDS = 3;
 const CODE_EXECUTION_TOTAL_STEPS = CODE_REVIEW_ROUNDS + 5;

@@ -1,6 +1,6 @@
-import { createCodeExecutionDomain } from './domains/code-execution-domain.js';
-import { createGitHubReviewDomain } from './domains/github-review-domain.js';
-import { createSlackMentionDomain } from './domains/slack-mention-domain.js';
+import { createCodeExecutionDomain } from './domains/code-execution-domain.ts';
+import { createGitHubReviewDomain } from './domains/github-review-domain.ts';
+import { createSlackMentionDomain } from './domains/slack-mention-domain.ts';
 
 export interface DomainRegistry {
   slack_mention: unknown;

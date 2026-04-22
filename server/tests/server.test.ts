@@ -1,7 +1,7 @@
 // @ts-nocheck
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createHttpServer } from '../src/server.js';
+import { createHttpServer } from '../src/server.ts';
 
 function createTaskServiceStub() {
   return {

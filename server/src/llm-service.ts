@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { normalizeWhitespace, safeArray, truncateText } from './utils.js';
+import { normalizeWhitespace, safeArray, truncateText } from './utils.ts';
 
 const SLACK_REPLY_CATEGORIES = {
   action_request: {

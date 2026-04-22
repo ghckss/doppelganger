@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { createApplication } from './app.js';
+import { createApplication } from './app.ts';
 
 async function main() {
   const application = createApplication({

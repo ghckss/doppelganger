@@ -1,7 +1,7 @@
 // @ts-nocheck
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { SlackClient } from '../src/connectors/slack-client.js';
+import { SlackClient } from '../src/connectors/slack-client.ts';
 
 test('SlackClient searches mentions without brittle date filter and applies ts cutoff locally', async () => {
   const requests = [];

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listMissing } from './utils.js';
+import { listMissing } from './utils.ts';
 
 function parseEnvFile(content) {
   const parsed = {};

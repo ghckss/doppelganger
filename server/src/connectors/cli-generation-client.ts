@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { logCommandEnd, logCommandStart } from '../command-log.js';
+import { logCommandEnd, logCommandStart } from '../command-log.ts';
 
 const STREAM_CAPTURE_LIMIT = 256 * 1024;
 const FILE_CAPTURE_LIMIT = 512 * 1024;

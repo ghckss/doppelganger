@@ -1,10 +1,10 @@
 // @ts-nocheck
-import { getConnectorReadiness } from './config.js';
+import { getConnectorReadiness } from './config.ts';
 import {
   appendSlackStyleMemory,
   SLACK_STYLE_MEMORY_STATE_KEY,
   stringifySlackStyleMemory
-} from './slack-style-memory.js';
+} from './slack-style-memory.ts';
 
 const CODE_EXECUTION_RECOVERY_ERROR = '앱이 재시작되어 코드 작업 실행이 중단되었습니다. 작업을 다시 실행해 주세요.';
 const CODE_REVIEW_RECOVERY_ERROR = '앱이 재시작되어 코드 검토 실행이 중단되었습니다. 코드 검토를 다시 실행해 주세요.';

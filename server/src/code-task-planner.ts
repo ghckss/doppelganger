@@ -4,8 +4,8 @@ import {
   buildFallbackProductPlan,
   buildFallbackPromptPlan,
   buildPullRequestDraft
-} from './code-task-prompts.js';
-import { normalizeWhitespace, safeArray } from './utils.js';
+} from './code-task-prompts.ts';
+import { normalizeWhitespace, safeArray } from './utils.ts';
 
 function extractJsonObject(text) {
   const trimmed = String(text || '').trim();

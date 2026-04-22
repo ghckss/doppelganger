@@ -1,6 +1,6 @@
 // @ts-nocheck
 import crypto from 'node:crypto';
-import { normalizeWhitespace, safeArray, truncateText } from '../utils.js';
+import { normalizeWhitespace, safeArray, truncateText } from '../utils.ts';
 
 function buildReviewFingerprint(pullRequest, files) {
   return crypto.createHash('sha1').update(JSON.stringify({

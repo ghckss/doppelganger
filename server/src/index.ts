@@ -1,4 +1,4 @@
-import { createApplication } from './app.js';
+import { createApplication } from './app.ts';
 
 const { config, server } = createApplication({
   cwd: process.cwd()

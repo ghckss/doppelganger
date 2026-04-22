@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { normalizeWhitespace, truncateText } from './utils.js';
+import { normalizeWhitespace, truncateText } from './utils.ts';
 
 function sentenceList(values = []) {
   return values.filter(Boolean).map((value) => `- ${value}`).join('\n');

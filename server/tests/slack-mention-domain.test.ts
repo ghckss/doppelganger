@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createRepository } from '../src/db.js';
-import { createSlackMentionDomain } from '../src/domains/slack-mention-domain.js';
+import { createRepository } from '../src/db.ts';
+import { createSlackMentionDomain } from '../src/domains/slack-mention-domain.ts';
 
 function createRepo() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-slack-'));
