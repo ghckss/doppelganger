@@ -7,14 +7,30 @@ Project layout:
 - `client/`: React + Vite UI (신규 기본 UI)
 - `docs/`: fromm/kiwee 분석 문서 및 운영 문서
 
-Server architecture (phase 2):
-- `server/src/index.ts`, `server/src/cli.ts`: 최소 엔트리포인트
-- `server/src/bootstrap/runtime-container.ts`: config/repository/connectors/LLM 런타임 DI 조립
-- `server/src/bootstrap/domain-registry.ts`: 도메인 모듈 등록
-- `server/src/modules/tasks/*`: 조회/명령/백그라운드 서비스 분리
-- `server/src/api/routes/*`: API 라우트 분리
-- `server/src/contracts/runtime-contracts.ts`: 서비스 경계 계약 타입
-- `server/tests/{api,connectors,config,core,domains,services}`: 기능별 테스트 디렉토리
+## Folder structure (current)
+```text
+.
+├─ server/
+│  ├─ src/
+│  │  ├─ index.ts, cli.ts                # 최소 엔트리포인트
+│  │  ├─ bootstrap/                      # 앱 조립(create-application, runtime-container, domain-registry)
+│  │  ├─ api/                            # HTTP 서버/라우팅
+│  │  ├─ agents/                         # CLI/프롬프트/외부 에이전트 실행기
+│  │  ├─ domains/                        # 도메인 로직(slack, github, code execution)
+│  │  ├─ modules/                        # 도메인별 모듈 + tasks 서비스
+│  │  ├─ connectors/                     # Slack/GitHub/OpenAI/Workspace 연결
+│  │  ├─ services/                       # LLM/Generation 서비스
+│  │  ├─ infra/                          # 저장소/DB
+│  │  ├─ core/                           # 공통 유틸/설정/로깅
+│  │  └─ contracts/                      # 런타임 경계 타입 계약
+│  ├─ tests/                             # 기능별 테스트(api, connectors, config, core, domains, services)
+│  └─ public/                            # 정적 리소스
+├─ client/
+│  └─ src/                               # React UI (components, hooks)
+└─ docs/
+   ├─ fromm/
+   └─ kiwee/
+```
 
 Current state:
 - Slack mention handling is implemented end-to-end, including automatic summary and reply-draft generation during polling.
