@@ -1,15 +1,16 @@
-// @ts-nocheck
 import crypto from 'node:crypto';
 
-export function nowIso() {
+export function nowIso(): string {
   return new Date().toISOString();
 }
 
-export function createId(prefix = 'id') {
+export function createId(prefix: string = 'id'): string {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-export function readJson(value, fallback = null) {
+export function readJson<T>(value: string | null | undefined, fallback: T): T;
+export function readJson(value: string | null | undefined, fallback?: null): unknown | null;
+export function readJson<T>(value: string | null | undefined, fallback: T | null = null): unknown | T | null {
   if (!value) {
     return fallback;
   }
@@ -21,15 +22,15 @@ export function readJson(value, fallback = null) {
   }
 }
 
-export function writeJson(value) {
+export function writeJson(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-export function normalizeWhitespace(value) {
+export function normalizeWhitespace(value: unknown): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
-export function truncateText(value, maxLength = 120) {
+export function truncateText(value: unknown, maxLength: number = 120): string {
   const normalized = normalizeWhitespace(value);
   if (normalized.length <= maxLength) {
     return normalized;
@@ -38,7 +39,7 @@ export function truncateText(value, maxLength = 120) {
   return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
-export function escapeHtml(value) {
+export function escapeHtml(value: unknown): string {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -47,7 +48,7 @@ export function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-export function formatDateTime(value) {
+export function formatDateTime(value: string | number | Date | null | undefined): string {
   if (!value) {
     return '-';
   }
@@ -64,7 +65,7 @@ export function formatDateTime(value) {
   }).format(date);
 }
 
-export function formatSlackTimestamp(ts) {
+export function formatSlackTimestamp(ts: string | number | null | undefined): string | null {
   const seconds = Number(ts);
   if (!Number.isFinite(seconds)) {
     return null;
@@ -73,14 +74,14 @@ export function formatSlackTimestamp(ts) {
   return new Date(seconds * 1000).toISOString();
 }
 
-export function toSlackText(value) {
+export function toSlackText(value: unknown): string {
   return String(value ?? '').trim();
 }
 
-export function listMissing(requiredPairs) {
+export function listMissing(requiredPairs: Array<[string, unknown]>): string[] {
   return requiredPairs.filter(([, value]) => !value).map(([key]) => key);
 }
 
-export function safeArray(value) {
-  return Array.isArray(value) ? value : [];
+export function safeArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
 }

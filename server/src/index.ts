@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { createApplication } from './app.js';
 
 const { config, server } = createApplication({

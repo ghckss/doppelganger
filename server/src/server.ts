@@ -1,4 +1,3 @@
-// @ts-nocheck
 import http from 'node:http';
 
 const DEFAULT_DEV_CORS_ORIGINS = new Set([
@@ -6,34 +5,142 @@ const DEFAULT_DEV_CORS_ORIGINS = new Set([
   'http://127.0.0.1:5173'
 ]);
 
-function sendJson(response, statusCode, payload) {
+type RequestBody = Record<string, unknown>;
+
+interface DraftMetadata {
+  provider?: string;
+  reactionName?: string;
+  [key: string]: unknown;
+}
+
+interface TaskPayload {
+  codeReview?: {
+    analysisStatus?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+interface TaskRecord {
+  domain: string;
+  status: string;
+  summary?: string | null;
+  approval_state?: string | null;
+  payload?: TaskPayload;
+  [key: string]: unknown;
+}
+
+interface TaskDetail {
+  task: TaskRecord;
+  latestDraft?: {
+    content?: string;
+    metadata?: DraftMetadata;
+    [key: string]: unknown;
+  };
+  domain?: {
+    capabilities?: {
+      drafting?: boolean;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+interface TaskServiceApi {
+  config: {
+    app?: {
+      baseUrl?: unknown;
+      corsOrigins?: unknown[];
+    };
+    workspace: {
+      projectsRoot: string;
+    };
+    agent?: {
+      defaultProvider?: string;
+    };
+    [key: string]: unknown;
+  };
+  listTasks(input: { includeResolved: boolean }): unknown;
+  getCodeExecutionProjects(): unknown;
+  getConnectorReadiness(): unknown;
+  getDomainCatalog(): unknown;
+  createCodeExecutionTask(input: Record<string, unknown>): Promise<TaskDetail>;
+  getTaskDetail(taskId: string): TaskDetail;
+  generateDraft(taskId: string, input: Record<string, unknown>): Promise<TaskDetail>;
+  startSlackCodeReview(taskId: string, input: Record<string, unknown>): Promise<{
+    started: boolean;
+    alreadyRunning: boolean;
+    detail: TaskDetail;
+  }>;
+  startCodeExecutionTask(taskId: string): Promise<TaskDetail>;
+  resumeCodeExecutionTask(taskId: string): Promise<TaskDetail>;
+  createCodeExecutionPullRequest(taskId: string, input: { branchName?: string }): Promise<TaskDetail>;
+  pollSlackMentions(): Promise<unknown>;
+  pollGitHubReviews(): Promise<unknown>;
+  saveDraft(taskId: string, input: Record<string, unknown>): void;
+  approveTask(taskId: string): TaskDetail;
+  ignoreTask(taskId: string): TaskDetail;
+  executeTask(taskId: string, input: { message: string; reactionName: string; addReaction: boolean }): Promise<TaskDetail>;
+}
+
+interface MeetingSummaryResult {
+  summary: string;
+  polishedTranscript?: string;
+  document: string;
+  provider: string;
+  agentProvider?: string;
+}
+
+interface LlmServiceApi {
+  generateMeetingSummary?: (input: {
+    transcript: string;
+    startedAt: string;
+    endedAt: string;
+    language: string;
+  }) => Promise<MeetingSummaryResult>;
+}
+
+function toRequestBody(value: unknown): RequestBody {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return value as RequestBody;
+}
+
+function readStringField(body: RequestBody, key: string): string {
+  return String(body[key] ?? '').trim();
+}
+
+function sendJson(response: http.ServerResponse, statusCode: number, payload: unknown): void {
   response.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8'
   });
   response.end(JSON.stringify(payload, null, 2));
 }
 
-async function readBody(request) {
-  const chunks = [];
+async function readBody(request: http.IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
   for await (const chunk of request) {
-    chunks.push(chunk);
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function parseRequestBody(request) {
+async function parseRequestBody(request: http.IncomingMessage): Promise<RequestBody> {
   const rawBody = await readBody(request);
   const contentType = request.headers['content-type'] || '';
 
   if (contentType.includes('application/json')) {
-    return rawBody ? JSON.parse(rawBody) : {};
+    const parsed = rawBody ? JSON.parse(rawBody) : {};
+    return toRequestBody(parsed);
   }
 
   const params = new URLSearchParams(rawBody);
-  return Object.fromEntries(params.entries());
+  return Object.fromEntries(params.entries()) as RequestBody;
 }
 
-function normalizeOrigin(value) {
+function normalizeOrigin(value: unknown): string {
   const normalized = String(value || '').trim();
   if (!normalized) {
     return '';
@@ -50,7 +157,7 @@ function normalizeOrigin(value) {
   }
 }
 
-function buildAllowedCorsOrigins(config) {
+function buildAllowedCorsOrigins(config: { app?: { baseUrl?: unknown; corsOrigins?: unknown[] } } | undefined): Set<string> {
   const allowed = new Set(DEFAULT_DEV_CORS_ORIGINS);
   const baseOrigin = normalizeOrigin(config?.app?.baseUrl);
   if (baseOrigin) {
@@ -68,7 +175,11 @@ function buildAllowedCorsOrigins(config) {
   return allowed;
 }
 
-function applyCorsHeaders(request, response, allowedOrigins) {
+function applyCorsHeaders(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  allowedOrigins: Set<string>
+): boolean {
   const origin = String(request.headers.origin || '').trim();
   if (!origin || !allowedOrigins.has(origin)) {
     return false;
@@ -82,11 +193,23 @@ function applyCorsHeaders(request, response, allowedOrigins) {
   return true;
 }
 
-export function createHttpServer({ taskService, llmService }) {
-  const allowedCorsOrigins = buildAllowedCorsOrigins(taskService?.config || {});
+function getAnalysisStatus(detail: TaskDetail): string {
+  return String(detail.task.payload?.codeReview?.analysisStatus || '');
+}
+
+export function createHttpServer({
+  taskService,
+  llmService
+}: {
+  taskService: unknown;
+  llmService: unknown;
+}): http.Server {
+  const service = taskService as TaskServiceApi;
+  const summarizer = llmService as LlmServiceApi;
+  const allowedCorsOrigins = buildAllowedCorsOrigins(service?.config || {});
 
   return http.createServer(async (request, response) => {
-    const url = new URL(request.url, 'http://127.0.0.1');
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const pathname = url.pathname;
 
     try {
@@ -102,8 +225,10 @@ export function createHttpServer({ taskService, llmService }) {
         return;
       }
 
-      const hasUsableDraft = (detail) => Boolean(detail.latestDraft?.content || detail.latestDraft?.metadata?.reactionName);
-      const shouldAutoGenerateDraft = (detail) => detail.domain?.capabilities?.drafting
+      const hasUsableDraft = (detail: TaskDetail) => Boolean(
+        detail.latestDraft?.content || detail.latestDraft?.metadata?.reactionName
+      );
+      const shouldAutoGenerateDraft = (detail: TaskDetail) => detail.domain?.capabilities?.drafting
         && detail.task.domain !== 'github_review'
         && detail.task.status !== 'failed'
         && (!detail.task.summary || !hasUsableDraft(detail));
@@ -131,7 +256,7 @@ export function createHttpServer({ taskService, llmService }) {
 
       if (request.method === 'POST' && pathname === '/api/meetings/summarize') {
         const body = await parseRequestBody(request);
-        const transcript = String(body.transcript || '').trim();
+        const transcript = readStringField(body, 'transcript');
         if (!transcript) {
           sendJson(response, 400, {
             ok: false,
@@ -140,15 +265,15 @@ export function createHttpServer({ taskService, llmService }) {
           return;
         }
 
-        if (!llmService?.generateMeetingSummary) {
+        if (!summarizer?.generateMeetingSummary) {
           throw new Error('회의 정리 서비스를 사용할 수 없습니다');
         }
 
-        const result = await llmService.generateMeetingSummary({
+        const result = await summarizer.generateMeetingSummary({
           transcript,
-          startedAt: String(body.startedAt || '').trim(),
-          endedAt: String(body.endedAt || '').trim(),
-          language: String(body.language || 'ko-KR').trim() || 'ko-KR'
+          startedAt: readStringField(body, 'startedAt'),
+          endedAt: readStringField(body, 'endedAt'),
+          language: readStringField(body, 'language') || 'ko-KR'
         });
 
         sendJson(response, 200, {
@@ -164,37 +289,37 @@ export function createHttpServer({ taskService, llmService }) {
 
       if (request.method === 'GET' && pathname === '/api/tasks') {
         sendJson(response, 200, {
-          tasks: taskService.listTasks({
+          tasks: service.listTasks({
             includeResolved: url.searchParams.get('includeResolved') === '1'
           }),
-          projects: taskService.getCodeExecutionProjects(),
-          readiness: taskService.getConnectorReadiness(),
-          domains: taskService.getDomainCatalog()
+          projects: service.getCodeExecutionProjects(),
+          readiness: service.getConnectorReadiness(),
+          domains: service.getDomainCatalog()
         });
         return;
       }
 
       if (request.method === 'GET' && pathname === '/api/meta') {
         sendJson(response, 200, {
-          projects: taskService.getCodeExecutionProjects(),
-          readiness: taskService.getConnectorReadiness(),
-          domains: taskService.getDomainCatalog(),
-          projectsRoot: taskService.config.workspace.projectsRoot,
-          defaultAgentProvider: taskService.config.agent?.defaultProvider || 'codex'
+          projects: service.getCodeExecutionProjects(),
+          readiness: service.getConnectorReadiness(),
+          domains: service.getDomainCatalog(),
+          projectsRoot: service.config.workspace.projectsRoot,
+          defaultAgentProvider: service.config.agent?.defaultProvider || 'codex'
         });
         return;
       }
 
       if (request.method === 'POST' && pathname === '/api/tasks/code-execution') {
         const body = await parseRequestBody(request);
-        const detail = await taskService.createCodeExecutionTask({
-          command: body.command,
-          projectId: body.projectId,
-          baseBranch: body.baseBranch,
-          branchName: body.branchName,
-          agentProvider: body.agentProvider,
-          needsPlanning: body.needsPlanning,
-          needsDesign: body.needsDesign
+        const detail = await service.createCodeExecutionTask({
+          command: readStringField(body, 'command'),
+          projectId: readStringField(body, 'projectId'),
+          baseBranch: readStringField(body, 'baseBranch'),
+          branchName: readStringField(body, 'branchName'),
+          agentProvider: readStringField(body, 'agentProvider'),
+          needsPlanning: String(body.needsPlanning || '').toLowerCase() === 'true',
+          needsDesign: String(body.needsDesign || '').toLowerCase() === 'true'
         });
         sendJson(response, 201, detail);
         return;
@@ -203,15 +328,15 @@ export function createHttpServer({ taskService, llmService }) {
       const taskApiMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
       if (request.method === 'GET' && taskApiMatch) {
         const taskId = decodeURIComponent(taskApiMatch[1]);
-        let detail = taskService.getTaskDetail(taskId);
+        let detail = service.getTaskDetail(taskId);
         if (shouldAutoGenerateDraft(detail)) {
-          detail = await taskService.generateDraft(taskId, {});
+          detail = await service.generateDraft(taskId, {});
         }
         if (detail.task.domain === 'slack_mention') {
           const analysisStatus = String(detail.task.payload?.codeReview?.analysisStatus || '').toLowerCase();
           if (!analysisStatus || analysisStatus === 'not_requested') {
-            await taskService.startSlackCodeReview(taskId, {});
-            detail = taskService.getTaskDetail(taskId);
+            await service.startSlackCodeReview(taskId, {});
+            detail = service.getTaskDetail(taskId);
           }
         }
         sendJson(response, 200, detail);
@@ -221,7 +346,7 @@ export function createHttpServer({ taskService, llmService }) {
       const runCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
       if (request.method === 'POST' && runCodeTaskMatch) {
         const taskId = decodeURIComponent(runCodeTaskMatch[1]);
-        const detail = await taskService.startCodeExecutionTask(taskId);
+        const detail = await service.startCodeExecutionTask(taskId);
         sendJson(response, 200, {
           ok: true,
           taskId,
@@ -233,7 +358,7 @@ export function createHttpServer({ taskService, llmService }) {
       const resumeCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
       if (request.method === 'POST' && resumeCodeTaskMatch) {
         const taskId = decodeURIComponent(resumeCodeTaskMatch[1]);
-        const detail = await taskService.resumeCodeExecutionTask(taskId);
+        const detail = await service.resumeCodeExecutionTask(taskId);
         sendJson(response, 200, {
           ok: true,
           taskId,
@@ -246,8 +371,8 @@ export function createHttpServer({ taskService, llmService }) {
       if (request.method === 'POST' && createPrMatch) {
         const taskId = decodeURIComponent(createPrMatch[1]);
         const body = await parseRequestBody(request);
-        const detail = await taskService.createCodeExecutionPullRequest(taskId, {
-          branchName: body.branchName
+        const detail = await service.createCodeExecutionPullRequest(taskId, {
+          branchName: readStringField(body, 'branchName')
         });
         sendJson(response, 200, {
           ok: true,
@@ -258,13 +383,13 @@ export function createHttpServer({ taskService, llmService }) {
       }
 
       if (request.method === 'POST' && pathname === '/internal/poll/slack-mentions') {
-        const result = await taskService.pollSlackMentions();
+        const result = await service.pollSlackMentions();
         sendJson(response, 200, result);
         return;
       }
 
       if (request.method === 'POST' && pathname === '/internal/poll/github-reviews') {
-        const result = await taskService.pollGitHubReviews();
+        const result = await service.pollGitHubReviews();
         sendJson(response, 200, result);
         return;
       }
@@ -273,15 +398,15 @@ export function createHttpServer({ taskService, llmService }) {
       if (request.method === 'POST' && draftMatch) {
         const taskId = decodeURIComponent(draftMatch[1]);
         const body = await parseRequestBody(request);
-        if (body.mode === 'generate') {
-          const task = taskService.getTaskDetail(taskId).task;
-          const includeCodeReviewContext = String(body.includeCodeReviewContext || '').toLowerCase() === 'true';
-          const detail = await taskService.generateDraft(taskId, task.domain === 'slack_mention'
+        if (readStringField(body, 'mode') === 'generate') {
+          const task = service.getTaskDetail(taskId).task;
+          const includeCodeReviewContext = readStringField(body, 'includeCodeReviewContext').toLowerCase() === 'true';
+          const detail = await service.generateDraft(taskId, task.domain === 'slack_mention'
             ? {
               includeCodeReviewContext
             }
             : {
-              generationAgentProvider: body.generationAgentProvider
+              generationAgentProvider: readStringField(body, 'generationAgentProvider')
             });
           const latestProvider = detail.latestDraft?.metadata?.provider || '';
           sendJson(response, 200, {
@@ -293,15 +418,15 @@ export function createHttpServer({ taskService, llmService }) {
           return;
         }
 
-        taskService.saveDraft(taskId, {
-          content: body.draft,
-          summary: body.summary,
+        service.saveDraft(taskId, {
+          content: readStringField(body, 'draft'),
+          summary: readStringField(body, 'summary'),
           metadata: {
-            sendMode: body.sendMode,
-            replyCategory: body.replyCategory,
-            replyCategoryLabel: body.replyCategoryLabel,
-            requestedAction: body.requestedAction,
-            reactionName: body.reactionName
+            sendMode: readStringField(body, 'sendMode'),
+            replyCategory: readStringField(body, 'replyCategory'),
+            replyCategoryLabel: readStringField(body, 'replyCategoryLabel'),
+            requestedAction: readStringField(body, 'requestedAction'),
+            reactionName: readStringField(body, 'reactionName')
           }
         });
         sendJson(response, 200, {
@@ -314,13 +439,13 @@ export function createHttpServer({ taskService, llmService }) {
       const codeReviewMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/code-review$/);
       if (request.method === 'POST' && codeReviewMatch) {
         const taskId = decodeURIComponent(codeReviewMatch[1]);
-        const started = await taskService.startSlackCodeReview(taskId, {});
+        const started = await service.startSlackCodeReview(taskId, {});
         sendJson(response, 200, {
           ok: true,
           taskId,
           started: started.started,
           alreadyRunning: started.alreadyRunning,
-          status: started.detail.task.payload?.codeReview?.analysisStatus || ''
+          status: getAnalysisStatus(started.detail)
         });
         return;
       }
@@ -328,7 +453,7 @@ export function createHttpServer({ taskService, llmService }) {
       const approveMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/approve$/);
       if (request.method === 'POST' && approveMatch) {
         const taskId = decodeURIComponent(approveMatch[1]);
-        const detail = taskService.approveTask(taskId);
+        const detail = service.approveTask(taskId);
         sendJson(response, 200, {
           ok: true,
           taskId,
@@ -341,7 +466,7 @@ export function createHttpServer({ taskService, llmService }) {
       const ignoreMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/ignore$/);
       if (request.method === 'POST' && ignoreMatch) {
         const taskId = decodeURIComponent(ignoreMatch[1]);
-        const detail = taskService.ignoreTask(taskId);
+        const detail = service.ignoreTask(taskId);
         sendJson(response, 200, {
           ok: true,
           taskId,
@@ -354,21 +479,24 @@ export function createHttpServer({ taskService, llmService }) {
       if (request.method === 'POST' && sendMatch) {
         const taskId = decodeURIComponent(sendMatch[1]);
         const body = await parseRequestBody(request);
-        taskService.saveDraft(taskId, {
-          content: body.draft,
-          summary: body.summary,
+        const sendMode = readStringField(body, 'sendMode');
+        const draft = readStringField(body, 'draft');
+        const reactionName = readStringField(body, 'reactionName');
+        service.saveDraft(taskId, {
+          content: draft,
+          summary: readStringField(body, 'summary'),
           metadata: {
-            sendMode: body.sendMode,
-            replyCategory: body.replyCategory,
-            replyCategoryLabel: body.replyCategoryLabel,
-            requestedAction: body.requestedAction,
-            reactionName: body.reactionName
+            sendMode,
+            replyCategory: readStringField(body, 'replyCategory'),
+            replyCategoryLabel: readStringField(body, 'replyCategoryLabel'),
+            requestedAction: readStringField(body, 'requestedAction'),
+            reactionName
           }
         });
-        const detail = await taskService.executeTask(taskId, {
-          message: body.sendMode === 'reaction' ? '' : body.draft,
-          reactionName: body.sendMode === 'reaction' ? body.reactionName : '',
-          addReaction: body.sendMode === 'reaction'
+        const detail = await service.executeTask(taskId, {
+          message: sendMode === 'reaction' ? '' : draft,
+          reactionName: sendMode === 'reaction' ? reactionName : '',
+          addReaction: sendMode === 'reaction'
         });
         sendJson(response, 200, {
           ok: true,
@@ -383,9 +511,10 @@ export function createHttpServer({ taskService, llmService }) {
         error: '요청한 경로가 존재하지 않습니다.'
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       sendJson(response, 500, {
         ok: false,
-        error: error.message
+        error: message
       });
     }
   });

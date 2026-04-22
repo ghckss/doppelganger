@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { loadConfig } from './config.js';
 import { createRepository } from './db.js';
 import { createDomainRegistry } from './domain-registry.js';
@@ -15,7 +14,11 @@ import { SlackClient } from './connectors/slack-client.js';
 import { WorkspaceRunner } from './connectors/workspace-runner.js';
 import { createHttpServer } from './server.js';
 
-export function createApplication({ cwd = process.cwd() } = {}) {
+interface CreateApplicationOptions {
+  cwd?: string;
+}
+
+export function createApplication({ cwd = process.cwd() }: CreateApplicationOptions = {}) {
   const config = loadConfig({ cwd });
   const repo = createRepository(config.app.databasePath);
   const slackClient = new SlackClient(config);
@@ -30,7 +33,8 @@ export function createApplication({ cwd = process.cwd() } = {}) {
     config,
     openaiClient,
     cliClient: cliGenerationClient,
-    externalAgentClient: externalAgentReviewClient
+    externalAgentClient: externalAgentReviewClient,
+    hovisClient: externalAgentReviewClient
   });
   const llmService = new LlmService(generationClient);
   const codeTaskPlanner = new CodeTaskPlanner(generationClient);
