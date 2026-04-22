@@ -9,8 +9,8 @@ import {
   type PromptPlan,
   type ReviewRound,
   type WorkspaceSnapshot
-} from './code-task-prompts.ts';
-import { normalizeWhitespace, safeArray } from './utils.ts';
+} from '../code-task-prompts.ts';
+import { normalizeWhitespace, safeArray } from '../utils.ts';
 
 interface PlannerGenerationClient {
   getMode?: (scope?: string) => string;
