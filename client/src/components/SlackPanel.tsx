@@ -150,6 +150,7 @@ export function SlackPanel({
   const driftReason = String(latestDraftMetadata.requestDriftReason || '').trim();
   const normalizedReactionName = normalizeReactionName(editor?.reactionName || '');
   const reactionGlyph = resolveReactionGlyph(normalizedReactionName);
+  const isCodeReviewRunning = toText(codeReview?.analysisStatus).toLowerCase() === 'running';
 
   return (
     <section className={`${PANEL_CLASS} border-sky-200 bg-sky-50/70`}>
@@ -284,7 +285,7 @@ export function SlackPanel({
                                 await generateDraft(detail.task.id, true);
                                 return detail.task.id;
                               })}
-                              disabled={Boolean(busyAction)}
+                              disabled={Boolean(busyAction) || isCodeReviewRunning}
                             >
                               코드 기반 초안 생성
                             </button>

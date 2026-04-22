@@ -20,10 +20,10 @@
   - `npm start` -> `node server/src/index.js`
   - `npm run dev:client` -> Vite client dev server
   - `npm test` -> `node --test "server/tests/**/*.test.js"`
-- Server routing updated:
-  - `/` -> `/app` redirect
-  - `/app` + `/app/assets/*` static serving from `client/dist`
-  - Legacy SSR routes (`/tasks`) remain for compatibility.
+- Server routing updated (latest):
+  - Legacy SSR routes (`/tasks`) 제거.
+  - 서버는 API 전용(`/api/*`, `/internal/*`)으로 동작.
+  - React UI는 Vite dev server(기본 `http://127.0.0.1:5173`)에서 제공.
 - API action endpoints now accept JSON under `/api/tasks/:id/*` for React client integration.
 - React client baseline added at `client/`:
   - task list/detail, polling triggers, draft actions, code-review trigger, code-execution actions, progress UI.
