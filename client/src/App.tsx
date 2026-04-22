@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchMeta,
@@ -29,6 +29,7 @@ const REFRESH_INTERVAL_MS = 10_000;
 
 export default function App() {
   const queryClient = useQueryClient();
+  const autoBatchUpdateRunningRef = useRef(false);
   const [selectedTaskIdByDomain, setSelectedTaskIdByDomain] = useState<Record<DomainId, string>>({
     slack_mention: '',
     github_review: '',
@@ -318,6 +319,39 @@ export default function App() {
       return changed ? next : current;
     });
   }, [githubDetail, slackDetail]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const intervalId = setInterval(() => {
+      if (autoBatchUpdateRunningRef.current || busyAction) {
+        return;
+      }
+
+      autoBatchUpdateRunningRef.current = true;
+      void (async () => {
+        try {
+          await runBatchUpdate();
+          if (cancelled) {
+            return;
+          }
+          await queryClient.invalidateQueries({ queryKey: ['tasks', false] });
+          await queryClient.invalidateQueries({ queryKey: ['tasks', true] });
+          await queryClient.invalidateQueries({ queryKey: ['meta'] });
+        } catch (caught) {
+          if (!cancelled) {
+            setError(asText((caught as Error).message, '일괄 업데이트 처리에 실패했습니다.'));
+          }
+        } finally {
+          autoBatchUpdateRunningRef.current = false;
+        }
+      })();
+    }, REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [busyAction, queryClient]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900">
