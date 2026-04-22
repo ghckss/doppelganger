@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { createApplication } from './app.ts';
 
 async function main() {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +6,37 @@ import { logCommandEnd, logCommandStart } from '../command-log.ts';
 
 const STREAM_CAPTURE_LIMIT = 256 * 1024;
 const FILE_CAPTURE_LIMIT = 512 * 1024;
+
+interface SpawnCapture {
+  text: string;
+  truncated: boolean;
+  limit: number;
+}
+
+interface RunnerConfig {
+  codex?: { command?: string };
+  claude?: { command?: string };
+}
+
+interface RunExecResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+interface CliExecutionResult {
+  lastMessage: string;
+  parsed: Record<string, unknown> | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
+interface CliError extends Error {
+  code?: number | string;
+  details?: Record<string, unknown>;
+}
 
 function truncateOutput(value, maxLength = 16000) {
   const text = String(value || '');
@@ -24,7 +54,7 @@ function createCapture(limit = STREAM_CAPTURE_LIMIT) {
   };
 }
 
-function appendCapture(capture, chunk) {
+function appendCapture(capture: SpawnCapture, chunk: Buffer) {
   if (capture.truncated) {
     return;
   }
@@ -49,7 +79,7 @@ function appendCapture(capture, chunk) {
   capture.text += value;
 }
 
-function finalizeCapture(capture) {
+function finalizeCapture(capture: SpawnCapture) {
   if (!capture.truncated) {
     return capture.text;
   }
@@ -197,6 +227,14 @@ function createTempDir(provider = 'agent') {
 }
 
 class AgentCliRunner {
+  config: RunnerConfig;
+  workspaceRunner: {
+    run: (command: string, args: string[], options: { workdir: string }) => Promise<unknown>;
+    assertAllowed: (workdir: string) => string;
+  };
+  provider: string;
+  command: string;
+
   constructor({ config, workspaceRunner, provider, command }) {
     this.config = config;
     this.workspaceRunner = workspaceRunner;
@@ -255,7 +293,7 @@ class AgentCliRunner {
       cwd
     });
 
-    const result = await new Promise((resolve, reject) => {
+    const result: RunExecResult = await new Promise((resolve, reject) => {
       const child = spawn(this.command, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe']
@@ -264,8 +302,8 @@ class AgentCliRunner {
       const stdoutCapture = createCapture();
       const stderrCapture = createCapture();
       let timedOut = false;
-      let timer = null;
-      let forceKillTimer = null;
+      let timer: NodeJS.Timeout | null = null;
+      let forceKillTimer: NodeJS.Timeout | null = null;
 
       const clearTimers = () => {
         if (timer) {
@@ -297,7 +335,7 @@ class AgentCliRunner {
       child.stderr.on('data', (chunk) => {
         appendCapture(stderrCapture, chunk);
       });
-      child.stdin.on('error', (error) => {
+      child.stdin.on('error', (error: CliError) => {
         if (error.code === 'EPIPE') {
           return;
         }
@@ -313,7 +351,7 @@ class AgentCliRunner {
         });
         reject(error);
       });
-      child.on('error', (error) => {
+      child.on('error', (error: CliError) => {
         clearTimers();
         logCommandEnd({
           source: `agent:${this.provider}`,
@@ -326,7 +364,7 @@ class AgentCliRunner {
         });
         reject(error);
       });
-      child.on('close', (code) => {
+      child.on('close', (code: number | null) => {
         clearTimers();
         logCommandEnd({
           source: `agent:${this.provider}`,
@@ -364,7 +402,7 @@ class AgentCliRunner {
 
     if (result.timedOut) {
       const providerLabel = this.provider === 'claude' ? 'Claude' : 'Codex';
-      const error = new Error(`${providerLabel} CLI 호출이 ${effectiveTimeoutSeconds}초 제한 시간을 초과했습니다`);
+      const error = new Error(`${providerLabel} CLI 호출이 ${effectiveTimeoutSeconds}초 제한 시간을 초과했습니다`) as CliError;
       error.details = {
         provider: this.provider,
         command: this.command,
@@ -380,7 +418,7 @@ class AgentCliRunner {
 
     if (result.code !== 0) {
       const providerLabel = this.provider === 'claude' ? 'Claude' : 'Codex';
-      const error = new Error(`${providerLabel} CLI가 상태 코드 ${result.code}로 종료되었습니다`);
+      const error = new Error(`${providerLabel} CLI가 상태 코드 ${result.code}로 종료되었습니다`) as CliError;
       error.details = {
         provider: this.provider,
         command: this.command,
@@ -399,7 +437,8 @@ class AgentCliRunner {
       try {
         parsed = extractJsonObject(parseSource, schema);
       } catch (error) {
-        error.details = {
+        const parseError = error as CliError;
+        parseError.details = {
           provider: this.provider,
           command: this.command,
           args,
@@ -410,17 +449,18 @@ class AgentCliRunner {
           parseSourceOrigin,
           parseSource: truncateOutput(parseSource, 1200)
         };
-        throw error;
+        throw parseError;
       }
     }
 
-    return {
+    const executionResult: CliExecutionResult = {
       lastMessage,
       parsed,
       stdout,
       stderr,
       durationMs: Date.now() - startedAt
     };
+    return executionResult;
   }
 }
 

@@ -1,11 +1,10 @@
-// @ts-nocheck
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { listMissing } from './utils.ts';
 
-function parseEnvFile(content) {
-  const parsed = {};
+function parseEnvFile(content: string) {
+  const parsed: Record<string, string> = {};
 
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -26,7 +25,7 @@ function parseEnvFile(content) {
   return parsed;
 }
 
-function loadEnvFile(cwd) {
+function loadEnvFile(cwd: string): Record<string, string> {
   const candidatePaths = [
     path.join(cwd, 'server', '.env'),
     path.join(cwd, '.env')
@@ -43,7 +42,7 @@ function loadEnvFile(cwd) {
   return {};
 }
 
-function readValue(env, key, fallback = '') {
+function readValue(env: Record<string, string | undefined>, key: string, fallback = '') {
   const value = env[key];
   return value === undefined ? fallback : value;
 }
@@ -248,8 +247,8 @@ function normalizeGenerationProviderOptional(value) {
   return normalizeGenerationProvider(normalized, '');
 }
 
-function toScopeMap(entries) {
-  const output = {};
+function toScopeMap(entries: Array<[string, string]>): Record<string, string> {
+  const output: Record<string, string> = {};
   for (const [key, value] of entries) {
     if (value) {
       output[key] = value;
@@ -310,7 +309,7 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
     ['code_planning', normalizeAgentProviderOptional(readValue(mergedEnv, 'CODE_PLANNING_AGENT_PROVIDER', ''))],
     ['meeting_notes', normalizeAgentProviderOptional(readValue(mergedEnv, 'MEETING_NOTES_AGENT_PROVIDER', ''))]
   ]);
-  const generationScopeTimeoutSeconds = {};
+  const generationScopeTimeoutSeconds: Record<string, number> = {};
   const slackCodeKeywordConfig = loadSlackCodeKeywordRules(cwd, mergedEnv);
   const externalAgentCommand = readValue(
     mergedEnv,
@@ -400,7 +399,7 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   return config;
 }
 
-export function getConnectorReadiness(config) {
+export function getConnectorReadiness(config: any) {
   const generationProviders = [
     config.generation?.provider || 'cli',
     ...Object.values(config.generation?.scopeProviders || {})

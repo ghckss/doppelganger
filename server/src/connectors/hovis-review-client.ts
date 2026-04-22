@@ -1,4 +1,3 @@
-// @ts-nocheck
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { logCommandEnd, logCommandStart } from '../command-log.ts';
@@ -62,7 +61,34 @@ function resolveTimeoutSeconds(config, scope = 'github_review') {
   return timeoutSeconds > 0 ? timeoutSeconds : 0;
 }
 
+interface ExternalAgentConfig {
+  cwd?: string;
+  generation?: {
+    timeoutSeconds?: number;
+    scopeTimeoutSeconds?: Record<string, number>;
+  };
+  externalAgent?: {
+    command?: string;
+  };
+  hovis?: {
+    command?: string;
+  };
+}
+
+interface ExternalCliResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+interface ExternalCliError extends Error {
+  code?: string | number;
+}
+
 export class HovisReviewClient {
+  config: ExternalAgentConfig;
+
   constructor(config) {
     this.config = config;
   }
@@ -93,7 +119,7 @@ export class HovisReviewClient {
       cwd
     });
 
-    const result = await new Promise((resolve, reject) => {
+    const result: ExternalCliResult = await new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe']
@@ -103,7 +129,7 @@ export class HovisReviewClient {
       const stderrCapture = createCapture();
       let timedOut = false;
 
-      let timer = null;
+      let timer: NodeJS.Timeout | null = null;
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
           timedOut = true;
@@ -117,7 +143,7 @@ export class HovisReviewClient {
       child.stderr.on('data', (chunk) => {
         appendCapture(stderrCapture, chunk);
       });
-      child.stdin.on('error', (error) => {
+      child.stdin.on('error', (error: ExternalCliError) => {
         if (error.code === 'EPIPE') {
           return;
         }
@@ -135,7 +161,7 @@ export class HovisReviewClient {
         });
         reject(error);
       });
-      child.on('error', (error) => {
+      child.on('error', (error: ExternalCliError) => {
         if (timer) {
           clearTimeout(timer);
         }
@@ -150,7 +176,7 @@ export class HovisReviewClient {
         });
         reject(error);
       });
-      child.on('close', (code) => {
+      child.on('close', (code: number | null) => {
         if (timer) {
           clearTimeout(timer);
         }

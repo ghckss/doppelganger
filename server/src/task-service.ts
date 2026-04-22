@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { getConnectorReadiness } from './config.ts';
 import {
   appendSlackStyleMemory,
@@ -26,6 +25,15 @@ function toInteger(value, fallback = 0) {
 }
 
 export class TaskService {
+  config: any;
+  repo: any;
+  domains: Record<string, any>;
+  slackCodeReviewJobs: Map<string, Promise<unknown>>;
+  recoverySummary: {
+    codeExecutionRecovered: number;
+    slackCodeReviewRecovered: number;
+  };
+
   constructor({ config, repo, domains }) {
     this.config = config;
     this.repo = repo;
@@ -118,7 +126,7 @@ export class TaskService {
     };
   }
 
-  listTasks({ domain, includeResolved = false } = {}) {
+  listTasks({ domain, includeResolved = false }: { domain?: string; includeResolved?: boolean } = {}) {
     const tasks = this.repo.listTasks({ domain });
     if (includeResolved) {
       return tasks;
@@ -127,7 +135,7 @@ export class TaskService {
     return tasks.filter((task) => task.status !== 'done' && task.status !== 'ignored');
   }
 
-  getNextPendingTaskId(taskId, { domain } = {}) {
+  getNextPendingTaskId(taskId, { domain }: { domain?: string } = {}) {
     const tasks = this.listTasks({ domain, includeResolved: false });
     if (tasks.length === 0) {
       return null;
@@ -145,7 +153,7 @@ export class TaskService {
     return tasks[currentIndex + 1]?.id || tasks[0]?.id || null;
   }
 
-  getFirstPendingTaskId({ domain } = {}) {
+  getFirstPendingTaskId({ domain }: { domain?: string } = {}) {
     return this.listTasks({ domain, includeResolved: false })[0]?.id || null;
   }
 
@@ -226,7 +234,7 @@ export class TaskService {
     return domain.poll();
   }
 
-  async generateDraft(taskId, options = {}) {
+  async generateDraft(taskId, options: Record<string, unknown> = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     const domain = this.domains[task.domain];
     if (!domain?.generateDraft) {
@@ -242,7 +250,7 @@ export class TaskService {
     return this.getTaskDetail(taskId);
   }
 
-  async runSlackCodeReview(taskId, options = {}) {
+  async runSlackCodeReview(taskId, options: Record<string, unknown> = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'slack_mention') {
       throw new Error(`해당 작업은 슬랙 멘션이 아닙니다: ${taskId}`);
@@ -271,7 +279,7 @@ export class TaskService {
     }
   }
 
-  async startSlackCodeReview(taskId, options = {}) {
+  async startSlackCodeReview(taskId, options: Record<string, unknown> = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'slack_mention') {
       throw new Error(`해당 작업은 슬랙 멘션이 아닙니다: ${taskId}`);
@@ -353,7 +361,7 @@ export class TaskService {
     return this.getTaskDetail(taskId);
   }
 
-  async createCodeExecutionPullRequest(taskId, options = {}) {
+  async createCodeExecutionPullRequest(taskId, options: Record<string, unknown> = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'code_execution') {
       throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
@@ -364,7 +372,7 @@ export class TaskService {
     return this.getTaskDetail(taskId);
   }
 
-  saveDraft(taskId, { content, summary, metadata = {} }) {
+  saveDraft(taskId, { content, summary, metadata = {} }: { content?: string; summary?: string; metadata?: Record<string, unknown> }) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     const sendMode = String(metadata.sendMode || '').trim() || 'reply';
     const normalizedContent = sendMode === 'reaction' ? '' : String(content || '').trim();

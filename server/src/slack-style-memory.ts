@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { normalizeWhitespace, safeArray } from './utils.ts';
 
 export const SLACK_STYLE_MEMORY_STATE_KEY = 'slack_reply_style_memory_v1';

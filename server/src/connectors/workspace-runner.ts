@@ -1,4 +1,3 @@
-// @ts-nocheck
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -13,6 +12,12 @@ function isPathInside(root, target) {
 }
 
 export class WorkspaceRunner {
+  config: {
+    workspace: {
+      allowlist: string[];
+    };
+  };
+
   constructor(config) {
     this.config = config;
   }
@@ -49,7 +54,7 @@ export class WorkspaceRunner {
     return absolute;
   }
 
-  async run(command, args, { workdir } = {}) {
+  async run(command, args, { workdir }: { workdir: string } = { workdir: '' }) {
     const cwd = this.assertAllowed(workdir);
     const commandArgs = Array.isArray(args) ? args : [];
     const startedAt = Date.now();

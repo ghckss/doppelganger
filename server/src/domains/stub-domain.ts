@@ -1,4 +1,3 @@
-// @ts-nocheck
 export function createStubDomain({ id, label, setupKeys }) {
   return {
     id,

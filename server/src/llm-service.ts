@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { normalizeWhitespace, safeArray, truncateText } from './utils.ts';
 
 const SLACK_REPLY_CATEGORIES = {
@@ -402,7 +401,11 @@ function collectGitHubEvidenceLinksFromFindings(findings, { repoSlug, ref }) {
   return [...new Set(links)];
 }
 
-function collectGitHubEvidenceLinksFromFiles(files, { repoSlug, ref, max = 5 } = {}) {
+function collectGitHubEvidenceLinksFromFiles(
+  files,
+  { repoSlug = '', ref = 'main', max = 5 }: { repoSlug?: string; ref?: string; max?: number } = {}
+) {
+  const limit = Number.isFinite(Number(max)) ? Math.max(1, Math.trunc(Number(max))) : 5;
   const links = [];
   for (const file of safeArray(files)) {
     const normalizedPath = normalizeWhitespace(file.path || file.filename || '');
@@ -418,7 +421,7 @@ function collectGitHubEvidenceLinksFromFiles(files, { repoSlug, ref, max = 5 } =
     if (link) {
       links.push(link);
     }
-    if (links.length >= max) {
+    if (links.length >= limit) {
       break;
     }
   }
@@ -426,14 +429,36 @@ function collectGitHubEvidenceLinksFromFiles(files, { repoSlug, ref, max = 5 } =
   return [...new Set(links)];
 }
 
-function resolveGitHubEvidenceLinks({ pullRequest, files, findings, max = 5 } = {}) {
-  const repoSlug = pullRequest?.repoSlug || '';
-  const ref = pullRequest?.headSha || pullRequest?.headRef || 'main';
+function resolveGitHubEvidenceLinks(
+  {
+    pullRequest = null,
+    files = [],
+    findings = [],
+    max = 5
+  }: {
+    pullRequest?: Record<string, unknown> | null;
+    files?: Array<Record<string, unknown>>;
+    findings?: Array<Record<string, unknown>>;
+    max?: number;
+  } = {}
+) {
+  const limit = Number.isFinite(Number(max)) ? Math.max(1, Math.trunc(Number(max))) : 5;
+  const pullRequestRecord = pullRequest && typeof pullRequest === 'object' ? pullRequest : {};
+  const repoSlug = normalizeWhitespace(
+    typeof pullRequestRecord.repoSlug === 'string' ? pullRequestRecord.repoSlug : ''
+  );
+  const ref = normalizeWhitespace(
+    typeof pullRequestRecord.headSha === 'string'
+      ? pullRequestRecord.headSha
+      : typeof pullRequestRecord.headRef === 'string'
+        ? pullRequestRecord.headRef
+        : 'main'
+  );
   const findingLinks = collectGitHubEvidenceLinksFromFindings(findings, { repoSlug, ref });
   const fallbackLinks = findingLinks.length === 0
-    ? collectGitHubEvidenceLinksFromFiles(files, { repoSlug, ref, max })
+    ? collectGitHubEvidenceLinksFromFiles(files, { repoSlug, ref, max: limit })
     : [];
-  return (findingLinks.length > 0 ? findingLinks : fallbackLinks).slice(0, max);
+  return (findingLinks.length > 0 ? findingLinks : fallbackLinks).slice(0, limit);
 }
 
 function normalizeFinding(finding, index) {
@@ -1440,14 +1465,23 @@ function finalizeSlackReply(candidateReply, fallbackReply) {
   return normalized;
 }
 
-export function buildFallbackSlackDraft({ task, threadMessages, codeReviewContext }) {
-  const targetText = humanizeSlackText(task.payload?.text || '') || humanizeSlackText(threadMessages.at(-1)?.content || '');
-  const first = humanizeSlackText(threadMessages[0]?.content || '') || targetText;
-  const latest = humanizeSlackText(threadMessages.at(-1)?.content || '') || first;
+export function buildFallbackSlackDraft({
+  task = {},
+  threadMessages = [],
+  codeReviewContext = null
+}: {
+  task?: any;
+  threadMessages?: any[];
+  codeReviewContext?: any;
+} = {}) {
+  const resolvedThreadMessages = safeArray(threadMessages);
+  const targetText = humanizeSlackText(task.payload?.text || '') || humanizeSlackText(resolvedThreadMessages.at(-1)?.content || '');
+  const first = humanizeSlackText(resolvedThreadMessages[0]?.content || '') || targetText;
+  const latest = humanizeSlackText(resolvedThreadMessages.at(-1)?.content || '') || first;
   const replyCategory = classifySlackReplyFlow({
     targetText,
     latestText: latest,
-    threadMessages
+    threadMessages: resolvedThreadMessages
   });
   const replyCategoryLabel = getSlackReplyCategory(replyCategory).label;
   const requestedAction = inferRequestedAction(replyCategory);
@@ -1457,7 +1491,7 @@ export function buildFallbackSlackDraft({ task, threadMessages, codeReviewContex
     targetText,
     firstText: first,
     latestText: latest,
-    threadMessages
+    threadMessages: resolvedThreadMessages
   });
   const summary = buildSlackSummary({
     category: replyCategory,
@@ -1474,7 +1508,7 @@ export function buildFallbackSlackDraft({ task, threadMessages, codeReviewContex
     category: replyCategory,
     targetText: targetText || first,
     latestText: latest,
-    threadMessages,
+    threadMessages: resolvedThreadMessages,
     candidateReply: directReply,
     fallbackReply: '확인 중인 내용 정리해서 공유드리겠습니다.'
   });
@@ -1509,6 +1543,7 @@ export function buildFallbackSlackDraft({ task, threadMessages, codeReviewContex
     replyCategoryLabel,
     reactionName,
     provider: 'fallback',
+    agentProvider: '',
     qualityScore: quality.score,
     qualityWarnings: quality.warnings,
     evidenceLinks,
@@ -1517,16 +1552,41 @@ export function buildFallbackSlackDraft({ task, threadMessages, codeReviewContex
 }
 
 export class LlmService {
-  constructor(generationClient) {
+  generationClient: {
+    getMode?: (scope?: string) => string;
+    createTextResponse?: (input: Record<string, unknown>) => Promise<Record<string, unknown> | string>;
+    cliClient?: {
+      isConfigured?: () => boolean;
+      createTextResponse?: (input: Record<string, unknown>) => Promise<Record<string, unknown> | string>;
+    };
+  } | null;
+
+  constructor(generationClient = null) {
     this.generationClient = generationClient;
   }
 
-  async generateSlackDraft({ task, threadMessages, agentProvider, codeReviewContext, styleGuide, model }) {
+  async generateSlackDraft({
+    task,
+    threadMessages,
+    agentProvider,
+    codeReviewContext,
+    styleGuide,
+    model
+  }: {
+    task?: any;
+    threadMessages?: any[];
+    agentProvider?: string;
+    codeReviewContext?: any;
+    styleGuide?: any;
+    model?: string;
+  } = {}) {
+    const resolvedTask = task || {};
+    const resolvedThreadMessages = safeArray(threadMessages);
     const normalizedCodeReviewContext = normalizeCodeReviewContext(codeReviewContext);
     const normalizedStyleGuide = normalizeSlackStyleGuide(styleGuide);
     const fallbackDraft = buildFallbackSlackDraft({
-      task,
-      threadMessages,
+      task: resolvedTask,
+      threadMessages: resolvedThreadMessages,
       codeReviewContext: normalizedCodeReviewContext
     });
     if (resolveGenerationMode(this.generationClient, 'slack') === 'fallback') {
@@ -1564,12 +1624,12 @@ export class LlmService {
     ].join(' ');
 
     const input = [
-      `Task title: ${task.title}`,
-      `Channel: ${task.payload?.channelName || task.payload?.channelId || 'unknown'}`,
-      `Target mention to answer: ${humanizeSlackText(task.payload?.text || '')}`,
-      `Permalink: ${task.source_url || task.sourceUrl || ''}`,
+      `Task title: ${resolvedTask.title || ''}`,
+      `Channel: ${resolvedTask.payload?.channelName || resolvedTask.payload?.channelId || 'unknown'}`,
+      `Target mention to answer: ${humanizeSlackText(resolvedTask.payload?.text || '')}`,
+      `Permalink: ${resolvedTask.source_url || resolvedTask.sourceUrl || ''}`,
       'Thread transcript:',
-      buildThreadTranscript(threadMessages),
+      buildThreadTranscript(resolvedThreadMessages),
       normalizedStyleGuide ? buildSlackStyleGuideTranscript(normalizedStyleGuide) : '',
       normalizedCodeReviewContext ? buildCodeReviewTranscript(normalizedCodeReviewContext) : ''
     ].join('\n\n');
@@ -1580,7 +1640,7 @@ export class LlmService {
         input,
         scope: 'slack',
         model,
-        agentProvider: agentProvider || task.payload?.generationAgentProvider || ''
+        agentProvider: agentProvider || resolvedTask.payload?.generationAgentProvider || ''
       });
       const generated = extractTextResponse(response);
       const parsed = extractJsonObject(generated.text);
@@ -1590,8 +1650,8 @@ export class LlmService {
       const categoryMeta = getSlackReplyCategory(replyCategory);
       const summary = normalizeMultilineText(parsed.summary);
       const modelReply = normalizeMultilineText(parsed.suggestedReply);
-      const targetText = humanizeSlackText(task.payload?.text || '') || humanizeSlackText(threadMessages.at(-1)?.content || '');
-      const latestText = humanizeSlackText(threadMessages.at(-1)?.content || '');
+      const targetText = humanizeSlackText(resolvedTask.payload?.text || '') || humanizeSlackText(resolvedThreadMessages.at(-1)?.content || '');
+      const latestText = humanizeSlackText(resolvedThreadMessages.at(-1)?.content || '');
       const fallbackReply = buildDirectReply({
         category: replyCategory,
         targetText,
@@ -1599,16 +1659,16 @@ export class LlmService {
         understanding: buildSlackUnderstanding({
           category: replyCategory,
           targetText,
-          firstText: humanizeSlackText(threadMessages[0]?.content || ''),
+          firstText: humanizeSlackText(resolvedThreadMessages[0]?.content || ''),
           latestText,
-          threadMessages
+          threadMessages: resolvedThreadMessages
         })
       });
       const audienceReply = buildAudienceFriendlySlackReply({
         category: replyCategory,
         targetText,
         latestText,
-        threadMessages,
+        threadMessages: resolvedThreadMessages,
         candidateReply: modelReply,
         fallbackReply: fallbackReply || fallbackDraft.suggestedReply
       });
@@ -1619,7 +1679,7 @@ export class LlmService {
         fallbackReply: fallbackReply || fallbackDraft.suggestedReply
       });
       const evidenceLinks = resolveSlackEvidenceLinks({
-        task,
+        task: resolvedTask,
         codeReviewContext: normalizedCodeReviewContext
       });
       const suggestedReply = trimSlackReplyLines(
@@ -1654,8 +1714,8 @@ export class LlmService {
     } catch (error) {
       return {
         ...buildFallbackSlackDraft({
-          task,
-          threadMessages,
+          task: resolvedTask,
+          threadMessages: resolvedThreadMessages,
           codeReviewContext: normalizedCodeReviewContext
         }),
         provider: `fallback:${error.message}`,
@@ -1664,11 +1724,24 @@ export class LlmService {
     }
   }
 
-  async generateGitHubReview({ task, pullRequest, files, agentProvider }) {
+  async generateGitHubReview({
+    task,
+    pullRequest,
+    files,
+    agentProvider
+  }: {
+    task?: any;
+    pullRequest?: any;
+    files?: any[];
+    agentProvider?: string;
+  } = {}) {
+    const resolvedTask = task || {};
+    const resolvedPullRequest = pullRequest || {};
+    const resolvedFiles = safeArray(files);
     const generationMode = resolveGenerationMode(this.generationClient, 'github_review');
 
     if (generationMode === 'fallback') {
-      return buildFallbackGitHubReview({ task, pullRequest, files });
+      return buildFallbackGitHubReview({ task: resolvedTask, pullRequest: resolvedPullRequest, files: resolvedFiles });
     }
 
     const instructions = [
@@ -1689,18 +1762,18 @@ export class LlmService {
     ].join(' ');
 
     const runReviewGeneration = async ({ compactContext = false, forceCliAgentProvider = '' } = {}) => {
-      const contextFiles = compactContext ? safeArray(files).slice(0, 8) : safeArray(files);
+      const contextFiles = compactContext ? safeArray(resolvedFiles).slice(0, 8) : safeArray(resolvedFiles);
       const input = [
-        `Task title: ${task.title}`,
-        `Repository: ${pullRequest.repoSlug}`,
-        `Pull request: #${pullRequest.number} ${pullRequest.title}`,
-        `Author: ${pullRequest.author}`,
-        `Base: ${pullRequest.baseRef}`,
-        `Head: ${pullRequest.headRef} (${pullRequest.headSha})`,
-        `Changed files: ${files.length}`,
+        `Task title: ${resolvedTask.title || ''}`,
+        `Repository: ${resolvedPullRequest.repoSlug || ''}`,
+        `Pull request: #${resolvedPullRequest.number || ''} ${resolvedPullRequest.title || ''}`,
+        `Author: ${resolvedPullRequest.author || ''}`,
+        `Base: ${resolvedPullRequest.baseRef || ''}`,
+        `Head: ${resolvedPullRequest.headRef || ''} (${resolvedPullRequest.headSha || ''})`,
+        `Changed files: ${resolvedFiles.length}`,
         `Review context files: ${contextFiles.length}`,
         compactContext ? 'Note: timeout 방지를 위해 변경 파일 일부와 축약 패치로 재시도 중입니다.' : '',
-        `PR body: ${String(pullRequest.body || '').trim() || '(empty)'}`,
+        `PR body: ${String(resolvedPullRequest.body || '').trim() || '(empty)'}`,
         'Changed file patches:',
         buildPullRequestTranscript(contextFiles, {
           maxFiles: compactContext ? 8 : 20,
@@ -1714,15 +1787,18 @@ export class LlmService {
         if (!cliClient?.isConfigured?.()) {
           throw new Error('CLI 생성기가 설정되지 않았습니다');
         }
-        const cliGenerated = await cliClient.createTextResponse({
+        const cliGeneratedResponse = await cliClient.createTextResponse({
           instructions,
           input,
           agentProvider: forceCliAgentProvider,
           scope: 'github_review'
         });
-        const resolvedCliProvider = normalizeWhitespace(cliGenerated?.provider) || forceCliAgentProvider;
+        const cliGenerated = extractTextResponse(cliGeneratedResponse);
+        const resolvedCliProvider = normalizeWhitespace(
+          cliGenerated.provider.replace(/^cli:/i, '')
+        ) || forceCliAgentProvider;
         response = {
-          text: String(cliGenerated?.text || ''),
+          text: cliGenerated.text,
           provider: `cli:${resolvedCliProvider}`,
           agentProvider: resolvedCliProvider
         };
@@ -1731,7 +1807,7 @@ export class LlmService {
           instructions,
           input,
           scope: 'github_review',
-          agentProvider: agentProvider || task.payload?.generationAgentProvider || ''
+          agentProvider: agentProvider || resolvedTask.payload?.generationAgentProvider || ''
         });
       }
       const generated = extractTextResponse(response);
@@ -1749,7 +1825,7 @@ export class LlmService {
           findings
         }),
         evidenceLinks: resolveGitHubEvidenceLinks({
-          pullRequest,
+          pullRequest: resolvedPullRequest,
           files: contextFiles,
           findings
         }),
@@ -1790,7 +1866,7 @@ export class LlmService {
           instructions: '',
           input: '',
           scope: 'github_review',
-          pullRequestUrl: pullRequest?.htmlUrl || task.payload?.sourceUrl || task.source_url || ''
+          pullRequestUrl: resolvedPullRequest?.htmlUrl || resolvedTask.payload?.sourceUrl || resolvedTask.source_url || ''
         });
         const generated = extractTextResponse(response);
         const reviewBody = String(generated.text || '').trim();
@@ -1799,13 +1875,13 @@ export class LlmService {
         }
 
         return {
-          summary: buildExternalAgentReviewSummary(reviewBody, pullRequest),
+          summary: buildExternalAgentReviewSummary(reviewBody, resolvedPullRequest),
           approval: 'approved_with_no_changes',
           findings: [],
           reviewBody: prependGitHubReviewDisclaimer(stripGitHubEvidenceSection(reviewBody)),
           evidenceLinks: resolveGitHubEvidenceLinks({
-            pullRequest,
-            files,
+            pullRequest: resolvedPullRequest,
+            files: resolvedFiles,
             findings: []
           }),
           provider: generated.provider || 'external_agent',
@@ -1820,9 +1896,9 @@ export class LlmService {
           return codexFallback;
         } catch (cliFallbackError) {
           return buildFallbackGitHubReview({
-            task,
-            pullRequest,
-            files,
+            task: resolvedTask,
+            pullRequest: resolvedPullRequest,
+            files: resolvedFiles,
             errorMessage: `${externalErrorMessage} / codex fallback failed: ${cliFallbackError.message}`
           });
         }
@@ -1833,9 +1909,9 @@ export class LlmService {
       return await runReviewGenerationWithRetry();
     } catch (error) {
       return buildFallbackGitHubReview({
-        task,
-        pullRequest,
-        files,
+        task: resolvedTask,
+        pullRequest: resolvedPullRequest,
+        files: resolvedFiles,
         errorMessage: error.message
       });
     }

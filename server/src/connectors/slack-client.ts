@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { formatSlackTimestamp, safeArray, toSlackText, truncateText } from '../utils.ts';
 
 function extractThreadTs(match) {
@@ -52,8 +51,53 @@ function formatErrorForLog(error) {
   return `${message}${causeMessage}`;
 }
 
+interface SlackConfig {
+  slack: {
+    readToken?: string;
+    writeToken?: string;
+    userId?: string;
+    searchMaxPages: number;
+    searchPageSize: number;
+  };
+}
+
+interface SlackApiCallOptions {
+  token?: string;
+  params?: Record<string, unknown>;
+  retryCount?: number;
+}
+
+interface SlackApiResponse {
+  ok: boolean;
+  status: number;
+  headers: {
+    get: (name: string) => string | null | undefined;
+  };
+  json: () => Promise<any>;
+}
+
+type SlackFetch = (
+  url: string,
+  options?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: URLSearchParams;
+  }
+) => Promise<SlackApiResponse>;
+
+interface SlackLogger {
+  warn?: (...args: unknown[]) => void;
+}
+
 export class SlackClient {
-  constructor(config, fetchImpl = fetch, logger = console) {
+  config: SlackConfig;
+  fetch: SlackFetch;
+  logger: SlackLogger;
+  cachedUserId: string | null;
+  userNameCache: Map<string, string>;
+  userLookupWarningCache: Set<string>;
+
+  constructor(config: SlackConfig, fetchImpl: SlackFetch = fetch as unknown as SlackFetch, logger: SlackLogger = console) {
     this.config = config;
     this.fetch = fetchImpl;
     this.logger = logger;
@@ -66,7 +110,7 @@ export class SlackClient {
     return Boolean(this.config.slack.readToken);
   }
 
-  async callApi(method, { token, params = {}, retryCount = 1 } = {}) {
+  async callApi(method, { token, params = {}, retryCount = 1 }: SlackApiCallOptions = {}) {
     const authToken = token || this.config.slack.readToken;
     if (!authToken) {
       throw new Error('SLACK_READ_TOKEN이 설정되지 않았습니다');

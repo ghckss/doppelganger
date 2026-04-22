@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   buildFallbackDesignSpec,
   buildFallbackProductPlan,
@@ -36,6 +35,16 @@ function describeWorkspace(workspace) {
 }
 
 export class CodeTaskPlanner {
+  generationClient: {
+    getMode?: (scope?: string) => string;
+    isConfigured?: (scope?: string) => boolean;
+    createTextResponse: (input: {
+      instructions: string;
+      input: string;
+      scope: string;
+    }) => Promise<string | { text?: string }>;
+  } | null;
+
   constructor(generationClient) {
     this.generationClient = generationClient;
   }

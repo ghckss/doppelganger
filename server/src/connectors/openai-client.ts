@@ -1,5 +1,13 @@
-// @ts-nocheck
 export class OpenAIClient {
+  config: {
+    openai: {
+      apiKey?: string;
+      model?: string;
+      baseUrl: string;
+    };
+  };
+  fetch: typeof fetch;
+
   constructor(config, fetchImpl = fetch) {
     this.config = config;
     this.fetch = fetchImpl;

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -15,6 +14,15 @@ import { normalizeWhitespace, safeArray, truncateText } from '../utils.ts';
 
 const CODE_REVIEW_ROUNDS = 3;
 const CODE_EXECUTION_TOTAL_STEPS = CODE_REVIEW_ROUNDS + 5;
+
+interface ExecutionProgressInput {
+  phase?: string;
+  label?: string;
+  currentStep?: number;
+  totalSteps?: number;
+  reviewRound?: number;
+  reviewTotalRounds?: number;
+}
 
 function parseBoolean(value) {
   if (typeof value === 'boolean') {
@@ -242,7 +250,7 @@ function buildExecutionProgress({
   totalSteps = CODE_EXECUTION_TOTAL_STEPS,
   reviewRound = 0,
   reviewTotalRounds = CODE_REVIEW_ROUNDS
-} = {}) {
+}: ExecutionProgressInput = {}) {
   const normalizedTotalSteps = Math.max(1, toInteger(totalSteps, CODE_EXECUTION_TOTAL_STEPS));
   const normalizedCurrentStep = Math.max(0, Math.min(normalizedTotalSteps, toInteger(currentStep, 0)));
   const normalizedReviewTotalRounds = Math.max(1, toInteger(reviewTotalRounds, CODE_REVIEW_ROUNDS));
@@ -596,6 +604,10 @@ export function createCodeExecutionDomain({
     workBranch,
     preferredRestoreBranch,
     deleteWorkBranch
+  }: {
+    workBranch?: string;
+    preferredRestoreBranch?: string;
+    deleteWorkBranch?: boolean;
   } = {}) {
     const latestTask = repo.getTask(taskId);
     const payload = latestTask?.payload && typeof latestTask.payload === 'object'
@@ -673,6 +685,9 @@ export function createCodeExecutionDomain({
   async function mergeTaskBranchIntoBase(taskId, workspace, {
     workBranch,
     baseBranch
+  }: {
+    workBranch?: string;
+    baseBranch?: string;
   } = {}) {
     const normalizedWorkBranch = normalizeWhitespace(workBranch);
     const normalizedBaseBranch = normalizeWhitespace(baseBranch || workspace.git.baseBranch);
@@ -1329,7 +1344,7 @@ export function createCodeExecutionDomain({
     return reviewRounds;
   }
 
-  async function runTask(taskId, options = {}) {
+  async function runTask(taskId, options: { resumeFromCheckpoint?: boolean } = {}) {
     const resumeFromCheckpoint = Boolean(options.resumeFromCheckpoint);
     if (activeRuns.has(taskId)) {
       return { started: false };
@@ -1514,7 +1529,7 @@ export function createCodeExecutionDomain({
     return { started: true };
   }
 
-  async function createPullRequest(taskId, options = {}) {
+  async function createPullRequest(taskId, options: { branchName?: string } = {}) {
     if (activeRuns.has(taskId)) {
       throw new Error('작업이 아직 실행 중입니다');
     }

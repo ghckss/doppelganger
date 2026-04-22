@@ -1,4 +1,3 @@
-// @ts-nocheck
 function normalizeGenerationProvider(value, fallback = 'cli') {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'hovis') {
@@ -19,7 +18,12 @@ function normalizeAgentProvider(value, fallback = 'codex') {
 }
 
 export class GenerationClient {
-  constructor({ config, openaiClient, cliClient, externalAgentClient, hovisClient }) {
+  config: any;
+  openaiClient: any;
+  cliClient: any;
+  externalAgentClient: any;
+
+  constructor({ config, openaiClient, cliClient, externalAgentClient, hovisClient }: any) {
     this.config = config;
     this.openaiClient = openaiClient;
     this.cliClient = cliClient;
@@ -46,7 +50,7 @@ export class GenerationClient {
     return Boolean(this.cliClient?.isConfigured?.());
   }
 
-  resolveAgentProvider({ scope = 'default', agentProvider }) {
+  resolveAgentProvider({ scope = 'default', agentProvider }: { scope?: string; agentProvider?: string } = {}) {
     const scopedAgent = this.config.generation?.scopeAgentProviders?.[scope];
     return normalizeAgentProvider(
       agentProvider || scopedAgent || this.config.generation?.defaultAgentProvider || this.config.agent?.defaultProvider || 'codex',
@@ -54,7 +58,21 @@ export class GenerationClient {
     );
   }
 
-  async createTextResponse({ instructions, input, model, scope = 'default', agentProvider, pullRequestUrl }) {
+  async createTextResponse({
+    instructions,
+    input,
+    model,
+    scope = 'default',
+    agentProvider,
+    pullRequestUrl
+  }: {
+    instructions: string;
+    input: string;
+    model?: string;
+    scope?: string;
+    agentProvider?: string;
+    pullRequestUrl?: string;
+  }) {
     const mode = this.getMode(scope);
 
     if (mode === 'fallback') {

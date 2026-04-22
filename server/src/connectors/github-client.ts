@@ -1,5 +1,9 @@
-// @ts-nocheck
 export class GitHubApiError extends Error {
+  status: number;
+  payload: Record<string, unknown> | null;
+  method: string;
+  path: string;
+
   constructor(message, { status = 0, payload = null, method = 'GET', path = '' } = {}) {
     super(message);
     this.name = 'GitHubApiError';
@@ -11,6 +15,14 @@ export class GitHubApiError extends Error {
 }
 
 export class GitHubClient {
+  config: {
+    github: {
+      token?: string;
+    };
+  };
+  fetch: typeof fetch;
+  cachedViewer: Record<string, unknown> | null;
+
   constructor(config, fetchImpl = fetch) {
     this.config = config;
     this.fetch = fetchImpl;
@@ -21,7 +33,7 @@ export class GitHubClient {
     return Boolean(this.config.github.token);
   }
 
-  async request(path, { method = 'GET', body } = {}) {
+  async request(path, { method = 'GET', body }: { method?: string; body?: unknown } = {}) {
     if (!this.isConfigured()) {
       throw new Error('GitHub 연결이 설정되지 않았습니다');
     }

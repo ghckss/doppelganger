@@ -8,17 +8,15 @@ export function createId(prefix: string = 'id'): string {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-export function readJson<T>(value: string | null | undefined, fallback: T): T;
-export function readJson(value: string | null | undefined, fallback?: null): unknown | null;
-export function readJson<T>(value: string | null | undefined, fallback: T | null = null): unknown | T | null {
+export function readJson<T = any>(value: string | null | undefined, fallback?: T): T {
   if (!value) {
-    return fallback;
+    return (fallback ?? ({} as T));
   }
 
   try {
-    return JSON.parse(value);
+    return JSON.parse(value) as T;
   } catch {
-    return fallback;
+    return (fallback ?? ({} as T));
   }
 }
 
@@ -82,6 +80,6 @@ export function listMissing(requiredPairs: Array<[string, unknown]>): string[] {
   return requiredPairs.filter(([, value]) => !value).map(([key]) => key);
 }
 
-export function safeArray<T>(value: unknown): T[] {
-  return Array.isArray(value) ? (value as T[]) : [];
+export function safeArray<T = any>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : ([] as T[]);
 }

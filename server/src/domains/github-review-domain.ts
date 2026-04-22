@@ -1,4 +1,3 @@
-// @ts-nocheck
 import crypto from 'node:crypto';
 import { normalizeWhitespace, safeArray, truncateText } from '../utils.ts';
 
@@ -103,7 +102,7 @@ export function createGitHubReviewDomain({ config, repo, githubClient, llmServic
     }));
   }
 
-  async function generateDraft(task, options = {}) {
+  async function generateDraft(task, options: { generationAgentProvider?: string } = {}) {
     const pullRequestArtifact = repo.listArtifacts(task.id, 'github_pull_request')[0];
     const fileArtifacts = repo.listArtifacts(task.id, 'github_pull_request_file');
     if (!pullRequestArtifact) {

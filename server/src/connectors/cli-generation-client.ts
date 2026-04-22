@@ -1,4 +1,3 @@
-// @ts-nocheck
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,7 +89,31 @@ function readFileLimited(filePath, maxBytes = FILE_CAPTURE_LIMIT) {
   }
 }
 
+interface CliGenerationConfig {
+  cwd?: string;
+  codex?: { command?: string };
+  claude?: { command?: string };
+  generation?: {
+    defaultAgentProvider?: string;
+    timeoutSeconds?: number;
+    scopeTimeoutSeconds?: Record<string, number>;
+  };
+}
+
+interface CliCommandResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+interface CliError extends Error {
+  code?: string | number;
+}
+
 export class CliGenerationClient {
+  config: CliGenerationConfig;
+
   constructor(config) {
     this.config = config;
   }
@@ -157,7 +180,7 @@ export class CliGenerationClient {
       args,
       cwd
     });
-    const result = await new Promise((resolve, reject) => {
+    const result: CliCommandResult = await new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe']
@@ -181,7 +204,7 @@ export class CliGenerationClient {
       child.stderr.on('data', (chunk) => {
         appendCapture(stderrCapture, chunk);
       });
-      child.stdin.on('error', (error) => {
+      child.stdin.on('error', (error: CliError) => {
         if (error.code === 'EPIPE') {
           return;
         }
@@ -190,7 +213,7 @@ export class CliGenerationClient {
         }
         reject(error);
       });
-      child.on('error', (error) => {
+      child.on('error', (error: CliError) => {
         if (timer) {
           clearTimeout(timer);
         }
@@ -205,7 +228,7 @@ export class CliGenerationClient {
         });
         reject(error);
       });
-      child.on('close', (code) => {
+      child.on('close', (code: number | null) => {
         if (timer) {
           clearTimeout(timer);
         }

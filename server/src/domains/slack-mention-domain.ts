@@ -1,4 +1,3 @@
-// @ts-nocheck
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -262,7 +261,7 @@ function normalizeSearchToken(value) {
   return normalizeSearchableText(value).replace(/[^a-z0-9가-힣]+/g, '');
 }
 
-function createCodeReviewProgress({ step = 0, total = 0, label = '' } = {}) {
+function createCodeReviewProgress({ step = 0, total = 0, label = '' }: { step?: number; total?: number; label?: string } = {}) {
   const safeTotal = Number.isFinite(total) && total > 0 ? Math.floor(total) : 0;
   const safeStepRaw = Number.isFinite(step) ? Math.floor(step) : 0;
   const safeStep = safeTotal > 0
@@ -917,7 +916,10 @@ function normalizeShellCommandPreview(command, args) {
   return [commandText, ...argList].join(' ');
 }
 
-function formatCodeReviewError(error, { stage = '', selectedRepo = '' } = {}) {
+function formatCodeReviewError(
+  error,
+  { stage = '', selectedRepo = '' }: { stage?: string; selectedRepo?: string } = {}
+) {
   const details = error && typeof error === 'object' && error.details && typeof error.details === 'object'
     ? error.details
     : {};
@@ -1054,6 +1056,14 @@ export function createSlackMentionDomain({
   workspaceRunner,
   codexCliRunner,
   claudeCliRunner
+}: {
+  config: any;
+  repo: any;
+  slackClient: any;
+  llmService: any;
+  workspaceRunner?: any;
+  codexCliRunner?: any;
+  claudeCliRunner?: any;
 }) {
   const stateKey = 'slack_mentions.last_success_at';
   const overlapSeconds = 120;
@@ -1207,7 +1217,7 @@ export function createSlackMentionDomain({
     };
   }
 
-  async function generateDraft(task, options = {}) {
+  async function generateDraft(task, options: { includeCodeReviewContext?: boolean } = {}) {
     const threadMessages = repo.listArtifacts(task.id, 'slack_message');
     const includeCodeReviewContext = Boolean(options.includeCodeReviewContext);
     const codeReviewContext = includeCodeReviewContext ? (task.payload?.codeReview || null) : null;
@@ -1321,7 +1331,7 @@ export function createSlackMentionDomain({
     };
   }
 
-  async function runCodeReview(task, options = {}) {
+  async function runCodeReview(task, options: { analysisAgentProvider?: string; selectedRepo?: string } = {}) {
     const currentTask = repo.getTask(task.id) || task;
     const threadMessages = repo.listArtifacts(currentTask.id, 'slack_message');
     const threadFingerprint = buildThreadFingerprint(threadMessages);
@@ -1335,7 +1345,7 @@ export function createSlackMentionDomain({
       configuredRepos,
       previousSelectedRepo
     });
-    const selectedRepo = repositorySelection.selectedRepo;
+    const selectedRepo = normalizeRepoName(options.selectedRepo) || repositorySelection.selectedRepo;
     if (!selectedRepo) {
       throw new Error('코드 검토를 실행할 저장소를 자동 선택하지 못했습니다. GITHUB_REPOSITORIES 설정을 확인해주세요.');
     }
@@ -1384,7 +1394,11 @@ export function createSlackMentionDomain({
       lastError: null
     });
 
-    const updateRunningProgress = ({ step, label, patch = {} }) => {
+    const updateRunningProgress = ({ step, label, patch = {} }: {
+      step: number;
+      label: string;
+      patch?: Record<string, unknown>;
+    }) => {
       const latestTask = repo.getTask(currentTask.id) || runningTask;
       const latestPayload = latestTask.payload || {};
       const latestCodeReview = latestPayload.codeReview || runningState;

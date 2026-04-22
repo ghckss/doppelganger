@@ -1,4 +1,3 @@
-// @ts-nocheck
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -169,7 +168,7 @@ export function createRepository(databasePath) {
     `)
   };
 
-  function listTasks({ domain } = {}) {
+  function listTasks({ domain }: { domain?: string } = {}) {
     const rows = domain ? statements.listTasksByDomain.all(domain) : statements.listTasks.all();
     return rows.map(mapTask);
   }
@@ -359,7 +358,12 @@ export function createRepository(databasePath) {
     return statements.listDrafts.all(taskId).map(mapDraft);
   }
 
-  function logExecution(taskId, action, status, details = {}) {
+  function logExecution(
+    taskId,
+    action,
+    status,
+    details: { request?: unknown; response?: unknown; error?: string | null } = {}
+  ) {
     const executionId = createId('exec');
     statements.insertExecution.run(
       executionId,
