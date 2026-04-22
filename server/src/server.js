@@ -1,24 +1,9 @@
-import fs from 'node:fs';
 import http from 'node:http';
-import path from 'node:path';
-import { renderErrorPage, renderTaskDetailPage, renderTaskListPage } from './web/render.js';
 
 const DEFAULT_DEV_CORS_ORIGINS = new Set([
   'http://localhost:5173',
   'http://127.0.0.1:5173'
 ]);
-
-function redirect(response, location) {
-  response.writeHead(303, { Location: location });
-  response.end();
-}
-
-function sendHtml(response, statusCode, html) {
-  response.writeHead(statusCode, {
-    'Content-Type': 'text/html; charset=utf-8'
-  });
-  response.end(html);
-}
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
@@ -45,10 +30,6 @@ async function parseRequestBody(request) {
 
   const params = new URLSearchParams(rawBody);
   return Object.fromEntries(params.entries());
-}
-
-function acceptsJson(request) {
-  return (request.headers.accept || '').includes('application/json');
 }
 
 function normalizeOrigin(value) {
@@ -100,36 +81,12 @@ function applyCorsHeaders(request, response, allowedOrigins) {
   return true;
 }
 
-function serveStatic(requestPath, response, cwd) {
-  if (requestPath !== '/static/styles.css') {
-    return false;
-  }
-
-  const cssPath = path.join(cwd, 'server', 'public', 'styles.css');
-  if (!fs.existsSync(cssPath)) {
-    return false;
-  }
-  response.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
-  response.end(fs.readFileSync(cssPath, 'utf8'));
-  return true;
-}
-
-function redirectToTaskOrList(response, nextTaskId, message) {
-  if (nextTaskId) {
-    redirect(response, `/tasks/${encodeURIComponent(nextTaskId)}?message=${encodeURIComponent(message)}`);
-    return;
-  }
-
-  redirect(response, `/tasks?message=${encodeURIComponent(message)}`);
-}
-
-export function createHttpServer({ cwd, taskService, llmService }) {
+export function createHttpServer({ taskService, llmService }) {
   const allowedCorsOrigins = buildAllowedCorsOrigins(taskService?.config || {});
 
   return http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
     const pathname = url.pathname;
-    const query = Object.fromEntries(url.searchParams.entries());
 
     try {
       const corsApplied = applyCorsHeaders(request, response, allowedCorsOrigins);
@@ -150,17 +107,24 @@ export function createHttpServer({ cwd, taskService, llmService }) {
         && detail.task.status !== 'failed'
         && (!detail.task.summary || !hasUsableDraft(detail));
 
-      if (serveStatic(pathname, response, cwd)) {
-        return;
-      }
-
       if (request.method === 'GET' && pathname === '/') {
-        redirect(response, '/tasks');
+        sendJson(response, 200, {
+          ok: true,
+          message: 'API 서버가 실행 중입니다. React UI는 별도 클라이언트 서버에서 제공합니다.',
+          endpoints: {
+            health: '/healthz',
+            meta: '/api/meta',
+            tasks: '/api/tasks'
+          }
+        });
         return;
       }
 
       if (request.method === 'GET' && pathname === '/healthz') {
-        sendJson(response, 200, { ok: true, uptimeSeconds: Math.round(process.uptime()) });
+        sendJson(response, 200, {
+          ok: true,
+          uptimeSeconds: Math.round(process.uptime())
+        });
         return;
       }
 
@@ -197,22 +161,6 @@ export function createHttpServer({ cwd, taskService, llmService }) {
         return;
       }
 
-      if (request.method === 'GET' && pathname === '/tasks') {
-        const html = renderTaskListPage({
-          tasks: taskService.listTasks({
-            includeResolved: url.searchParams.get('includeResolved') === '1'
-          }),
-          projects: taskService.getCodeExecutionProjects(),
-          projectsRoot: taskService.config.workspace.projectsRoot,
-          defaultAgentProvider: taskService.config.agent?.defaultProvider || 'codex',
-          readiness: taskService.getConnectorReadiness(),
-          domains: taskService.getDomainCatalog(),
-          query
-        });
-        sendHtml(response, 200, html);
-        return;
-      }
-
       if (request.method === 'GET' && pathname === '/api/tasks') {
         sendJson(response, 200, {
           tasks: taskService.listTasks({
@@ -236,7 +184,7 @@ export function createHttpServer({ cwd, taskService, llmService }) {
         return;
       }
 
-      if ((request.method === 'POST' && pathname === '/tasks/code-execution/create') || (request.method === 'POST' && pathname === '/api/tasks/code-execution')) {
+      if (request.method === 'POST' && pathname === '/api/tasks/code-execution') {
         const body = await parseRequestBody(request);
         const detail = await taskService.createCodeExecutionTask({
           command: body.command,
@@ -247,34 +195,7 @@ export function createHttpServer({ cwd, taskService, llmService }) {
           needsPlanning: body.needsPlanning,
           needsDesign: body.needsDesign
         });
-        const prefersJson = pathname.startsWith('/api/') || (request.headers.accept || '').includes('application/json');
-        if (prefersJson) {
-          sendJson(response, 201, detail);
-          return;
-        }
-        redirect(response, `/tasks/${encodeURIComponent(detail.task.id)}?message=${encodeURIComponent('코드 작업을 생성하고 실행을 시작했습니다')}`);
-        return;
-      }
-
-      const taskMatch = pathname.match(/^\/tasks\/([^/]+)$/);
-      if (request.method === 'GET' && taskMatch) {
-        const taskId = decodeURIComponent(taskMatch[1]);
-        let detail = taskService.getTaskDetail(taskId);
-        if (shouldAutoGenerateDraft(detail)) {
-          detail = await taskService.generateDraft(taskId, {});
-        }
-        if (detail.task.domain === 'slack_mention') {
-          const analysisStatus = String(detail.task.payload?.codeReview?.analysisStatus || '').toLowerCase();
-          if (!analysisStatus || analysisStatus === 'not_requested') {
-            await taskService.startSlackCodeReview(taskId, {});
-            detail = taskService.getTaskDetail(taskId);
-          }
-        }
-        sendHtml(response, 200, renderTaskDetailPage({
-          detail,
-          query,
-          slackCodeReviewRepos: taskService.config.github?.repositories || []
-        }));
+        sendJson(response, 201, detail);
         return;
       }
 
@@ -296,84 +217,58 @@ export function createHttpServer({ cwd, taskService, llmService }) {
         return;
       }
 
-      const runCodeTaskMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/run$/);
+      const runCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
       if (request.method === 'POST' && runCodeTaskMatch) {
         const taskId = decodeURIComponent(runCodeTaskMatch[1]);
         const detail = await taskService.startCodeExecutionTask(taskId);
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId,
-            status: detail.task.status
-          });
-          return;
-        }
-        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('코드 작업 실행을 시작했습니다')}`);
+        sendJson(response, 200, {
+          ok: true,
+          taskId,
+          status: detail.task.status
+        });
         return;
       }
 
-      const resumeCodeTaskMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/resume$/);
+      const resumeCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
       if (request.method === 'POST' && resumeCodeTaskMatch) {
         const taskId = decodeURIComponent(resumeCodeTaskMatch[1]);
         const detail = await taskService.resumeCodeExecutionTask(taskId);
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId,
-            status: detail.task.status
-          });
-          return;
-        }
-        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('코드 작업 재개를 시작했습니다')}`);
+        sendJson(response, 200, {
+          ok: true,
+          taskId,
+          status: detail.task.status
+        });
         return;
       }
 
-      const createPrMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/create-pr$/);
+      const createPrMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/create-pr$/);
       if (request.method === 'POST' && createPrMatch) {
         const taskId = decodeURIComponent(createPrMatch[1]);
         const body = await parseRequestBody(request);
         const detail = await taskService.createCodeExecutionPullRequest(taskId, {
           branchName: body.branchName
         });
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId,
-            status: detail.task.status
-          });
-          return;
-        }
-        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('PR을 생성했습니다')}`);
+        sendJson(response, 200, {
+          ok: true,
+          taskId,
+          status: detail.task.status
+        });
         return;
       }
 
       if (request.method === 'POST' && pathname === '/internal/poll/slack-mentions') {
         const result = await taskService.pollSlackMentions();
-        const acceptsJson = (request.headers.accept || '').includes('application/json') || (request.headers['content-type'] || '').includes('application/json');
-        if (acceptsJson) {
-          sendJson(response, 200, result);
-          return;
-        }
-        redirect(response, `/tasks?message=${encodeURIComponent(`Slack 멘션 영역을 업데이트했습니다: ${result.matchesFound}건 (코드검토 자동 시작 ${result.autoCodeReviewsStarted || 0}건)`)}`);
+        sendJson(response, 200, result);
         return;
       }
 
       if (request.method === 'POST' && pathname === '/internal/poll/github-reviews') {
         const result = await taskService.pollGitHubReviews();
-        const acceptsJson = (request.headers.accept || '').includes('application/json') || (request.headers['content-type'] || '').includes('application/json');
-        if (acceptsJson) {
-          sendJson(response, 200, result);
-          return;
-        }
-        const skipped = result.alreadyReviewedSkipped + result.draftsSkipped + (result.selfAuthoredSkipped || 0);
-        redirect(response, `/tasks?message=${encodeURIComponent(`GitHub PR 후보 수집이 끝났습니다: 후보 ${result.candidatesListed || 0}건, 스킵 ${skipped}건`)}`);
+        sendJson(response, 200, result);
         return;
       }
 
-      const draftMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/draft$/);
+      const draftMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/draft$/);
       if (request.method === 'POST' && draftMatch) {
         const taskId = decodeURIComponent(draftMatch[1]);
         const body = await parseRequestBody(request);
@@ -387,20 +282,13 @@ export function createHttpServer({ cwd, taskService, llmService }) {
             : {
               generationAgentProvider: body.generationAgentProvider
             });
-          const redirectUrl = `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('초안을 생성했습니다')}`;
-          const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-          if (prefersJson) {
-            const latestProvider = detail.latestDraft?.metadata?.provider || '';
-            sendJson(response, 200, {
-              ok: true,
-              taskId,
-              status: detail.task.status,
-              provider: latestProvider,
-              redirectUrl
-            });
-            return;
-          }
-          redirect(response, redirectUrl);
+          const latestProvider = detail.latestDraft?.metadata?.provider || '';
+          sendJson(response, 200, {
+            ok: true,
+            taskId,
+            status: detail.task.status,
+            provider: latestProvider
+          });
           return;
         }
 
@@ -415,91 +303,56 @@ export function createHttpServer({ cwd, taskService, llmService }) {
             reactionName: body.reactionName
           }
         });
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId
-          });
-          return;
-        }
-        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('초안을 저장했습니다')}`);
+        sendJson(response, 200, {
+          ok: true,
+          taskId
+        });
         return;
       }
 
-      const codeReviewMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/code-review$/);
+      const codeReviewMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/code-review$/);
       if (request.method === 'POST' && codeReviewMatch) {
         const taskId = decodeURIComponent(codeReviewMatch[1]);
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
         const started = await taskService.startSlackCodeReview(taskId, {});
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId,
-            started: started.started,
-            alreadyRunning: started.alreadyRunning,
-            status: started.detail.task.payload?.codeReview?.analysisStatus || ''
-          });
-          return;
-        }
-        const message = started.alreadyRunning
-          ? '코드 검토가 이미 실행 중입니다'
-          : '코드 검토를 시작했습니다. 코드검토 반영 초안은 별도 버튼으로 생성할 수 있습니다';
-        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent(message)}`);
+        sendJson(response, 200, {
+          ok: true,
+          taskId,
+          started: started.started,
+          alreadyRunning: started.alreadyRunning,
+          status: started.detail.task.payload?.codeReview?.analysisStatus || ''
+        });
         return;
       }
 
-      const approveMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/approve$/);
+      const approveMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/approve$/);
       if (request.method === 'POST' && approveMatch) {
         const taskId = decodeURIComponent(approveMatch[1]);
         const detail = taskService.approveTask(taskId);
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId,
-            status: detail.task.status,
-            approvalState: detail.task.approval_state
-          });
-          return;
-        }
-        redirect(response, `/tasks/${encodeURIComponent(taskId)}?message=${encodeURIComponent('작업을 승인했습니다')}`);
+        sendJson(response, 200, {
+          ok: true,
+          taskId,
+          status: detail.task.status,
+          approvalState: detail.task.approval_state
+        });
         return;
       }
 
-      const ignoreMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/ignore$/);
+      const ignoreMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/ignore$/);
       if (request.method === 'POST' && ignoreMatch) {
         const taskId = decodeURIComponent(ignoreMatch[1]);
-        const task = taskService.getTaskDetail(taskId).task;
-        const nextSlackTaskId = task.domain === 'slack_mention'
-          ? taskService.getNextPendingTaskId(taskId, { domain: 'slack_mention' })
-          : null;
         const detail = taskService.ignoreTask(taskId);
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId,
-            status: detail.task.status
-          });
-          return;
-        }
-        if (task.domain === 'slack_mention') {
-          redirectToTaskOrList(response, nextSlackTaskId, '작업을 무시했습니다');
-          return;
-        }
-        redirect(response, `/tasks?message=${encodeURIComponent('작업을 무시했습니다')}`);
+        sendJson(response, 200, {
+          ok: true,
+          taskId,
+          status: detail.task.status
+        });
         return;
       }
 
-      const sendMatch = pathname.match(/^\/(?:api\/)?tasks\/([^/]+)\/send$/);
+      const sendMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/send$/);
       if (request.method === 'POST' && sendMatch) {
         const taskId = decodeURIComponent(sendMatch[1]);
         const body = await parseRequestBody(request);
-        const task = taskService.getTaskDetail(taskId).task;
-        const nextSlackTaskId = task.domain === 'slack_mention'
-          ? taskService.getNextPendingTaskId(taskId, { domain: 'slack_mention' })
-          : null;
         taskService.saveDraft(taskId, {
           content: body.draft,
           summary: body.summary,
@@ -516,41 +369,23 @@ export function createHttpServer({ cwd, taskService, llmService }) {
           reactionName: body.sendMode === 'reaction' ? body.reactionName : '',
           addReaction: body.sendMode === 'reaction'
         });
-        const prefersJson = pathname.startsWith('/api/') || acceptsJson(request);
-        if (prefersJson) {
-          sendJson(response, 200, {
-            ok: true,
-            taskId,
-            status: detail.task.status
-          });
-          return;
-        }
-        if (task.domain === 'slack_mention') {
-          redirectToTaskOrList(response, nextSlackTaskId, '답변을 전송했습니다');
-          return;
-        }
-        redirect(response, `/tasks?message=${encodeURIComponent(task.domain === 'github_review' ? '리뷰 코멘트를 게시했습니다' : '답변을 전송했습니다')}`);
-        return;
-      }
-
-      sendHtml(response, 404, renderErrorPage({ title: '찾을 수 없음', message: '요청한 경로가 존재하지 않습니다.', query }));
-    } catch (error) {
-      const prefersJson = pathname.startsWith('/api/') || (request.headers.accept || '').includes('application/json');
-      if (prefersJson) {
-        sendJson(response, 500, {
-          ok: false,
-          error: error.message
+        sendJson(response, 200, {
+          ok: true,
+          taskId,
+          status: detail.task.status
         });
         return;
       }
 
-      if (request.method === 'POST' && pathname.startsWith('/tasks/')) {
-        const fallbackTarget = pathname.split('/').slice(0, 3).join('/');
-        redirect(response, `${fallbackTarget}?error=${encodeURIComponent(error.message)}`);
-        return;
-      }
-
-      sendHtml(response, 500, renderErrorPage({ title: '요청 실패', message: error.message, query }));
+      sendJson(response, 404, {
+        ok: false,
+        error: '요청한 경로가 존재하지 않습니다.'
+      });
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        error: error.message
+      });
     }
   });
 }

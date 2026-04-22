@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import process from 'node:process';
 import test from 'node:test';
 import { createHttpServer } from '../src/server.js';
 
@@ -16,7 +15,6 @@ function createTaskServiceStub() {
 
 async function withTestServer({ llmService }, callback) {
   const server = createHttpServer({
-    cwd: process.cwd(),
     taskService: createTaskServiceStub(),
     llmService
   });
@@ -91,7 +89,7 @@ test('meeting summarize endpoint validates transcript input', async (t) => {
   }
 });
 
-test('root path redirects to /tasks', async (t) => {
+test('root path returns api-only 안내', async (t) => {
   try {
     await withTestServer({
       llmService: {
@@ -102,11 +100,12 @@ test('root path redirects to /tasks', async (t) => {
         })
       }
     }, async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/`, {
-        redirect: 'manual'
-      });
-      assert.equal(response.status, 303);
-      assert.equal(response.headers.get('location'), '/tasks');
+      const response = await fetch(`${baseUrl}/`);
+      const payload = await response.json();
+      assert.equal(response.status, 200);
+      assert.equal(payload.ok, true);
+      assert.match(String(payload.message || ''), /API 서버/);
+      assert.equal(payload.endpoints?.tasks, '/api/tasks');
     });
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && error.code === 'EPERM') {

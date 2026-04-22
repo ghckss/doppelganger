@@ -38,8 +38,8 @@ Current state:
    npm run dev:client
    ```
 6. Open:
-   - React UI: `http://127.0.0.1:4318/app` (build 기준) 또는 Vite dev URL
-   - Legacy SSR UI: `http://127.0.0.1:4318/tasks`
+   - React UI (Vite dev): `http://127.0.0.1:5173`
+   - Server API: `http://127.0.0.1:4318/api/*`
 
 ## Slack scopes
 Read token should be able to:
@@ -73,7 +73,7 @@ A practical setup is often:
 - Slack 답변 전송 시 사용자가 최종 수정한 본문이 로컬 스타일 메모리에 누적되고, 이후 초안 생성 프롬프트에 반영되어 어투/문장 길이/표현 습관을 점진적으로 맞춥니다.
 
 ## Meeting recording workflow
-1. Open the `회의 기록` panel in `/app`.
+1. Open the React UI (`http://127.0.0.1:5173`) and go to the `회의 기록` panel.
 2. Click `시작` to begin browser speech recognition (`ko-KR`).
 3. During recording, transcript updates every 10 seconds in `실시간 전사`.
 4. Use `일시정지` / `재개` for breaks without ending the session.
@@ -88,7 +88,7 @@ Notes:
 - `npm start`: run the HTTP server
 - `npm run dev`: run the HTTP server with watch mode
 - `npm run dev:client`: run the React client in Vite dev mode
-- `npm run build:client`: build the React client (`client/dist`)
+- `npm run build:client`: build the React client bundle
 - `npm run poll:slack`: perform one Slack mention poll
 - `npm run poll:github`: perform one GitHub PR review poll
 - `npm test`: run the test suite
@@ -139,7 +139,7 @@ Notes:
 3. Ensure the selected CLI is available on PATH:
    - Codex: `CODEX_COMMAND` (default `codex`)
    - Claude: `CLAUDE_COMMAND` (default `claude`)
-4. Open `http://127.0.0.1:4318/app` and use the project picker in the "코드 작업 생성" 영역.
+4. Open `http://127.0.0.1:5173` and use the project picker in the "코드 작업 생성" 영역.
    - 필요하면 `작업 브랜치(선택)`에 원하는 브랜치명을 직접 입력할 수 있습니다.
 5. Select the agent (`Codex` or `Claude`) per task.
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
