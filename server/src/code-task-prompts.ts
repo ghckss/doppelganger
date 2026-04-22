@@ -1,14 +1,90 @@
 import { normalizeWhitespace, truncateText } from './utils.ts';
 
-function sentenceList(values = []) {
-  return values.filter(Boolean).map((value) => `- ${value}`).join('\n');
+export interface CodeTaskPayload {
+  command?: string;
+  branchName?: string;
+  [key: string]: unknown;
 }
 
-function yesNo(value) {
+export interface CodeTaskInput {
+  title?: string;
+  payload?: CodeTaskPayload;
+  result?: Record<string, unknown>;
+}
+
+export interface WorkspaceGitSnapshot {
+  root: string;
+  repoSlug?: string;
+  baseBranch: string;
+  currentBranch: string;
+  remoteUrl?: string;
+  isDirty: boolean;
+}
+
+export interface WorkspaceSnapshot {
+  git: WorkspaceGitSnapshot;
+  fileSample: string[];
+  scripts: Record<string, string>;
+  recommendedChecks: string[];
+}
+
+export interface PromptPlan {
+  summary: string;
+  goal: string;
+  taskType: string;
+  successCriteria: string[];
+  deliverables: string[];
+  constraints: string[];
+  relevantContext: string[];
+}
+
+export interface ProductPlan {
+  summary: string;
+  problem: string;
+  userScenarios: string[];
+  acceptanceCriteria: string[];
+  outOfScope: string[];
+  risks: string[];
+}
+
+export interface DesignSpec {
+  summary: string;
+  targets: string[];
+  layoutChanges: string[];
+  visualRules: string[];
+  interactionStates: string[];
+  accessibilityChecks: string[];
+  responsiveNotes: string[];
+}
+
+export interface ReviewFinding {
+  id: string;
+  severity: string;
+  category: string;
+  title: string;
+  description: string;
+  fileRefs: string[];
+  suggestedFix: string;
+  mustFix: boolean;
+}
+
+export interface ReviewRound {
+  round: number;
+  findings: ReviewFinding[];
+}
+
+function sentenceList(values: Array<string | null | undefined> = []): string {
+  return values
+    .filter((value): value is string => Boolean(value))
+    .map((value) => `- ${value}`)
+    .join('\n');
+}
+
+function yesNo(value: unknown): string {
   return value ? 'yes' : 'no';
 }
 
-function describeScripts(scripts = {}) {
+function describeScripts(scripts: Record<string, string | null | undefined> = {}): string {
   const entries = Object.entries(scripts).filter(([, value]) => value);
   if (entries.length === 0) {
     return '- no package scripts detected';
@@ -17,11 +93,11 @@ function describeScripts(scripts = {}) {
   return entries.map(([name, command]) => `- ${name}: ${command}`).join('\n');
 }
 
-function joinSection(title, body) {
+function joinSection(title: string, body?: string): string {
   return [`## ${title}`, body || '- none'].join('\n');
 }
 
-export function classifyTask(command) {
+export function classifyTask(command: unknown): string {
   const text = String(command || '').toLowerCase();
   if (/design|layout|ui|ux|screen|page|style/.test(text)) {
     return 'ui_change';
@@ -35,7 +111,9 @@ export function classifyTask(command) {
   return 'feature';
 }
 
-export function buildFallbackPromptPlan({ task, workspace }) {
+export function buildFallbackPromptPlan(
+  { task, workspace }: { task: CodeTaskInput; workspace: WorkspaceSnapshot }
+): PromptPlan {
   const command = normalizeWhitespace(task.payload?.command || task.title);
   const taskType = classifyTask(command);
 
@@ -67,7 +145,9 @@ export function buildFallbackPromptPlan({ task, workspace }) {
   };
 }
 
-export function buildFallbackProductPlan({ task, promptPlan, workspace }) {
+export function buildFallbackProductPlan(
+  { task, promptPlan, workspace }: { task: CodeTaskInput; promptPlan: PromptPlan; workspace: WorkspaceSnapshot }
+): ProductPlan {
   const command = normalizeWhitespace(task.payload?.command || task.title);
 
   return {
@@ -92,7 +172,9 @@ export function buildFallbackProductPlan({ task, promptPlan, workspace }) {
   };
 }
 
-export function buildFallbackDesignSpec({ task, workspace }) {
+export function buildFallbackDesignSpec(
+  { task, workspace }: { task: CodeTaskInput; workspace: WorkspaceSnapshot }
+): DesignSpec {
   const command = normalizeWhitespace(task.payload?.command || task.title);
 
   return {
@@ -119,7 +201,19 @@ export function buildFallbackDesignSpec({ task, workspace }) {
   };
 }
 
-export function buildCodingPrompt({ task, workspace, promptPlan, productPlan, designSpec }) {
+export function buildCodingPrompt({
+  task,
+  workspace,
+  promptPlan,
+  productPlan,
+  designSpec
+}: {
+  task: CodeTaskInput;
+  workspace: WorkspaceSnapshot;
+  promptPlan: PromptPlan;
+  productPlan?: ProductPlan | null;
+  designSpec?: DesignSpec | null;
+}): string {
   const payload = task.payload || {};
   const sections = [
     joinSection('Goal', [
@@ -168,7 +262,21 @@ export function buildCodingPrompt({ task, workspace, promptPlan, productPlan, de
   return sections.join('\n\n');
 }
 
-export function buildReviewPrompt({ task, workspace, promptPlan, productPlan, designSpec, round }) {
+export function buildReviewPrompt({
+  task,
+  workspace,
+  promptPlan,
+  productPlan,
+  designSpec,
+  round
+}: {
+  task: CodeTaskInput;
+  workspace: WorkspaceSnapshot;
+  promptPlan: PromptPlan;
+  productPlan?: ProductPlan | null;
+  designSpec?: DesignSpec | null;
+  round: number;
+}): string {
   const payload = task.payload || {};
   const sections = [
     joinSection('Review Goal', [
@@ -198,7 +306,17 @@ export function buildReviewPrompt({ task, workspace, promptPlan, productPlan, de
   return sections.join('\n\n');
 }
 
-export function buildPatchPrompt({ task, workspace, reviewRound, round }) {
+export function buildPatchPrompt({
+  task,
+  workspace,
+  reviewRound,
+  round
+}: {
+  task: CodeTaskInput;
+  workspace: WorkspaceSnapshot;
+  reviewRound: { findings?: ReviewFinding[] };
+  round: number;
+}): string {
   const payload = task.payload || {};
   const findings = reviewRound.findings || [];
   const sections = [
@@ -206,7 +324,7 @@ export function buildPatchPrompt({ task, workspace, reviewRound, round }) {
       `Apply fixes for review round ${round} on branch \`${payload.branchName}\`.`,
       `User command: ${payload.command}`
     ].join('\n')),
-    joinSection('Must Address', findings.length > 0 ? sentenceList(findings.map((finding) => {
+    joinSection('Must Address', findings.length > 0 ? sentenceList(findings.map((finding: ReviewFinding) => {
       const refs = (finding.fileRefs || []).join(', ') || 'no file refs';
       return `[${finding.id}] (${finding.severity}/${finding.category}) ${finding.title} | ${refs} | ${finding.description} | Suggested fix: ${finding.suggestedFix}`;
     })) : '- No findings were raised in this round.'),
@@ -229,10 +347,20 @@ export function buildPatchPrompt({ task, workspace, reviewRound, round }) {
   return sections.join('\n\n');
 }
 
-export function buildPullRequestDraft({ task, workspace, reviewRounds, commitSummary }) {
+export function buildPullRequestDraft({
+  task,
+  workspace,
+  reviewRounds,
+  commitSummary
+}: {
+  task: CodeTaskInput;
+  workspace: WorkspaceSnapshot;
+  reviewRounds: ReviewRound[];
+  commitSummary: string[];
+}): { title: string; body: string } {
   const command = normalizeWhitespace(task.payload?.command || task.title);
   const resolvedCounts = reviewRounds
-    .map((round) => `Round ${round.round}: ${(round.findings || []).length} finding(s) reviewed`)
+    .map((round: ReviewRound) => `Round ${round.round}: ${(round.findings || []).length} finding(s) reviewed`)
     .join('\n');
 
   const title = truncateText(command, 72);
@@ -254,7 +382,7 @@ export function buildPullRequestDraft({ task, workspace, reviewRounds, commitSum
   return { title, body };
 }
 
-export function renderArtifactContent(title, data) {
+export function renderArtifactContent(title: string, data: unknown): string {
   return [`# ${title}`, '', '```json', JSON.stringify(data, null, 2), '```'].join('\n');
 }
 

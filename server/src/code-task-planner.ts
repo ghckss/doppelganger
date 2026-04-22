@@ -2,11 +2,27 @@ import {
   buildFallbackDesignSpec,
   buildFallbackProductPlan,
   buildFallbackPromptPlan,
-  buildPullRequestDraft
+  buildPullRequestDraft,
+  type CodeTaskInput,
+  type DesignSpec,
+  type ProductPlan,
+  type PromptPlan,
+  type ReviewRound,
+  type WorkspaceSnapshot
 } from './code-task-prompts.ts';
 import { normalizeWhitespace, safeArray } from './utils.ts';
 
-function extractJsonObject(text) {
+interface PlannerGenerationClient {
+  getMode?: (scope?: string) => string;
+  isConfigured?: (scope?: string) => boolean;
+  createTextResponse: (input: {
+    instructions: string;
+    input: string;
+    scope: string;
+  }) => Promise<string | { text?: string }>;
+}
+
+function extractJsonObject(text: unknown): Record<string, unknown> {
   const trimmed = String(text || '').trim();
   const firstBrace = trimmed.indexOf('{');
   const lastBrace = trimmed.lastIndexOf('}');
@@ -17,11 +33,11 @@ function extractJsonObject(text) {
   return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
 }
 
-function compactArray(value) {
+function compactArray(value: unknown): string[] {
   return safeArray(value).map((item) => normalizeWhitespace(item)).filter(Boolean);
 }
 
-function describeWorkspace(workspace) {
+function describeWorkspace(workspace: WorkspaceSnapshot): string {
   return [
     `Repository root: ${workspace.git.root}`,
     `Repo slug: ${workspace.git.repoSlug || 'unknown'}`,
@@ -35,21 +51,13 @@ function describeWorkspace(workspace) {
 }
 
 export class CodeTaskPlanner {
-  generationClient: {
-    getMode?: (scope?: string) => string;
-    isConfigured?: (scope?: string) => boolean;
-    createTextResponse: (input: {
-      instructions: string;
-      input: string;
-      scope: string;
-    }) => Promise<string | { text?: string }>;
-  } | null;
+  generationClient: PlannerGenerationClient | null;
 
-  constructor(generationClient) {
+  constructor(generationClient: PlannerGenerationClient | null = null) {
     this.generationClient = generationClient;
   }
 
-  canUseModel(scope = 'code_planning') {
+  canUseModel(scope: string = 'code_planning'): boolean {
     if (!this.generationClient) {
       return false;
     }
@@ -62,7 +70,18 @@ export class CodeTaskPlanner {
     return true;
   }
 
-  async generateText({ instructions, input, scope = 'code_planning' }) {
+  async generateText({
+    instructions,
+    input,
+    scope = 'code_planning'
+  }: {
+    instructions: string;
+    input: string;
+    scope?: string;
+  }): Promise<string> {
+    if (!this.generationClient) {
+      throw new Error('Generation client is not configured');
+    }
     const response = await this.generationClient.createTextResponse({
       instructions,
       input,
@@ -71,7 +90,13 @@ export class CodeTaskPlanner {
     return typeof response === 'string' ? response : String(response?.text || '');
   }
 
-  async createPromptPlan({ task, workspace }) {
+  async createPromptPlan({
+    task,
+    workspace
+  }: {
+    task: CodeTaskInput;
+    workspace: WorkspaceSnapshot;
+  }): Promise<PromptPlan> {
     const fallback = buildFallbackPromptPlan({ task, workspace });
     if (!this.canUseModel('code_planning')) {
       return fallback;
@@ -107,7 +132,15 @@ export class CodeTaskPlanner {
     }
   }
 
-  async createProductPlan({ task, promptPlan, workspace }) {
+  async createProductPlan({
+    task,
+    promptPlan,
+    workspace
+  }: {
+    task: CodeTaskInput;
+    promptPlan: PromptPlan;
+    workspace: WorkspaceSnapshot;
+  }): Promise<ProductPlan> {
     const fallback = buildFallbackProductPlan({ task, promptPlan, workspace });
     if (!this.canUseModel('code_planning')) {
       return fallback;
@@ -143,7 +176,15 @@ export class CodeTaskPlanner {
     }
   }
 
-  async createDesignSpec({ task, promptPlan, workspace }) {
+  async createDesignSpec({
+    task,
+    promptPlan,
+    workspace
+  }: {
+    task: CodeTaskInput;
+    promptPlan: PromptPlan;
+    workspace: WorkspaceSnapshot;
+  }): Promise<DesignSpec> {
     const fallback = buildFallbackDesignSpec({ task, workspace });
     if (!this.canUseModel('code_planning')) {
       return fallback;
@@ -180,7 +221,17 @@ export class CodeTaskPlanner {
     }
   }
 
-  async createPullRequestDraft({ task, workspace, reviewRounds, commitSummary }) {
+  async createPullRequestDraft({
+    task,
+    workspace,
+    reviewRounds,
+    commitSummary
+  }: {
+    task: CodeTaskInput;
+    workspace: WorkspaceSnapshot;
+    reviewRounds: ReviewRound[];
+    commitSummary: string[];
+  }): Promise<{ title: string; body: string }> {
     const fallback = buildPullRequestDraft({ task, workspace, reviewRounds, commitSummary });
     if (!this.canUseModel('code_planning')) {
       return fallback;
