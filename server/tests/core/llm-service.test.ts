@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildFallbackSlackDraft, LlmService } from '../../src/llm-service.ts';
+import { buildFallbackSlackDraft, LlmService } from '../../src/services/llm-service.ts';
 
 const GITHUB_REVIEW_DISCLAIMER = '해당 리뷰는, pr의 diff 만 확인하여 작성된 리뷰입니다. 코드 작성자의 판단하에 수정 여부를 결정해주세요.';
 

@@ -1,7 +1,7 @@
-import { createRuntimeContainer } from './bootstrap/runtime-container.ts';
+import { createRuntimeContainer } from './runtime-container.ts';
 import { createDomainRegistry } from './domain-registry.ts';
-import { TaskService } from './task-service.ts';
-import { createHttpServer } from './server.ts';
+import { TaskService } from '../modules/tasks/task.service.ts';
+import { createHttpServer } from '../api/http-server.ts';
 
 interface CreateApplicationOptions {
   cwd?: string;

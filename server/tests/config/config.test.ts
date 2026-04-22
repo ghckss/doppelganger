@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { loadConfig } from '../../src/config.ts';
+import { loadConfig } from '../../src/core/config.ts';
 
 test('loadConfig reads .env file and normalizes lists', () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-config-'));

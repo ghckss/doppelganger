@@ -1,7 +1,7 @@
-import { createCodeExecutionModule } from './modules/code-execution/code-execution.module.ts';
-import { createGitHubReviewModule } from './modules/github-review/github-review.module.ts';
-import { createSlackMentionModule } from './modules/slack/slack-mention.module.ts';
-import type { DomainRegistry as DomainRegistryContract } from './runtime-contracts.ts';
+import { createCodeExecutionModule } from '../modules/code-execution/code-execution.module.ts';
+import { createGitHubReviewModule } from '../modules/github-review/github-review.module.ts';
+import { createSlackMentionModule } from '../modules/slack/slack-mention.module.ts';
+import type { DomainRegistry as DomainRegistryContract } from '../contracts/runtime-contracts.ts';
 
 export type DomainRegistry = DomainRegistryContract;
 

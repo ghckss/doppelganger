@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createRepository } from '../../src/db.ts';
-import { parseSlackStyleMemory, SLACK_STYLE_MEMORY_STATE_KEY } from '../../src/slack-style-memory.ts';
-import { TaskService } from '../../src/task-service.ts';
+import { createRepository } from '../../src/infra/db.ts';
+import { parseSlackStyleMemory, SLACK_STYLE_MEMORY_STATE_KEY } from '../../src/modules/slack/slack-style-memory.ts';
+import { TaskService } from '../../src/modules/tasks/task.service.ts';
 
 function createRepo() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-task-service-'));

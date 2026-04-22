@@ -1,4 +1,4 @@
-import type { loadConfig } from './config.ts';
+import type { loadConfig } from '../core/config.ts';
 
 export type AppConfig = ReturnType<typeof loadConfig>;
 

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createRepository } from '../../src/db.ts';
+import { createRepository } from '../../src/infra/db.ts';
 
 function createTempRepo() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-db-'));

@@ -1,4 +1,4 @@
-import { normalizeWhitespace, safeArray, truncateText } from './utils.ts';
+import { normalizeWhitespace, safeArray, truncateText } from '../core/utils.ts';
 
 const SLACK_REPLY_CATEGORIES = {
   action_request: {

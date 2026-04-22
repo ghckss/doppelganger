@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createId, nowIso, readJson, writeJson } from './utils.ts';
+import { createId, nowIso, readJson, writeJson } from '../core/utils.ts';
 
 function ensureDirectory(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

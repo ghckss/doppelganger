@@ -1,4 +1,4 @@
-import { createApplication } from './app.ts';
+import { createApplication } from './bootstrap/create-application.ts';
 
 async function main() {
   const application = createApplication({

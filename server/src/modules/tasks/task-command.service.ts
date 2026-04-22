@@ -2,7 +2,7 @@ import {
   appendSlackStyleMemory,
   SLACK_STYLE_MEMORY_STATE_KEY,
   stringifySlackStyleMemory
-} from '../../slack-style-memory.ts';
+} from '../slack/slack-style-memory.ts';
 import {
   assertTask,
   type TaskDomainMap,

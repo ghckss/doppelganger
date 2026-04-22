@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createHttpServer } from '../../src/server.ts';
+import { createHttpServer } from '../../src/api/http-server.ts';
 
 function createTaskServiceStub() {
   return {

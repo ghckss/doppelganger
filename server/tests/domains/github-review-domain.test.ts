@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createRepository } from '../../src/db.ts';
+import { createRepository } from '../../src/infra/db.ts';
 import { createGitHubReviewDomain } from '../../src/domains/github-review-domain.ts';
 
 function createRepo() {

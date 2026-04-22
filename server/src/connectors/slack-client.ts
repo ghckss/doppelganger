@@ -1,4 +1,4 @@
-import { formatSlackTimestamp, safeArray, toSlackText, truncateText } from '../utils.ts';
+import { formatSlackTimestamp, safeArray, toSlackText, truncateText } from '../core/utils.ts';
 
 function extractThreadTs(match) {
   if (match.thread_ts) {

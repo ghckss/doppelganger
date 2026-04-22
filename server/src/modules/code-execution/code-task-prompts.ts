@@ -1,4 +1,4 @@
-import { normalizeWhitespace, truncateText } from './utils.ts';
+import { normalizeWhitespace, truncateText } from '../../core/utils.ts';
 
 export interface CodeTaskPayload {
   command?: string;

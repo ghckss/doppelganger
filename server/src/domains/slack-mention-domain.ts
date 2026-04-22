@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeWhitespace, safeArray, truncateText } from '../utils.ts';
-import { buildSlackStyleGuide, SLACK_STYLE_MEMORY_STATE_KEY } from '../slack-style-memory.ts';
+import { normalizeWhitespace, safeArray, truncateText } from '../core/utils.ts';
+import { buildSlackStyleGuide, SLACK_STYLE_MEMORY_STATE_KEY } from '../modules/slack/slack-style-memory.ts';
 
 const CODE_REVIEW_STATUS = {
   NOT_CANDIDATE: 'not_candidate',

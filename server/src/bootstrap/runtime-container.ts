@@ -2,15 +2,15 @@ import { CodeTaskPlanner } from '../agents/code-task-planner.agent.ts';
 import { CliGenerationClient } from '../agents/cli-generation.agent.ts';
 import { ClaudeCliRunner, CodexCliRunner } from '../agents/cli-runner.agent.ts';
 import { HovisReviewClient } from '../agents/external-review.agent.ts';
-import { loadConfig } from '../config.ts';
+import { loadConfig } from '../core/config.ts';
 import { GitHubClient } from '../connectors/github-client.ts';
 import { OpenAIClient } from '../connectors/openai-client.ts';
 import { SlackClient } from '../connectors/slack-client.ts';
 import { WorkspaceRunner } from '../connectors/workspace-runner.ts';
-import { createRepository } from '../db.ts';
-import { GenerationClient } from '../generation-client.ts';
-import { LlmService } from '../llm-service.ts';
-import type { AppConfig, Repository } from '../runtime-contracts.ts';
+import { createRepository } from '../infra/db.ts';
+import { GenerationClient } from '../services/generation-client.ts';
+import { LlmService } from '../services/llm-service.ts';
+import type { AppConfig, Repository } from '../contracts/runtime-contracts.ts';
 
 interface CreateRuntimeContainerOptions {
   cwd?: string;

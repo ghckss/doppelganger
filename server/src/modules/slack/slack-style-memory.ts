@@ -1,4 +1,4 @@
-import { normalizeWhitespace, safeArray } from './utils.ts';
+import { normalizeWhitespace, safeArray } from '../../core/utils.ts';
 
 export const SLACK_STYLE_MEMORY_STATE_KEY = 'slack_reply_style_memory_v1';
 const SLACK_STYLE_MEMORY_VERSION = 1;

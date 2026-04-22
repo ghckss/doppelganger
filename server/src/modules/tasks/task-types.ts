@@ -3,7 +3,7 @@ import type {
   Repository,
   TaskRecord,
   TaskServiceDependencies
-} from '../../runtime-contracts.ts';
+} from '../../contracts/runtime-contracts.ts';
 
 export const CODE_EXECUTION_RECOVERY_ERROR = '앱이 재시작되어 코드 작업 실행이 중단되었습니다. 작업을 다시 실행해 주세요.';
 export const CODE_REVIEW_RECOVERY_ERROR = '앱이 재시작되어 코드 검토 실행이 중단되었습니다. 코드 검토를 다시 실행해 주세요.';

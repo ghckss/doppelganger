@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { logCommandEnd, logCommandStart } from '../command-log.ts';
+import { logCommandEnd, logCommandStart } from '../core/command-log.ts';
 
 const STREAM_CAPTURE_LIMIT = 256 * 1024;
 

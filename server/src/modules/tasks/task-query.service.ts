@@ -1,4 +1,4 @@
-import { getConnectorReadiness } from '../../config.ts';
+import { getConnectorReadiness } from '../../core/config.ts';
 import {
   assertTask,
   type TaskDetail,

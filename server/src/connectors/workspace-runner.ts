@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { logCommandEnd, logCommandStart } from '../command-log.ts';
+import { logCommandEnd, logCommandStart } from '../core/command-log.ts';
 
 const execFileAsync = promisify(execFile);
 

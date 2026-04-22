@@ -1,7 +1,7 @@
-import { TaskBackgroundService } from './modules/tasks/task-background.service.ts';
-import { TaskCommandService } from './modules/tasks/task-command.service.ts';
-import { TaskQueryService } from './modules/tasks/task-query.service.ts';
-import type { TaskServiceDependencies } from './runtime-contracts.ts';
+import { TaskBackgroundService } from './task-background.service.ts';
+import { TaskCommandService } from './task-command.service.ts';
+import { TaskQueryService } from './task-query.service.ts';
+import type { TaskServiceDependencies } from '../../contracts/runtime-contracts.ts';
 
 export class TaskService {
   config: TaskServiceDependencies['config'];

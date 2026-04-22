@@ -5,7 +5,7 @@ import {
   buildSlackStyleGuide,
   parseSlackStyleMemory,
   stringifySlackStyleMemory
-} from '../../src/slack-style-memory.ts';
+} from '../../src/modules/slack/slack-style-memory.ts';
 
 test('slack style memory preserves multiline replies', () => {
   const state = appendSlackStyleMemory('', {
