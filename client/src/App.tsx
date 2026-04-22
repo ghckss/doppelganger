@@ -140,19 +140,7 @@ export default function App() {
   const githubDomain = githubDetail ? findDomain(tasksQuery.data?.domains, githubDetail.task.domain) : null;
 
   const slackCodeReview = slackDetail ? getCodeReviewStatus(slackDetail.task) : null;
-  const slackCodeReviewPayload = slackDetail
-    ? ((slackDetail.task.payload.codeReview as Record<string, unknown> | undefined) || undefined)
-    : undefined;
-  const slackCodeReviewStatus = asText(slackCodeReviewPayload?.analysisStatus).toLowerCase();
-  const slackCodeReviewEnabled = Boolean(slackCodeReviewPayload?.enabled);
-  const showSlackCodeReviewSection = Boolean(
-    slackDetail
-    && (
-      slackCodeReviewEnabled
-      || ['running', 'completed', 'failed'].includes(slackCodeReviewStatus)
-      || (slackCodeReview?.progressTotalSteps || 0) > 0
-    )
-  );
+  const showSlackCodeReviewSection = Boolean(slackDetail);
 
   const loadingTasks = tasksQuery.isFetching || codeTasksQuery.isFetching;
   const anyDetailLoading = detailQueries.some((query) => query.isFetching);

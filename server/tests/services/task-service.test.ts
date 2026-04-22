@@ -237,7 +237,7 @@ test('TaskService returns the first pending Slack task in queue order', () => {
   assert.equal(service.getFirstPendingTaskId({ domain: 'slack_mention' }), newest.id);
 });
 
-test('TaskService starts Slack code review automatically after mention polling', async () => {
+test('TaskService does not start Slack code review automatically after mention polling', async () => {
   const repo = createRepo();
   repo.upsertTask({
     domain: 'slack_mention',
@@ -289,9 +289,9 @@ test('TaskService starts Slack code review automatically after mention polling',
   const result = await service.pollSlackMentions();
 
   assert.equal(result.matchesFound, 2);
-  assert.equal(result.autoCodeReviewsStarted, 1);
-  assert.equal(result.autoCodeReviewsSkipped, 1);
-  assert.equal(runCodeReviewCalls, 1);
+  assert.equal(result.autoCodeReviewsStarted, 0);
+  assert.equal(result.autoCodeReviewsSkipped, 0);
+  assert.equal(runCodeReviewCalls, 0);
 });
 
 test('TaskService recovers interrupted background jobs on initialization', () => {

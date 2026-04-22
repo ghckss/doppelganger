@@ -88,6 +88,7 @@ A practical setup is often:
 
 ## Slack manual code review in detail view
 - By default, Slack polling/draft generation does not query repositories.
+- Slack 코드 분석은 자동으로 시작되지 않으며, 상세 화면에서 `코드 검토 실행`을 눌렀을 때만 실행됩니다.
 - In Slack task detail, click `코드 검토 실행` to run a read-only Codex/Claude analysis from thread context.
 - 코드 검토 실행 시 에이전트가 스레드 대화 + 저장소 문서(`README`, `docs/`)를 먼저 읽고 저장소/조회 폴더를 자동 선택합니다. 고정 키워드 매핑 규칙에는 의존하지 않습니다.
 - After analysis completes, the server regenerates the reply draft with code evidence.

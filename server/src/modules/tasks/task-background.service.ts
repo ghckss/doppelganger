@@ -132,31 +132,8 @@ export class TaskBackgroundService {
   async pollSlackMentions(): Promise<SlackPollResult> {
     const domain = this.domains.slack_mention;
     const pollResult = await domain.poll();
-    const pendingSlackTasks = this.queryService.listTasks({ domain: 'slack_mention', includeResolved: false });
-    let autoCodeReviewsStarted = 0;
-    let autoCodeReviewsSkipped = 0;
-
-    for (const task of pendingSlackTasks) {
-      const payload = task.payload && typeof task.payload === 'object'
-        ? task.payload as Record<string, unknown>
-        : {};
-      const codeReviewRaw = payload.codeReview;
-      const codeReview = codeReviewRaw && typeof codeReviewRaw === 'object'
-        ? codeReviewRaw as Record<string, unknown>
-        : {};
-      const analysisStatus = String(codeReview.analysisStatus || '').toLowerCase();
-      if (analysisStatus && analysisStatus !== 'not_requested') {
-        autoCodeReviewsSkipped += 1;
-        continue;
-      }
-
-      const started = await this.commandService.startSlackCodeReview(task.id, {});
-      if (started.started) {
-        autoCodeReviewsStarted += 1;
-      } else {
-        autoCodeReviewsSkipped += 1;
-      }
-    }
+    const autoCodeReviewsStarted = 0;
+    const autoCodeReviewsSkipped = 0;
 
     return {
       ...((pollResult && typeof pollResult === 'object' ? pollResult : {}) as Record<string, unknown>),
