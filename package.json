@@ -4,18 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server/src/index.js",
-    "dev": "node --watch server/src/index.js",
-    "dev:server": "node --watch server/src/index.js",
+    "start": "tsx server/src/index.ts",
+    "dev": "tsx watch server/src/index.ts",
+    "dev:server": "tsx watch server/src/index.ts",
     "dev:client": "npm --prefix client run dev",
-    "poll:slack": "node server/src/cli.js poll slack-mentions",
-    "poll:github": "node server/src/cli.js poll github-reviews",
-    "test": "node --test \"server/tests/**/*.test.js\"",
+    "poll:slack": "tsx server/src/cli.ts poll slack-mentions",
+    "poll:github": "tsx server/src/cli.ts poll github-reviews",
+    "test": "node --import tsx --test \"server/tests/**/*.test.ts\"",
     "typecheck:server": "node ./node_modules/typescript/bin/tsc -p server/tsconfig.json --noEmit",
     "build:client": "npm --prefix client run build",
     "build": "npm run build:client"
   },
   "devDependencies": {
+    "tsx": "^4.21.0",
     "typescript": "^5.7.3"
   }
 }
