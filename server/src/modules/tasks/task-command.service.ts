@@ -5,6 +5,9 @@ import {
 } from '../../slack-style-memory.ts';
 import {
   assertTask,
+  type TaskDomainMap,
+  type TaskRepository,
+  type TaskRecord,
   type TaskModuleDependencies,
   type TaskQueryServiceLike
 } from './task-types.ts';
@@ -15,9 +18,9 @@ interface TaskCommandDependencies extends TaskModuleDependencies {
 }
 
 export class TaskCommandService {
-  config: any;
-  repo: any;
-  domains: Record<string, any>;
+  config: TaskModuleDependencies['config'];
+  repo: TaskRepository;
+  domains: TaskDomainMap;
   queryService: TaskQueryServiceLike;
   slackCodeReviewJobs: Map<string, Promise<unknown>>;
 
@@ -65,10 +68,11 @@ export class TaskCommandService {
         }
       });
       return this.queryService.getTaskDetail(taskId);
-    } catch (error: any) {
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       this.repo.logExecution(taskId, 'run_slack_code_review', 'failed', {
         request: options,
-        error: error.message
+        error: errorMessage
       });
       throw error;
     }
@@ -129,8 +133,12 @@ export class TaskCommandService {
     }
 
     const domain = this.domains.code_execution;
-    const started = await domain.start(taskId, { resumeFromCheckpoint: false });
-    if (started && typeof started === 'object' && started.started === false) {
+    const startResult = await domain.start(taskId, { resumeFromCheckpoint: false });
+    const alreadyRunning = startResult
+      && typeof startResult === 'object'
+      && 'started' in startResult
+      && (startResult as { started?: boolean }).started === false;
+    if (alreadyRunning) {
       throw new Error('작업이 이미 실행 중입니다');
     }
     return this.queryService.getTaskDetail(taskId);
@@ -148,8 +156,12 @@ export class TaskCommandService {
     }
 
     const domain = this.domains.code_execution;
-    const started = await domain.start(taskId, { resumeFromCheckpoint: true });
-    if (started && typeof started === 'object' && started.started === false) {
+    const startResult = await domain.start(taskId, { resumeFromCheckpoint: true });
+    const alreadyRunning = startResult
+      && typeof startResult === 'object'
+      && 'started' in startResult
+      && (startResult as { started?: boolean }).started === false;
+    if (alreadyRunning) {
       throw new Error('작업이 이미 실행 중입니다');
     }
     this.repo.logExecution(taskId, 'resume_code_execution', 'success');
@@ -266,10 +278,11 @@ export class TaskCommandService {
         },
         response: result
       });
-    } catch (error: any) {
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       this.repo.updateTask(taskId, {
         status: 'failed',
-        lastError: error.message
+        lastError: errorMessage
       });
       this.repo.logExecution(taskId, 'execute', 'failed', {
         request: {
@@ -277,7 +290,7 @@ export class TaskCommandService {
           reactionName,
           addReaction: Boolean(addReaction)
         },
-        error: error.message
+        error: errorMessage
       });
       throw error;
     }
@@ -285,7 +298,7 @@ export class TaskCommandService {
     return this.queryService.getTaskDetail(taskId);
   }
 
-  captureSlackStyleFeedback(task: any, { message }: { message?: string }) {
+  captureSlackStyleFeedback(task: TaskRecord | null, { message }: { message?: string }) {
     if (!task || task.domain !== 'slack_mention') {
       return;
     }
@@ -296,7 +309,7 @@ export class TaskCommandService {
     }
 
     const drafts = this.repo.listDrafts(task.id);
-    const generatedDraft = drafts.find((draft: any) => {
+    const generatedDraft = drafts.find((draft) => {
       const provider = String(draft?.metadata?.provider || '').trim().toLowerCase();
       return provider && provider !== 'manual' && String(draft?.content || '').trim();
     });

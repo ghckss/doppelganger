@@ -1,11 +1,12 @@
 import { TaskBackgroundService } from './modules/tasks/task-background.service.ts';
 import { TaskCommandService } from './modules/tasks/task-command.service.ts';
 import { TaskQueryService } from './modules/tasks/task-query.service.ts';
+import type { TaskServiceDependencies } from './runtime-contracts.ts';
 
 export class TaskService {
-  config: any;
-  repo: any;
-  domains: Record<string, any>;
+  config: TaskServiceDependencies['config'];
+  repo: TaskServiceDependencies['repo'];
+  domains: TaskServiceDependencies['domains'];
   queryService: TaskQueryService;
   commandService: TaskCommandService;
   backgroundService: TaskBackgroundService;
@@ -15,7 +16,7 @@ export class TaskService {
     slackCodeReviewRecovered: number;
   };
 
-  constructor({ config, repo, domains }: { config: any; repo: any; domains: Record<string, any> }) {
+  constructor({ config, repo, domains }: TaskServiceDependencies) {
     this.config = config;
     this.repo = repo;
     this.domains = domains;

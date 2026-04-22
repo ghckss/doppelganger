@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { GenerationClient } from '../src/generation-client.ts';
+import { GenerationClient } from '../../src/generation-client.ts';
 
 function createConfig(overrides = {}) {
   return {

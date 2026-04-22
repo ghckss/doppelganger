@@ -4,10 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import test from 'node:test';
-import { createRepository } from '../src/db.ts';
-import { WorkspaceRunner } from '../src/connectors/workspace-runner.ts';
-import { GitHubApiError } from '../src/connectors/github-client.ts';
-import { createCodeExecutionDomain } from '../src/domains/code-execution-domain.ts';
+import { createRepository } from '../../src/db.ts';
+import { WorkspaceRunner } from '../../src/connectors/workspace-runner.ts';
+import { GitHubApiError } from '../../src/connectors/github-client.ts';
+import { createCodeExecutionDomain } from '../../src/domains/code-execution-domain.ts';
 
 function run(command, args, cwd) {
   execFileSync(command, args, { cwd, stdio: 'pipe' });

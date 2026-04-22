@@ -3,7 +3,9 @@ import {
   CODE_REVIEW_RECOVERY_ERROR,
   toInteger,
   type TaskCommandServiceLike,
+  type TaskDomainMap,
   type TaskModuleDependencies,
+  type TaskRepository,
   type TaskQueryServiceLike
 } from './task-types.ts';
 
@@ -12,9 +14,18 @@ interface TaskBackgroundDependencies extends TaskModuleDependencies {
   commandService: TaskCommandServiceLike;
 }
 
+interface SlackPollResult {
+  matchesFound?: number;
+  tasksProcessed?: number;
+  draftsGenerated?: number;
+  autoCodeReviewsStarted: number;
+  autoCodeReviewsSkipped: number;
+  [key: string]: unknown;
+}
+
 export class TaskBackgroundService {
-  repo: any;
-  domains: Record<string, any>;
+  repo: TaskRepository;
+  domains: TaskDomainMap;
   queryService: TaskQueryServiceLike;
   commandService: TaskCommandServiceLike;
 
@@ -33,9 +44,12 @@ export class TaskBackgroundService {
 
     for (const task of tasks) {
       if (task.domain === 'code_execution' && task.status === 'running') {
-        const currentResult = task.result && typeof task.result === 'object' ? task.result : {};
-        const previousProgress = currentResult.executionProgress && typeof currentResult.executionProgress === 'object'
-          ? currentResult.executionProgress
+        const currentResult = task.result && typeof task.result === 'object'
+          ? task.result as Record<string, unknown>
+          : {};
+        const previousProgressRaw = currentResult.executionProgress;
+        const previousProgress = previousProgressRaw && typeof previousProgressRaw === 'object'
+          ? previousProgressRaw as Record<string, unknown>
           : {};
         const totalSteps = Math.max(1, toInteger(previousProgress.totalSteps, 8));
         const currentStep = Math.max(0, Math.min(totalSteps, toInteger(previousProgress.currentStep, 0)));
@@ -67,8 +81,14 @@ export class TaskBackgroundService {
       }
 
       if (task.domain === 'slack_mention') {
-        const codeReview = task.payload?.codeReview;
-        if (String(codeReview?.analysisStatus || '').toLowerCase() !== 'running') {
+        const payload = task.payload && typeof task.payload === 'object'
+          ? task.payload as Record<string, unknown>
+          : {};
+        const codeReviewRaw = payload.codeReview;
+        const codeReview = codeReviewRaw && typeof codeReviewRaw === 'object'
+          ? codeReviewRaw as Record<string, unknown>
+          : {};
+        if (String(codeReview.analysisStatus || '').toLowerCase() !== 'running') {
           continue;
         }
 
@@ -79,9 +99,9 @@ export class TaskBackgroundService {
 
         this.repo.updateTask(task.id, {
           payload: {
-            ...(task.payload || {}),
+            ...payload,
             codeReview: {
-              ...(codeReview || {}),
+              ...codeReview,
               analysisStatus: 'failed',
               progressStep,
               progressTotalSteps: totalSteps,
@@ -109,7 +129,7 @@ export class TaskBackgroundService {
     };
   }
 
-  async pollSlackMentions() {
+  async pollSlackMentions(): Promise<SlackPollResult> {
     const domain = this.domains.slack_mention;
     const pollResult = await domain.poll();
     const pendingSlackTasks = this.queryService.listTasks({ domain: 'slack_mention', includeResolved: false });
@@ -117,7 +137,14 @@ export class TaskBackgroundService {
     let autoCodeReviewsSkipped = 0;
 
     for (const task of pendingSlackTasks) {
-      const analysisStatus = String(task.payload?.codeReview?.analysisStatus || '').toLowerCase();
+      const payload = task.payload && typeof task.payload === 'object'
+        ? task.payload as Record<string, unknown>
+        : {};
+      const codeReviewRaw = payload.codeReview;
+      const codeReview = codeReviewRaw && typeof codeReviewRaw === 'object'
+        ? codeReviewRaw as Record<string, unknown>
+        : {};
+      const analysisStatus = String(codeReview.analysisStatus || '').toLowerCase();
       if (analysisStatus && analysisStatus !== 'not_requested') {
         autoCodeReviewsSkipped += 1;
         continue;
@@ -132,7 +159,7 @@ export class TaskBackgroundService {
     }
 
     return {
-      ...pollResult,
+      ...((pollResult && typeof pollResult === 'object' ? pollResult : {}) as Record<string, unknown>),
       autoCodeReviewsStarted,
       autoCodeReviewsSkipped
     };

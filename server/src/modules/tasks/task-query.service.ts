@@ -1,10 +1,16 @@
 import { getConnectorReadiness } from '../../config.ts';
-import { assertTask, type TaskModuleDependencies } from './task-types.ts';
+import {
+  assertTask,
+  type TaskDetail,
+  type TaskDomainMap,
+  type TaskModuleDependencies,
+  type TaskRepository
+} from './task-types.ts';
 
 export class TaskQueryService {
-  config: any;
-  repo: any;
-  domains: Record<string, any>;
+  config: TaskModuleDependencies['config'];
+  repo: TaskRepository;
+  domains: TaskDomainMap;
 
   constructor({ config, repo, domains }: TaskModuleDependencies) {
     this.config = config;
@@ -17,7 +23,7 @@ export class TaskQueryService {
     if (includeResolved) {
       return tasks;
     }
-    return tasks.filter((task: any) => task.status !== 'done' && task.status !== 'ignored');
+    return tasks.filter((task) => task.status !== 'done' && task.status !== 'ignored');
   }
 
   getNextPendingTaskId(taskId: string, { domain }: { domain?: string } = {}) {
@@ -26,7 +32,7 @@ export class TaskQueryService {
       return null;
     }
 
-    const currentIndex = tasks.findIndex((task: any) => task.id === taskId);
+    const currentIndex = tasks.findIndex((task) => task.id === taskId);
     if (currentIndex === -1) {
       return tasks[0]?.id || null;
     }
@@ -45,11 +51,11 @@ export class TaskQueryService {
   getDomainCatalog() {
     const readiness = getConnectorReadiness(this.config);
 
-    return Object.values(this.domains).map((domain: any) => ({
-      id: domain.id,
-      label: domain.label,
-      implemented: domain.implemented,
-      capabilities: domain.capabilities,
+    return Object.values(this.domains).map((domain) => ({
+      id: domain.id || '',
+      label: domain.label || '',
+      implemented: Boolean(domain.implemented),
+      capabilities: domain.capabilities || {},
       setupKeys: domain.setupKeys || [],
       readiness
     }));
@@ -67,7 +73,7 @@ export class TaskQueryService {
     return domain.listProjects();
   }
 
-  getTaskDetail(taskId: string) {
+  getTaskDetail(taskId: string): TaskDetail {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     const artifacts = this.repo.listArtifacts(taskId);
     const drafts = this.repo.listDrafts(taskId);
@@ -78,9 +84,9 @@ export class TaskQueryService {
       task,
       artifacts,
       drafts,
-      latestDraft: drafts[0] || null,
+      latestDraft: drafts[0] || undefined,
       executions,
-      domain
+      domain: domain || undefined
     };
   }
 }

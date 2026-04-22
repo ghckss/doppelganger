@@ -7,6 +7,14 @@ Project layout:
 - `client/`: React + Vite UI (신규 기본 UI)
 - `docs/`: fromm/kiwee 분석 문서 및 운영 문서
 
+Server architecture (phase 2):
+- `server/src/bootstrap/runtime-container.ts`: config/repository/connectors/LLM 런타임 DI 조립
+- `server/src/domain-registry.ts`: 도메인 모듈 등록
+- `server/src/modules/tasks/*`: 조회/명령/백그라운드 서비스 분리
+- `server/src/api/routes/*`: API 라우트 분리
+- `server/src/runtime-contracts.ts`: 서비스 경계 계약 타입
+- `server/tests/{api,connectors,config,core,domains,services}`: 기능별 테스트 디렉토리
+
 Current state:
 - Slack mention handling is implemented end-to-end, including automatic summary and reply-draft generation during polling.
 - Slack mention detail supports optional manual repository analysis for deeper replies, while default polling/drafting does not inspect repositories.
