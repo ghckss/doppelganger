@@ -300,6 +300,9 @@ export function buildReviewPrompt({
       'Return valid JSON only.',
       'Use findings ordered by severity.',
       'Each finding must include id, severity, category, title, description, fileRefs, suggestedFix, and mustFix.',
+      'Harness rule mismatch must not block review execution; convert mismatches into actionable findings.',
+      'Use category `code_quality` or `spec_mismatch` for harness-policy findings as appropriate.',
+      'For low-risk cosmetic harness mismatches outside the user request scope, keep mustFix=false and explain why.',
       'If there are no findings, return an empty findings array and explain residual risks if any.'
     ]))
   ];
@@ -332,6 +335,7 @@ export function buildPatchPrompt({
     joinSection('Constraints', sentenceList([
       `Base branch remains ${workspace.git.baseBranch}.`,
       'Commit the review fixes as a dedicated commit for this round.',
+      'Apply harness-related findings when they are in scope; do not widen patch scope only for cosmetic policy alignment.',
       'Leave the working tree clean at the end.',
       'Do not push or open a pull request.'
     ])),
