@@ -206,6 +206,11 @@ Resume behavior:
 - 코드 작업 완료 시 작업 브랜치 커밋을 `baseBranch`(기준 브랜치)에 `--ff-only`로 먼저 병합한 뒤, 작업 브랜치(`doppelganger/...`)를 로컬에서 삭제하고 기준 브랜치로 복귀합니다.
 - 병합에 실패하면 작업은 `failed`로 전환되고 작업 브랜치는 보존됩니다.
 
+### Code task harness rules
+- 코드 작업 에이전트(coding/review/patch)에 공통/단계별 규칙을 주입하려면 아래 파일을 수정합니다.
+- `server/src/modules/code-execution/code-task-harness.ts`
+- `CODE_TASK_HARNESS_RULES.global|coding|review|patch` 배열에 문자열 규칙을 추가하면 다음 실행부터 프롬프트에 자동 포함됩니다.
+
 ## Notes
 - 현재 서버는 기존 Node.js 런타임을 유지하고, TypeScript 전환 기반(`server/tsconfig.json`)만 먼저 적용했습니다.
 - 클라이언트는 Next.js 대신 React + Vite로 분리해 서버 도메인 로직과 UI 배포 수명주기를 분리했습니다.
