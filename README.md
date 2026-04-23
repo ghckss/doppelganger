@@ -44,25 +44,30 @@ Current state:
 - SQLite available through Node's built-in `node:sqlite`
 
 ## Setup
-1. Copy `server/.env.example` to `server/.env`.
-2. Fill in the server/service keys you want to use.
-3. Set client API target in `client/.env`:
+1. Move to the server workspace:
+   ```bash
+   cd server
+   npm install
+   ```
+2. Copy `.env.example` to `.env`.
+3. Fill in the server/service keys you want to use.
+4. Set client API target in `../client/.env`:
    ```bash
    VITE_SERVER_URL=http://127.0.0.1:4318
    ```
-   - If client and server origins differ in dev, add allowed origins in `server/.env`:
+   - If client and server origins differ in dev, add allowed origins in `./.env`:
      ```bash
      APP_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
      ```
-4. Start the server:
+5. Start the server:
    ```bash
    npm start
    ```
-5. Start the client (development):
+6. Start the client (development):
    ```bash
    npm run dev:client
    ```
-6. Open:
+7. Open:
    - React UI (Vite dev): `http://127.0.0.1:5173`
    - Server API: `http://127.0.0.1:4318/api/*`
 
@@ -83,7 +88,7 @@ A practical setup is often:
 
 ## Cron example
 ```cron
-*/10 * * * * cd /Users/hwanghochan/workspace/playground/doppelganger && /usr/bin/env node server/src/cli.js poll slack-mentions >> .local/cron.log 2>&1
+*/10 * * * * cd /Users/hwanghochan/workspace/playground/doppelganger/server && npm run poll:slack >> .local/cron.log 2>&1
 ```
 
 ## Slack manual code review in detail view
@@ -111,6 +116,7 @@ Notes:
 - Browser speech recognition support is required (Chrome-family recommended).
 
 ## Scripts
+Run scripts in `server/`:
 - `npm start`: run the HTTP server
 - `npm run dev`: run the HTTP server with watch mode
 - `npm run dev:client`: run the React client in Vite dev mode
