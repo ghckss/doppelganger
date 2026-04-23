@@ -174,7 +174,7 @@ Run scripts in `server/`:
 4. Open `http://127.0.0.1:5173` and use the project picker in the "코드 작업 생성" 영역.
    - 필요하면 `작업 브랜치(선택)`에 원하는 브랜치명을 직접 입력할 수 있습니다.
 5. Select the agent (`Codex` or `Claude`) per task.
-6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
+6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent (including in-step harness self-check/fix), perform three review loops, and stop before PR creation.
 7. In task detail, `PR 생성` appears only after step `8/8` is complete.
 8. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
 9. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
@@ -196,7 +196,7 @@ Run scripts in `server/`:
 - `0`: queued (작업 시작 대기)
 - `1`: 작업 환경 점검 + 브랜치 준비
 - `2`: 프롬프트/기획/디자인 계획 생성
-- `3`: 코딩 에이전트 실행
+- `3`: 코딩 에이전트 실행 + 하네스 자체 점검/수정
 - `4`: 리뷰/수정 라운드 1
 - `5`: 리뷰/수정 라운드 2
 - `6`: 리뷰/수정 라운드 3
@@ -216,6 +216,8 @@ Resume behavior:
 - 코드 작업 에이전트(coding/review/patch)에 공통/단계별 규칙을 주입하려면 아래 파일을 수정합니다.
 - `server/src/modules/code-execution/code-task-harness.ts`
 - `CODE_TASK_HARNESS_RULES.global|coding|review|patch` 배열에 문자열 규칙을 추가하면 다음 실행부터 프롬프트에 자동 포함됩니다.
+- 코딩 단계는 하네스 규칙 위반을 리뷰 라운드로 넘기지 않고 단계 내부에서 먼저 수정하도록 유도합니다.
+- 리뷰 단계는 하네스의 단순 스타일 준수보다 정책/구조/안정성 관점의 이슈 식별에 집중합니다.
 
 ## Notes
 - 현재 서버는 기존 Node.js 런타임을 유지하고, TypeScript 전환 기반(`server/tsconfig.json`)만 먼저 적용했습니다.

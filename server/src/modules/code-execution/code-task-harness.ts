@@ -143,7 +143,6 @@ function collectRuleGroups(stage: CodeTaskHarnessStage): Array<{ title: string; 
   if (stage === 'review') {
     return [
       { title: 'Global Rules', rules: globalRules },
-      { title: 'Coding Compliance Checklist', rules: codingRules },
       { title: 'Review Stage Rules', rules: reviewRules }
     ];
   }
@@ -151,6 +150,26 @@ function collectRuleGroups(stage: CodeTaskHarnessStage): Array<{ title: string; 
   return [
     { title: 'Global Rules', rules: globalRules },
     { title: 'Patch Stage Rules', rules: patchRules }
+  ];
+}
+
+function stageGuidance(stage: CodeTaskHarnessStage): string[] {
+  if (stage === 'coding') {
+    return [
+      'Treat rule mismatches as in-stage rework: fix them before returning final JSON when the fix is safe and in scope.',
+      'Do not defer harness-only cleanup to review/patch stages unless the change is unsafe in the current run.'
+    ];
+  }
+
+  if (stage === 'review') {
+    return [
+      'Prioritize behavioral regressions, structural risks, and policy/safety concerns.',
+      'Do not raise findings for cosmetic/style-only harness mismatches that should already be handled in coding.'
+    ];
+  }
+
+  return [
+    'Apply review findings safely with minimal diff and avoid widening scope.'
   ];
 }
 
@@ -163,7 +182,8 @@ export function buildCodeTaskHarnessSection(stage: CodeTaskHarnessStage): string
   const sections: string[] = [
     '## Execution Harness',
     'The following rules are quality guidance for this run.',
-    'Do not abort execution solely for rule mismatch. If mismatch is found, report it as actionable findings and continue best-effort completion.'
+    'Do not abort execution solely for rule mismatch.',
+    ...stageGuidance(stage)
   ];
 
   groups.forEach((group) => {
