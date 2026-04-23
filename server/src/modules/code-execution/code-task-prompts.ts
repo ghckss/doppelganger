@@ -1,4 +1,5 @@
 import { normalizeWhitespace, truncateText } from '../../core/utils.ts';
+import { applyCodeTaskHarnessPrompt } from './code-task-harness.ts';
 
 export interface CodeTaskPayload {
   command?: string;
@@ -259,7 +260,7 @@ export function buildCodingPrompt({
     ].join('\n'))
   ];
 
-  return sections.join('\n\n');
+  return applyCodeTaskHarnessPrompt('coding', sections.join('\n\n'));
 }
 
 export function buildReviewPrompt({
@@ -303,7 +304,7 @@ export function buildReviewPrompt({
     ]))
   ];
 
-  return sections.join('\n\n');
+  return applyCodeTaskHarnessPrompt('review', sections.join('\n\n'));
 }
 
 export function buildPatchPrompt({
@@ -344,7 +345,7 @@ export function buildPatchPrompt({
     ].join('\n'))
   ];
 
-  return sections.join('\n\n');
+  return applyCodeTaskHarnessPrompt('patch', sections.join('\n\n'));
 }
 
 export function buildPullRequestDraft({
