@@ -92,6 +92,7 @@ export interface TaskDomain extends DomainDescriptor {
   runCodeReview?: (...args: unknown[]) => Promise<Record<string, unknown>>;
   listProjects?: () => unknown[];
   createTask?: (input: Record<string, unknown>) => Promise<TaskRecord>;
+  savePlanSelections?: (taskId: string, options?: Record<string, unknown>) => TaskRecord | Promise<TaskRecord>;
   start?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
   createPullRequest?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
 }

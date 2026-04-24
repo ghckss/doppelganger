@@ -173,13 +173,18 @@ Run scripts in `server/`:
    - Claude: `CLAUDE_COMMAND` (default `claude`)
 4. Open `http://127.0.0.1:5173` and use the project picker in the "코드 작업 생성" 영역.
    - 필요하면 `작업 브랜치(선택)`에 원하는 브랜치명을 직접 입력할 수 있습니다.
+   - 실행 모드는 `전체 실행`(플랜+코딩) 또는 `플랜 모드`(계획/확인 요청) 중에서 선택할 수 있습니다.
 5. Select the agent (`Codex` or `Claude`) per task.
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent (including in-step harness self-check/fix), perform one review loop, and stop before PR creation.
-7. In task detail, `PR 생성` appears only after step `6/6` is complete.
-8. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
-9. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
-10. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
-11. 실행 중 목록은 `running` 상태만 보이며, `이전 작업 이어가기` 모달에서 완료/승인대기/실패 작업을 선택해 후속 작업을 시작할 수 있습니다.
+7. `플랜 모드`를 선택하면 코딩은 실행하지 않고 계획 + 확인 요청 항목만 생성됩니다.
+8. 플랜 모드 카드에서 확인 항목을 선택/저장한 뒤 `플랜 확정 후 코드 실행`으로 같은 작업을 이어서 실행할 수 있습니다.
+9. 코드 실행이 완료되면 task는 `awaiting_approval` 상태로 PR 생성 대기 상태가 됩니다.
+10. In task detail, `PR 생성` appears only after step `6/6` is complete.
+11. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
+12. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
+13. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
+14. 실행 중 목록은 `running` 상태의 전체 실행 작업만 보이며, 플랜 모드 선택 대기 작업은 별도 `플랜 모드 확인 요청` 영역에 표시됩니다.
+15. `이전 작업 이어가기` 모달에서 완료/승인대기/실패 작업을 선택해 후속 작업을 시작할 수 있습니다.
 
 ### PR creation rules
 - Source template: `<selected repository>/.github/PULL_REQUEST_TEMPLATE.md`
@@ -201,6 +206,12 @@ Run scripts in `server/`:
 - `4`: 리뷰/수정 라운드 1
 - `5`: PR 초안 정리
 - `6`: 코드 작업 완료
+
+### Plan mode step map (`executionProgress.currentStep`, `executionMode=plan`)
+- `0`: queued (플랜 모드 시작 대기)
+- `1`: 플랜 모드 작업 환경 점검
+- `2`: 플랜 생성 + 확인 요청 항목 정리
+- `3`: 플랜 모드 완료 (사용자 선택 대기 또는 즉시 실행 가능)
 
 Resume behavior:
 - `코드 작업 재개`는 항상 1단계부터 다시 시작하지 않습니다.

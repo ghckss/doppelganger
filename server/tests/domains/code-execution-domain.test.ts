@@ -1372,3 +1372,292 @@ test('createTask rejects continuation when previous task is still running', asyn
     /현재 상태에서는 이어서 실행할 수 없습니다/
   );
 });
+
+test('code execution domain supports plan mode and stops after planning with confirmation requests', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  let cliRunCount = 0;
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        cliRunCount += 1;
+        throw new Error('plan mode should not run coding/review agent');
+      }
+    },
+    claudeCliRunner: null,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        return {
+          summary: 'Plan-only summary',
+          goal: 'Create a plan and ask for user decisions',
+          taskType: 'feature',
+          successCriteria: ['plan created'],
+          deliverables: ['prompt plan'],
+          constraints: ['stay in scope'],
+          relevantContext: ['main branch'],
+          confirmationRequests: [{
+            id: 'scope_preference',
+            title: '변경 범위',
+            question: '어떤 범위로 반영할까요?',
+            options: [{
+              id: 'minimal_change',
+              label: '최소 변경',
+              description: '요청 범위만 반영',
+              recommended: true
+            }, {
+              id: 'balanced_change',
+              label: '균형 변경',
+              description: '요청 범위 + 인접 안정화',
+              recommended: false
+            }]
+          }]
+        };
+      },
+      async createProductPlan() {
+        return {
+          summary: 'Product plan summary',
+          problem: 'Need alignment before coding',
+          userScenarios: ['Operator confirms scope'],
+          acceptanceCriteria: ['Decision captured'],
+          outOfScope: [],
+          risks: []
+        };
+      },
+      async createDesignSpec() {
+        return {
+          summary: 'No design change',
+          targets: [],
+          layoutChanges: [],
+          visualRules: [],
+          interactionStates: [],
+          accessibilityChecks: [],
+          responsiveNotes: []
+        };
+      },
+      async createPullRequestDraft() {
+        throw new Error('not used in plan mode');
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Plan this change first',
+    workdir: workspace.repoDir,
+    baseBranch: 'main',
+    executionMode: 'plan',
+    needsPlanning: true,
+    needsDesign: false
+  });
+
+  await domain.start(task.id);
+
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval';
+  }, 'Timed out waiting for plan mode task to finish');
+
+  const finishedTask = repo.getTask(task.id);
+  assert.equal(finishedTask.status, 'awaiting_approval');
+  assert.equal(finishedTask.payload.executionMode, 'plan');
+  assert.equal(finishedTask.result.executionProgress.totalSteps, 3);
+  assert.equal(finishedTask.result.executionProgress.currentStep, 3);
+  assert.equal(finishedTask.result.executionProgress.phase, 'plan_completed');
+  assert.equal(finishedTask.result.planMode.status, 'awaiting_confirmation');
+  assert.deepEqual(finishedTask.result.planMode.unresolvedRequestIds, ['scope_preference']);
+  assert.equal(repo.listArtifacts(task.id, 'plan_confirmation_requests').length, 1);
+  assert.equal(repo.listArtifacts(task.id, 'coding_prompt').length, 0);
+  assert.equal(repo.listArtifacts(task.id, 'review_round').length, 0);
+  assert.equal(cliRunCount, 0);
+  assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
+});
+
+test('plan mode requires selection before start and can continue into coding after selections are saved', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  let runExecCount = 0;
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec({ workdir, schema }) {
+        runExecCount += 1;
+
+        if (schema.required.includes('findings')) {
+          return {
+            parsed: {
+              summary: 'No findings.',
+              findings: [],
+              approval: 'approved_with_no_changes',
+              residualRisks: []
+            },
+            stdout: '',
+            stderr: '',
+            durationMs: 1
+          };
+        }
+
+        if (schema.required.includes('resolvedFindingIds')) {
+          throw new Error('patch round should not run when there are no findings');
+        }
+
+        writeFile(path.join(workdir, 'src', 'plan-mode.js'), 'export const planMode = true;\n');
+        run('git', ['add', 'src/plan-mode.js'], workdir);
+        run('git', ['commit', '-m', 'feat: apply plan-mode implementation'], workdir);
+        return {
+          parsed: {
+            summary: 'Applied code changes from confirmed plan.',
+            testsRun: ['npm test'],
+            notes: []
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+    },
+    claudeCliRunner: null,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        return {
+          summary: 'Plan summary',
+          goal: 'Collect selection and then execute coding',
+          taskType: 'feature',
+          successCriteria: ['selection stored', 'code implemented'],
+          deliverables: ['code change'],
+          constraints: ['stay in scope'],
+          relevantContext: ['main branch'],
+          confirmationRequests: [{
+            id: 'scope_preference',
+            title: '변경 범위',
+            question: '변경 범위를 선택하세요.',
+            options: [{
+              id: 'minimal_change',
+              label: '최소 변경',
+              description: '요청 범위만 반영',
+              recommended: true
+            }, {
+              id: 'balanced_change',
+              label: '균형 변경',
+              description: '요청 범위 + 인접 안정화',
+              recommended: false
+            }]
+          }]
+        };
+      },
+      async createProductPlan() {
+        return {
+          summary: 'Product plan',
+          problem: 'Need selection before coding',
+          userScenarios: [],
+          acceptanceCriteria: [],
+          outOfScope: [],
+          risks: []
+        };
+      },
+      async createDesignSpec() {
+        return {
+          summary: 'No design plan',
+          targets: [],
+          layoutChanges: [],
+          visualRules: [],
+          interactionStates: [],
+          accessibilityChecks: [],
+          responsiveNotes: []
+        };
+      },
+      async createPullRequestDraft() {
+        return {
+          title: 'Plan mode follow-up',
+          body: '## Summary\n- plan mode continued into coding\n'
+        };
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Run planning first, then continue',
+    workdir: workspace.repoDir,
+    baseBranch: 'main',
+    executionMode: 'plan'
+  });
+
+  await domain.start(task.id);
+  await waitFor(() => repo.getTask(task.id)?.status === 'awaiting_approval', 'Timed out waiting for plan mode');
+
+  const startWithoutSelection = await domain.start(task.id, { startFromPlan: true });
+  assert.equal(startWithoutSelection.started, true);
+  await waitFor(() => repo.getTask(task.id)?.status === 'failed', 'Timed out waiting for selection validation failure');
+  assert.match(String(repo.getTask(task.id)?.last_error || ''), /플랜 확인 항목 선택이 필요합니다/);
+
+  domain.savePlanSelections(task.id, {
+    selections: {
+      scope_preference: 'minimal_change'
+    }
+  });
+  const afterSelection = repo.getTask(task.id);
+  assert.equal(afterSelection.result.planMode.status, 'ready_for_execution');
+  assert.equal(afterSelection.payload.planSelections.scope_preference, 'minimal_change');
+
+  await domain.start(task.id, { startFromPlan: true });
+  await waitFor(() => repo.getTask(task.id)?.status === 'awaiting_approval', 'Timed out waiting for full execution');
+
+  const finishedTask = repo.getTask(task.id);
+  assert.equal(finishedTask.payload.executionMode, 'full');
+  assert.equal(finishedTask.result.planMode.status, 'confirmed');
+  assert.equal(finishedTask.result.executionProgress.totalSteps, 6);
+  assert.equal(finishedTask.result.executionProgress.currentStep, 6);
+  assert.ok(Array.isArray(finishedTask.result.commits));
+  assert.ok(finishedTask.result.commits.length >= 1);
+  assert.equal(read('git', ['show', 'main:src/plan-mode.js'], workspace.repoDir), 'export const planMode = true;');
+  assert.equal(runExecCount, 2);
+});

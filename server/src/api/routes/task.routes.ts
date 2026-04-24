@@ -34,6 +34,7 @@ export async function handleTaskRoutes({
       branchName: readStringField(body, 'branchName'),
       continueFromTaskId: readStringField(body, 'continueFromTaskId'),
       agentProvider: readStringField(body, 'agentProvider'),
+      executionMode: readStringField(body, 'executionMode'),
       needsPlanning: String(body.needsPlanning || '').toLowerCase() === 'true',
       needsDesign: String(body.needsDesign || '').toLowerCase() === 'true'
     });
@@ -64,7 +65,29 @@ export async function handleTaskRoutes({
   const runCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
   if (request.method === 'POST' && runCodeTaskMatch) {
     const taskId = decodeURIComponent(runCodeTaskMatch[1]);
-    const detail = await service.startCodeExecutionTask(taskId);
+    const body = await parseRequestBody(request);
+    const detail = await service.startCodeExecutionTask(taskId, {
+      startFromPlan: String(body.startFromPlan || '').toLowerCase() === 'true'
+    });
+    sendJson(response, 200, {
+      ok: true,
+      taskId,
+      status: detail.task.status
+    });
+    return true;
+  }
+
+  const savePlanConfirmationsMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/plan-confirmations$/);
+  if (request.method === 'POST' && savePlanConfirmationsMatch) {
+    const taskId = decodeURIComponent(savePlanConfirmationsMatch[1]);
+    const body = await parseRequestBody(request);
+    const selectionsRaw = body.selections;
+    const selections = selectionsRaw && typeof selectionsRaw === 'object' && !Array.isArray(selectionsRaw)
+      ? selectionsRaw as Record<string, unknown>
+      : {};
+    const detail = await service.saveCodeExecutionPlanSelections(taskId, {
+      selections
+    });
     sendJson(response, 200, {
       ok: true,
       taskId,

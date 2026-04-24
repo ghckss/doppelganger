@@ -95,8 +95,8 @@ export class TaskService {
     return this.commandService.createCodeExecutionTask(input);
   }
 
-  async startCodeExecutionTask(taskId: string) {
-    return this.commandService.startCodeExecutionTask(taskId);
+  async startCodeExecutionTask(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.startCodeExecutionTask(taskId, options);
   }
 
   async resumeCodeExecutionTask(taskId: string) {
@@ -109,6 +109,10 @@ export class TaskService {
 
   async createCodeExecutionPullRequest(taskId: string, options: Record<string, unknown> = {}) {
     return this.commandService.createCodeExecutionPullRequest(taskId, options);
+  }
+
+  async saveCodeExecutionPlanSelections(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.saveCodeExecutionPlanSelections(taskId, options);
   }
 
   saveDraft(taskId: string, input: {

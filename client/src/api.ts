@@ -76,6 +76,7 @@ export function createCodeTask(input: {
   branchName: string;
   continueFromTaskId?: string;
   agentProvider: string;
+  executionMode: 'full' | 'plan';
   needsPlanning: boolean;
   needsDesign: boolean;
 }): Promise<TaskDetail> {
@@ -85,9 +86,10 @@ export function createCodeTask(input: {
   });
 }
 
-export function runTask(taskId: string): Promise<{ ok: boolean }> {
+export function runTask(taskId: string, input: { startFromPlan?: boolean } = {}): Promise<{ ok: boolean }> {
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/run`, {
-    method: 'POST'
+    method: 'POST',
+    body: input
   });
 }
 
@@ -107,6 +109,18 @@ export function createPullRequest(taskId: string, input: { branchName?: string }
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/create-pr`, {
     method: 'POST',
     body: input
+  });
+}
+
+export function saveCodeTaskPlanSelections(
+  taskId: string,
+  selections: Record<string, string>
+): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/plan-confirmations`, {
+    method: 'POST',
+    body: {
+      selections
+    }
   });
 }
 

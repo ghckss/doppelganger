@@ -48,6 +48,7 @@ export default function App() {
   const [baseBranch, setBaseBranch] = useState('master');
   const [branchName, setBranchName] = useState('');
   const [agentProvider, setAgentProvider] = useState('codex');
+  const [executionMode, setExecutionMode] = useState<'full' | 'plan'>('full');
   const [needsPlanning, setNeedsPlanning] = useState(false);
   const [needsDesign, setNeedsDesign] = useState(false);
   const [metaInitialized, setMetaInitialized] = useState(false);
@@ -100,12 +101,27 @@ export default function App() {
       .map((task) => task.id),
     [codeExecutionTasks]
   );
+  const planSelectionTaskIds = useMemo(
+    () => codeExecutionTasks
+      .filter((task) => {
+        const executionModeValue = String(task.payload?.executionMode || '').toLowerCase();
+        const status = String(task.status || '').toLowerCase();
+        return executionModeValue === 'plan' && (status === 'awaiting_approval' || status === 'running');
+      })
+      .map((task) => task.id),
+    [codeExecutionTasks]
+  );
 
   const selectedSlackTaskId = selectedTaskIdByDomain.slack_mention || '';
   const selectedGitHubTaskId = selectedTaskIdByDomain.github_review || '';
   const selectedDetailTaskIds = useMemo(
-    () => Array.from(new Set([selectedSlackTaskId, selectedGitHubTaskId, ...runningCodeTaskIds].filter(Boolean))),
-    [runningCodeTaskIds, selectedGitHubTaskId, selectedSlackTaskId]
+    () => Array.from(new Set([
+      selectedSlackTaskId,
+      selectedGitHubTaskId,
+      ...runningCodeTaskIds,
+      ...planSelectionTaskIds
+    ].filter(Boolean))),
+    [planSelectionTaskIds, runningCodeTaskIds, selectedGitHubTaskId, selectedSlackTaskId]
   );
 
   const detailQueries = useQueries({
@@ -130,11 +146,11 @@ export default function App() {
 
   const slackDetail = selectedSlackTaskId ? detailMap[selectedSlackTaskId] || null : null;
   const githubDetail = selectedGitHubTaskId ? detailMap[selectedGitHubTaskId] || null : null;
-  const runningCodeDetails = useMemo(
-    () => runningCodeTaskIds
+  const codeTaskDetails = useMemo(
+    () => Array.from(new Set([...runningCodeTaskIds, ...planSelectionTaskIds]))
       .map((taskId) => detailMap[taskId])
       .filter((detail): detail is TaskDetail => Boolean(detail)),
-    [detailMap, runningCodeTaskIds]
+    [detailMap, planSelectionTaskIds, runningCodeTaskIds]
   );
 
   const slackEditor = slackDetail ? draftEditorsByTaskId[slackDetail.task.id] : null;
@@ -474,7 +490,7 @@ export default function App() {
           <CodeExecutionPanel
             meta={metaQuery.data || null}
             tasks={codeExecutionTasks}
-            runningDetails={runningCodeDetails}
+            taskDetails={codeTaskDetails}
             collapsedSections={collapsedSections}
             busyAction={busyAction}
             command={command}
@@ -482,6 +498,7 @@ export default function App() {
             baseBranch={baseBranch}
             branchName={branchName}
             agentProvider={agentProvider}
+            executionMode={executionMode}
             needsPlanning={needsPlanning}
             needsDesign={needsDesign}
             onToggleSection={toggleSection}
@@ -490,6 +507,7 @@ export default function App() {
             onSetBaseBranch={setBaseBranch}
             onSetBranchName={setBranchName}
             onSetAgentProvider={setAgentProvider}
+            onSetExecutionMode={setExecutionMode}
             onSetNeedsPlanning={setNeedsPlanning}
             onSetNeedsDesign={setNeedsDesign}
             onRunAction={(label, action) => {

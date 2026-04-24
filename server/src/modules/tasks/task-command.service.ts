@@ -126,14 +126,18 @@ export class TaskCommandService {
     return this.queryService.getTaskDetail(task.id);
   }
 
-  async startCodeExecutionTask(taskId: string) {
+  async startCodeExecutionTask(taskId: string, options: Record<string, unknown> = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'code_execution') {
       throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
     }
 
     const domain = this.domains.code_execution;
-    const startResult = await domain.start(taskId, { resumeFromCheckpoint: false });
+    const startResult = await domain.start(taskId, {
+      resumeFromCheckpoint: false,
+      startFromPlan: String(options.startFromPlan || '').toLowerCase() === 'true'
+        || options.startFromPlan === true
+    });
     const alreadyRunning = startResult
       && typeof startResult === 'object'
       && 'started' in startResult
@@ -141,6 +145,21 @@ export class TaskCommandService {
     if (alreadyRunning) {
       throw new Error('작업이 이미 실행 중입니다');
     }
+    return this.queryService.getTaskDetail(taskId);
+  }
+
+  async saveCodeExecutionPlanSelections(taskId: string, options: Record<string, unknown> = {}) {
+    const task = assertTask(taskId, this.repo.getTask(taskId));
+    if (task.domain !== 'code_execution') {
+      throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
+    }
+
+    const domain = this.domains.code_execution;
+    if (!domain?.savePlanSelections) {
+      throw new Error('코드 작업 도메인에서 플랜 확인 항목 저장을 지원하지 않습니다');
+    }
+
+    await domain.savePlanSelections(taskId, options);
     return this.queryService.getTaskDetail(taskId);
   }
 

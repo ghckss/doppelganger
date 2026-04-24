@@ -5,6 +5,8 @@ import {
   buildPullRequestDraft,
   type CodeTaskInput,
   type DesignSpec,
+  type PlanConfirmationOption,
+  type PlanConfirmationRequest,
   type ProductPlan,
   type PromptPlan,
   type ReviewRound,
@@ -35,6 +37,84 @@ function extractJsonObject(text: unknown): Record<string, unknown> {
 
 function compactArray(value: unknown): string[] {
   return safeArray(value).map((item) => normalizeWhitespace(item)).filter(Boolean);
+}
+
+function normalizeIdentifier(value: unknown, fallback: string): string {
+  const normalized = normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return normalized || fallback;
+}
+
+function compactConfirmationOptions(value: unknown, requestId: string): PlanConfirmationOption[] {
+  const options = safeArray(value).map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+    const source = entry as Record<string, unknown>;
+    const id = normalizeIdentifier(source.id, `${requestId}_option_${index + 1}`);
+    const label = normalizeWhitespace(source.label) || `옵션 ${index + 1}`;
+    const description = normalizeWhitespace(source.description) || label;
+    return {
+      id,
+      label,
+      description,
+      recommended: Boolean(source.recommended)
+    };
+  }).filter((option): option is PlanConfirmationOption => Boolean(option));
+
+  if (options.length === 0) {
+    return [
+      {
+        id: `${requestId}_default`,
+        label: '기본안',
+        description: '기본 권장 방식으로 진행합니다.',
+        recommended: true
+      }
+    ];
+  }
+
+  if (!options.some((option) => option.recommended)) {
+    options[0] = {
+      ...options[0],
+      recommended: true
+    };
+  }
+
+  return options.slice(0, 3);
+}
+
+function compactConfirmationRequests(
+  value: unknown,
+  fallback: PlanConfirmationRequest[] = []
+): PlanConfirmationRequest[] {
+  const requests = safeArray(value).map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+    const source = entry as Record<string, unknown>;
+    const id = normalizeIdentifier(source.id, `confirm_${index + 1}`);
+    const title = normalizeWhitespace(source.title) || `확인 항목 ${index + 1}`;
+    const question = normalizeWhitespace(source.question) || `${title}에 대한 선택이 필요합니다.`;
+    return {
+      id,
+      title,
+      question,
+      options: compactConfirmationOptions(source.options, id)
+    };
+  }).filter((request): request is PlanConfirmationRequest => Boolean(request));
+
+  if (requests.length > 0) {
+    return requests.slice(0, 5);
+  }
+
+  return safeArray(fallback).slice(0, 5).map((request, index) => ({
+    id: normalizeIdentifier(request.id, `confirm_${index + 1}`),
+    title: normalizeWhitespace(request.title) || `확인 항목 ${index + 1}`,
+    question: normalizeWhitespace(request.question) || '작업 진행 전에 선택이 필요합니다.',
+    options: compactConfirmationOptions(request.options, normalizeIdentifier(request.id, `confirm_${index + 1}`))
+  }));
 }
 
 function describeWorkspace(workspace: WorkspaceSnapshot): string {
@@ -138,7 +218,7 @@ export class CodeTaskPlanner {
       'You are the prompt planner for an autonomous coding workflow.',
       'Return valid JSON only.',
       'Use this shape:',
-      '{"summary":"string","goal":"string","taskType":"string","successCriteria":["string"],"deliverables":["string"],"constraints":["string"],"relevantContext":["string"]}',
+      '{"summary":"string","goal":"string","taskType":"string","successCriteria":["string"],"deliverables":["string"],"constraints":["string"],"relevantContext":["string"],"confirmationRequests":[{"id":"string","title":"string","question":"string","options":[{"id":"string","label":"string","description":"string","recommended":true}]}]}',
       'Be concrete, implementation-focused, and avoid inventing requirements.'
     ].join(' ');
 
@@ -158,7 +238,8 @@ export class CodeTaskPlanner {
         successCriteria: compactArray(parsed.successCriteria).slice(0, 8).concat(fallback.successCriteria).slice(0, 8),
         deliverables: compactArray(parsed.deliverables).slice(0, 8).concat(fallback.deliverables).slice(0, 8),
         constraints: compactArray(parsed.constraints).slice(0, 8).concat(fallback.constraints).slice(0, 8),
-        relevantContext: compactArray(parsed.relevantContext).slice(0, 8).concat(fallback.relevantContext).slice(0, 8)
+        relevantContext: compactArray(parsed.relevantContext).slice(0, 8).concat(fallback.relevantContext).slice(0, 8),
+        confirmationRequests: compactConfirmationRequests(parsed.confirmationRequests, fallback.confirmationRequests || [])
       };
     } catch {
       return fallback;

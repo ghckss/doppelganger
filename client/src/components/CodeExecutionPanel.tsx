@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { createCodeTask, createPullRequest, deleteTask, resumeCodeTask } from '../api';
+import {
+  createCodeTask,
+  createPullRequest,
+  deleteTask,
+  resumeCodeTask,
+  runTask,
+  saveCodeTaskPlanSelections
+} from '../api';
 import type { MetaResponse, Task, TaskDetail } from '../types';
 import type {
   CollapsibleSectionId,
@@ -18,6 +25,7 @@ import {
   EMPTY_CLASS,
   INPUT_CLASS,
   LABEL_CLASS,
+  modeButtonClass,
   PANEL_CLASS,
   StatusBadge,
   SUB_BUTTON_CLASS
@@ -56,7 +64,7 @@ type ReviewRoundView = {
 type CodeExecutionPanelProps = {
   meta: MetaResponse | null;
   tasks: Task[];
-  runningDetails: TaskDetail[];
+  taskDetails: TaskDetail[];
   collapsedSections: CollapsibleState;
   busyAction: string;
   command: string;
@@ -64,6 +72,7 @@ type CodeExecutionPanelProps = {
   baseBranch: string;
   branchName: string;
   agentProvider: string;
+  executionMode: 'full' | 'plan';
   needsPlanning: boolean;
   needsDesign: boolean;
   onToggleSection: (sectionId: CollapsibleSectionId) => void;
@@ -72,9 +81,24 @@ type CodeExecutionPanelProps = {
   onSetBaseBranch: (value: string) => void;
   onSetBranchName: (value: string) => void;
   onSetAgentProvider: (value: string) => void;
+  onSetExecutionMode: (value: 'full' | 'plan') => void;
   onSetNeedsPlanning: (value: boolean) => void;
   onSetNeedsDesign: (value: boolean) => void;
   onRunAction: (label: string, action: () => Promise<string | string[] | void>) => void;
+};
+
+type PlanConfirmationOptionView = {
+  id: string;
+  label: string;
+  description: string;
+  recommended: boolean;
+};
+
+type PlanConfirmationRequestView = {
+  id: string;
+  title: string;
+  question: string;
+  options: PlanConfirmationOptionView[];
 };
 
 const EXECUTION_STEP_ITEMS = [
@@ -202,6 +226,76 @@ function parseRoundNumber(value: unknown): number {
   return direct > 0 ? Math.trunc(direct) : 0;
 }
 
+function normalizeIdentifier(value: unknown): string {
+  return toText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parsePlanConfirmationOption(value: unknown, requestId: string, index: number): PlanConfirmationOptionView {
+  const source = toRecord(value);
+  const optionId = normalizeIdentifier(source.id) || `${requestId}_option_${index + 1}`;
+  const label = toText(source.label) || `옵션 ${index + 1}`;
+  const description = toText(source.description) || label;
+  return {
+    id: optionId,
+    label,
+    description,
+    recommended: Boolean(source.recommended)
+  };
+}
+
+function parsePlanConfirmationRequest(value: unknown, index: number): PlanConfirmationRequestView | null {
+  const source = toRecord(value);
+  const requestId = normalizeIdentifier(source.id) || `confirm_${index + 1}`;
+  if (!requestId) {
+    return null;
+  }
+
+  const options = Array.isArray(source.options)
+    ? source.options.map((option, optionIndex) => parsePlanConfirmationOption(option, requestId, optionIndex))
+    : [];
+  if (options.length === 0) {
+    options.push({
+      id: `${requestId}_default`,
+      label: '기본안',
+      description: '기본 권장안으로 진행합니다.',
+      recommended: true
+    });
+  }
+
+  if (!options.some((option) => option.recommended)) {
+    options[0] = {
+      ...options[0],
+      recommended: true
+    };
+  }
+
+  return {
+    id: requestId,
+    title: toText(source.title) || `확인 항목 ${index + 1}`,
+    question: toText(source.question) || '작업 진행 전에 선택이 필요합니다.',
+    options
+  };
+}
+
+function parsePlanSelections(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.entries(value as Record<string, unknown>).reduce((accumulator, [requestId, optionId]) => {
+    const normalizedRequestId = normalizeIdentifier(requestId);
+    const normalizedOptionId = normalizeIdentifier(optionId);
+    if (!normalizedRequestId || !normalizedOptionId) {
+      return accumulator;
+    }
+    accumulator[normalizedRequestId] = normalizedOptionId;
+    return accumulator;
+  }, {} as Record<string, string>);
+}
+
 function extractRoundFromTitle(value: unknown): number {
   const text = toText(value);
   if (!text) {
@@ -282,6 +376,54 @@ function resolvePullRequestUrl(task: Task): string {
   return toText(pullRequest.url);
 }
 
+function resolveExecutionMode(task: Task): 'full' | 'plan' {
+  const mode = toText(toRecord(task.payload).executionMode).toLowerCase();
+  if (mode === 'plan' || mode === 'plan_only') {
+    return 'plan';
+  }
+  return 'full';
+}
+
+function resolvePlanConfirmationRequests(task: Task, detail: TaskDetail | null): PlanConfirmationRequestView[] {
+  const result = toRecord(task.result);
+  const planMode = toRecord(result.planMode);
+  const requestsSource = Array.isArray(planMode.confirmationRequests)
+    ? planMode.confirmationRequests
+    : [];
+  if (requestsSource.length > 0) {
+    return requestsSource
+      .map((request, index) => parsePlanConfirmationRequest(request, index))
+      .filter((request): request is PlanConfirmationRequestView => Boolean(request));
+  }
+
+  const promptPlan = toRecord(result.promptPlan);
+  const fallbackSource = Array.isArray(promptPlan.confirmationRequests)
+    ? promptPlan.confirmationRequests
+    : detail?.artifacts
+      ?.filter((artifact) => artifact.type === 'plan_confirmation_requests')
+      .at(-1)
+      ?.metadata
+      ?.confirmationRequests;
+
+  if (!Array.isArray(fallbackSource)) {
+    return [];
+  }
+
+  return fallbackSource
+    .map((request, index) => parsePlanConfirmationRequest(request, index))
+    .filter((request): request is PlanConfirmationRequestView => Boolean(request));
+}
+
+function resolvePlanSelections(task: Task): Record<string, string> {
+  const payload = toRecord(task.payload);
+  const result = toRecord(task.result);
+  const planMode = toRecord(result.planMode);
+  return {
+    ...parsePlanSelections(payload.planSelections),
+    ...parsePlanSelections(planMode.selections)
+  };
+}
+
 type ContinuationHistoryItem = {
   id: string;
   status: string;
@@ -343,7 +485,7 @@ function resolveContinuationResultSummary(task: Task): string {
 export function CodeExecutionPanel({
   meta,
   tasks,
-  runningDetails,
+  taskDetails,
   collapsedSections,
   busyAction,
   command,
@@ -351,6 +493,7 @@ export function CodeExecutionPanel({
   baseBranch,
   branchName,
   agentProvider,
+  executionMode,
   needsPlanning,
   needsDesign,
   onToggleSection,
@@ -359,6 +502,7 @@ export function CodeExecutionPanel({
   onSetBaseBranch,
   onSetBranchName,
   onSetAgentProvider,
+  onSetExecutionMode,
   onSetNeedsPlanning,
   onSetNeedsDesign,
   onRunAction
@@ -371,18 +515,30 @@ export function CodeExecutionPanel({
   const [resumeHistoryModalOpen, setResumeHistoryModalOpen] = useState(false);
   const [continueFromTaskId, setContinueFromTaskId] = useState('');
   const [continueCommand, setContinueCommand] = useState('');
+  const [planSelectionsByTaskId, setPlanSelectionsByTaskId] = useState<Record<string, Record<string, string>>>({});
 
   const detailByTaskId = useMemo(() => {
     const next: Record<string, TaskDetail> = {};
-    for (const detail of runningDetails) {
+    for (const detail of taskDetails) {
       next[detail.task.id] = detail;
     }
     return next;
-  }, [runningDetails]);
+  }, [taskDetails]);
 
   const runningTasks = useMemo(() => {
     const list = tasks
-      .filter((task) => String(task.status || '').toLowerCase() === 'running')
+      .filter((task) => String(task.status || '').toLowerCase() === 'running' && resolveExecutionMode(task) === 'full')
+      .slice();
+    list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
+    return list;
+  }, [tasks]);
+  const planModeTasks = useMemo(() => {
+    const list = tasks
+      .filter((task) => {
+        const status = String(task.status || '').toLowerCase();
+        return resolveExecutionMode(task) === 'plan'
+          && (status === 'awaiting_approval' || status === 'running' || status === 'failed');
+      })
       .slice();
     list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
     return list;
@@ -468,6 +624,35 @@ export function CodeExecutionPanel({
     }),
     [detailByTaskId, nowMs, runningTasks]
   );
+  const planTaskViews = useMemo(
+    () => planModeTasks.map((task) => {
+      const detail = detailByTaskId[task.id] || null;
+      const sourceTask = detail?.task || task;
+      const requests = resolvePlanConfirmationRequests(sourceTask, detail);
+      const persistedSelections = resolvePlanSelections(sourceTask);
+      const localSelections = planSelectionsByTaskId[sourceTask.id] || {};
+      const selections = {
+        ...persistedSelections,
+        ...localSelections
+      };
+      const unresolvedRequestIds = requests
+        .map((request) => request.id)
+        .filter((requestId) => !selections[requestId]);
+      const status = String(sourceTask.status || '').toLowerCase();
+      return {
+        task: sourceTask,
+        detail,
+        commandText: resolveCommand(sourceTask) || toText(sourceTask.title) || sourceTask.id,
+        requests,
+        selections,
+        unresolvedRequestIds,
+        canSave: requests.length > 0,
+        canStart: status === 'awaiting_approval' && unresolvedRequestIds.length === 0,
+        canResume: status === 'failed'
+      };
+    }),
+    [detailByTaskId, planModeTasks, planSelectionsByTaskId]
+  );
 
   const createPrTarget = useMemo(
     () => runningTaskViews.find((view) => view.task.id === createPrTaskId) || null,
@@ -533,6 +718,34 @@ export function CodeExecutionPanel({
       setPrBranchName('');
     }
   }, [createPrTaskId, runningTaskViews]);
+
+  useEffect(() => {
+    if (planTaskViews.length === 0) {
+      return;
+    }
+    setPlanSelectionsByTaskId((current) => {
+      const next: Record<string, Record<string, string>> = {};
+      let changed = false;
+      for (const view of planTaskViews) {
+        const existing = current[view.task.id] || {};
+        next[view.task.id] = {
+          ...view.selections,
+          ...existing
+        };
+        const before = JSON.stringify(existing);
+        const after = JSON.stringify(next[view.task.id]);
+        if (before !== after) {
+          changed = true;
+        }
+      }
+      const hasRemoved = Object.keys(current).some((taskId) => !planTaskViews.some((view) => view.task.id === taskId));
+      if (!changed && !hasRemoved) {
+        return current;
+      }
+      return next;
+    });
+  }, [planTaskViews]);
+
   useEffect(() => {
     if (!resumeHistoryModalOpen) {
       return;
@@ -556,6 +769,33 @@ export function CodeExecutionPanel({
       ...current,
       [taskId]: !current[taskId]
     }));
+  }
+
+  function selectPlanOption(taskId: string, requestId: string, optionId: string) {
+    setPlanSelectionsByTaskId((current) => ({
+      ...current,
+      [taskId]: {
+        ...(current[taskId] || {}),
+        [requestId]: optionId
+      }
+    }));
+  }
+
+  function savePlanSelections(taskId: string) {
+    const selections = planSelectionsByTaskId[taskId] || {};
+    onRunAction('플랜 선택 저장', async () => {
+      await saveCodeTaskPlanSelections(taskId, selections);
+      return taskId;
+    });
+  }
+
+  function startFromPlan(taskId: string) {
+    const selections = planSelectionsByTaskId[taskId] || {};
+    onRunAction('플랜 확정 후 코드 실행', async () => {
+      await saveCodeTaskPlanSelections(taskId, selections);
+      await runTask(taskId, { startFromPlan: true });
+      return taskId;
+    });
   }
 
   function openCreatePrModal(taskId: string, suggestedBranch: string) {
@@ -615,6 +855,7 @@ export function CodeExecutionPanel({
         branchName,
         continueFromTaskId: selectedTask.id,
         agentProvider,
+        executionMode,
         needsPlanning,
         needsDesign
       });
@@ -669,7 +910,7 @@ export function CodeExecutionPanel({
             </div>
             {!collapsedSections.code_create && (
               <form
-                className="grid gap-3 md:grid-cols-4"
+                className="grid gap-3 md:grid-cols-5"
                 onSubmit={(event) => {
                   event.preventDefault();
                   onRunAction('코드 작업 생성', async () => {
@@ -679,6 +920,7 @@ export function CodeExecutionPanel({
                       baseBranch,
                       branchName,
                       agentProvider,
+                      executionMode,
                       needsPlanning,
                       needsDesign
                     });
@@ -716,7 +958,18 @@ export function CodeExecutionPanel({
                     <option value="claude">Claude</option>
                   </select>
                 </label>
-                <label className={`${LABEL_CLASS} md:col-span-4`}>
+                <label className={LABEL_CLASS}>
+                  실행 모드
+                  <select
+                    className={INPUT_CLASS}
+                    value={executionMode}
+                    onChange={(event) => onSetExecutionMode(event.target.value === 'plan' ? 'plan' : 'full')}
+                  >
+                    <option value="full">전체 실행 (플랜+코딩)</option>
+                    <option value="plan">플랜 모드 (계획/확인 요청)</option>
+                  </select>
+                </label>
+                <label className={`${LABEL_CLASS} md:col-span-5`}>
                   명령
                   <textarea
                     className={INPUT_CLASS}
@@ -727,7 +980,7 @@ export function CodeExecutionPanel({
                     required
                   />
                 </label>
-                <div className='flex gap-2'>
+                <div className='flex gap-2 md:col-span-2'>
                   <label className="flex items-center gap-2 text-sm text-slate-700">
                     <input type="checkbox" checked={needsPlanning} onChange={(event) => onSetNeedsPlanning(event.target.checked)} />
                     기획 단계 실행
@@ -741,6 +994,115 @@ export function CodeExecutionPanel({
                   <button type="submit" className={BUTTON_CLASS} disabled={Boolean(busyAction)}>실행</button>
                 </div>
               </form>
+            )}
+          </section>
+
+          <section className="mt-4 border-t border-slate-200 pt-4">
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-900">플랜 모드 확인 요청 ({planTaskViews.length})</h3>
+            </div>
+            {planTaskViews.length === 0 && (
+              <p className={EMPTY_CLASS}>선택 대기 중인 플랜 모드 작업이 없습니다.</p>
+            )}
+            {planTaskViews.length > 0 && (
+              <div className="space-y-3">
+                {planTaskViews.map((view) => (
+                  <article key={`plan-task-${view.task.id}`} className="rounded-xl border border-slate-200 bg-white p-3">
+                    <header className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-900">{view.commandText}</p>
+                        <p className="mt-1 text-xs text-slate-600">{mapStatusLabel(view.task.status)}</p>
+                      </div>
+                      <StatusBadge status={view.task.status} label={mapStatusLabel(view.task.status)} />
+                    </header>
+                    <p className="mt-2 whitespace-pre-wrap break-words text-xs text-slate-700">
+                      {toText(view.task.summary) || '플랜 모드 설명이 아직 없습니다.'}
+                    </p>
+
+                    {view.requests.length === 0 ? (
+                      <p className="mt-3 text-xs text-slate-600">
+                        {view.canStart
+                          ? '추가 확인 항목이 없어 바로 코드 실행을 시작할 수 있습니다.'
+                          : '확인 요청 항목을 불러오는 중입니다.'}
+                      </p>
+                    ) : (
+                      <div className="mt-3 grid gap-2">
+                        {view.requests.map((request) => {
+                          const selectedOptionId = normalizeIdentifier(view.selections[request.id]);
+                          return (
+                            <section key={`${view.task.id}-${request.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-2">
+                              <p className="text-xs font-semibold text-slate-900">{request.title}</p>
+                              <p className="mt-1 text-xs text-slate-700">{request.question}</p>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {request.options.map((option) => {
+                                  const selected = selectedOptionId === option.id;
+                                  return (
+                                    <button
+                                      key={`${view.task.id}-${request.id}-${option.id}`}
+                                      type="button"
+                                      className={modeButtonClass(selected)}
+                                      onClick={() => selectPlanOption(view.task.id, request.id, option.id)}
+                                      disabled={Boolean(busyAction)}
+                                    >
+                                      {option.label}{option.recommended ? ' (권장)' : ''}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <p className="mt-1 text-[11px] text-slate-600">
+                                {request.options.find((option) => option.id === selectedOptionId)?.description
+                                  || '옵션을 선택해 주세요.'}
+                              </p>
+                            </section>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {view.unresolvedRequestIds.length > 0 && (
+                      <p className="mt-2 text-xs text-amber-700">
+                        미선택 항목: {view.unresolvedRequestIds.join(', ')}
+                      </p>
+                    )}
+
+                    <section className="mt-3 flex flex-wrap justify-end gap-2">
+                      {view.canSave && (
+                        <button
+                          type="button"
+                          className={SUB_BUTTON_CLASS}
+                          onClick={() => savePlanSelections(view.task.id)}
+                          disabled={Boolean(busyAction)}
+                        >
+                          선택 저장
+                        </button>
+                      )}
+                      {view.canStart && (
+                        <button
+                          type="button"
+                          className={BUTTON_CLASS}
+                          onClick={() => startFromPlan(view.task.id)}
+                          disabled={Boolean(busyAction)}
+                        >
+                          플랜 확정 후 코드 실행
+                        </button>
+                      )}
+                      {view.canResume && (
+                        <button
+                          type="button"
+                          className={BUTTON_CLASS}
+                          onClick={() => onRunAction('코드 작업 재개', async () => {
+                            await resumeCodeTask(view.task.id);
+                            return view.task.id;
+                          })}
+                          disabled={Boolean(busyAction)}
+                        >
+                          플랜 모드 재개
+                        </button>
+                      )}
+                    </section>
+                  </article>
+                ))}
+              </div>
             )}
           </section>
 
