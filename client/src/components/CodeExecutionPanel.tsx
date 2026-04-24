@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { createCodeTask, createPullRequest, resumeCodeTask } from '../api';
+import { createCodeTask, createPullRequest, deleteTask, resumeCodeTask } from '../api';
 import type { MetaResponse, Task, TaskDetail } from '../types';
 import type {
   CollapsibleSectionId,
@@ -282,6 +282,64 @@ function resolvePullRequestUrl(task: Task): string {
   return toText(pullRequest.url);
 }
 
+type ContinuationHistoryItem = {
+  id: string;
+  status: string;
+  command: string;
+  resultSummary: string;
+  updatedAt: string;
+};
+
+function resolveContinuationRootTaskId(taskId: string, taskById: Map<string, Task>): string {
+  let currentTask = taskById.get(taskId) || null;
+  if (!currentTask) {
+    return taskId;
+  }
+
+  const visited = new Set<string>();
+  while (currentTask && !visited.has(currentTask.id)) {
+    visited.add(currentTask.id);
+    const payload = toRecord(currentTask.payload);
+    const explicitRoot = toText(payload.rootTaskId);
+    if (explicitRoot) {
+      return explicitRoot;
+    }
+    const parentTaskId = toText(payload.parentTaskId);
+    if (!parentTaskId) {
+      return currentTask.id;
+    }
+    currentTask = taskById.get(parentTaskId) || null;
+  }
+
+  return taskId;
+}
+
+function resolveContinuationResultSummary(task: Task): string {
+  const summaryText = toText(task.summary);
+  if (summaryText) {
+    return summaryText;
+  }
+
+  const result = toRecord(task.result);
+  const commitCount = Array.isArray(result.commits) ? result.commits.length : 0;
+  const reviewRoundCount = Array.isArray(result.reviewRounds) ? result.reviewRounds.length : 0;
+  const pullRequestUrl = toText(toRecord(result.pullRequest).url);
+  const parts: string[] = [];
+  if (commitCount > 0) {
+    parts.push(`커밋 ${commitCount}건`);
+  }
+  if (reviewRoundCount > 0) {
+    parts.push(`리뷰 ${reviewRoundCount}회`);
+  }
+  if (pullRequestUrl) {
+    parts.push(`PR ${pullRequestUrl}`);
+  }
+  if (parts.length > 0) {
+    return parts.join(' · ');
+  }
+  return '결과 요약이 없습니다.';
+}
+
 export function CodeExecutionPanel({
   meta,
   tasks,
@@ -340,6 +398,44 @@ export function CodeExecutionPanel({
     () => continuationCandidates.find((task) => task.id === continueFromTaskId) || null,
     [continuationCandidates, continueFromTaskId]
   );
+  const selectedContinuationHistory = useMemo((): ContinuationHistoryItem[] => {
+    if (!selectedContinuationTask) {
+      return [];
+    }
+
+    const taskById = new Map(tasks.map((task) => [task.id, task]));
+    const rootTaskId = resolveContinuationRootTaskId(selectedContinuationTask.id, taskById);
+    const historyTasks = tasks
+      .filter((task) => {
+        const payload = toRecord(task.payload);
+        const taskRootId = toText(payload.rootTaskId);
+        if (task.id === rootTaskId) {
+          return true;
+        }
+        if (taskRootId && taskRootId === rootTaskId) {
+          return true;
+        }
+        const parentTaskId = toText(payload.parentTaskId);
+        if (!taskRootId && parentTaskId && taskById.has(parentTaskId)) {
+          const derivedRoot = resolveContinuationRootTaskId(task.id, taskById);
+          return derivedRoot === rootTaskId;
+        }
+        return false;
+      })
+      .sort((left, right) => String(left.created_at || '').localeCompare(String(right.created_at || '')));
+
+    if (historyTasks.length === 0) {
+      historyTasks.push(selectedContinuationTask);
+    }
+
+    return historyTasks.map((task) => ({
+      id: task.id,
+      status: String(task.status || ''),
+      command: resolveCommand(task) || toText(task.title) || task.id,
+      resultSummary: resolveContinuationResultSummary(task),
+      updatedAt: toText(task.updated_at)
+    }));
+  }, [selectedContinuationTask, tasks]);
 
   const runningTaskViews = useMemo(
     () => runningTasks.map((task) => {
@@ -485,6 +581,23 @@ export function CodeExecutionPanel({
     setResumeHistoryModalOpen(false);
     setContinueFromTaskId('');
     setContinueCommand('');
+  }
+
+  function removeContinuationTask(taskId: string) {
+    const targetTask = continuationCandidates.find((task) => task.id === taskId) || null;
+    if (!targetTask) {
+      return;
+    }
+    const targetCommand = resolveCommand(targetTask) || toText(targetTask.title) || taskId;
+    const confirmed = window.confirm(`이전 작업을 목록에서 제거할까요?\n\n${targetCommand}`);
+    if (!confirmed) {
+      return;
+    }
+
+    onRunAction('이전 작업 제거', async () => {
+      await deleteTask(taskId);
+      setContinueFromTaskId((current) => (current === taskId ? '' : current));
+    });
   }
 
   function submitContinueTask() {
@@ -858,34 +971,81 @@ export function CodeExecutionPanel({
                   const isSelected = continueFromTaskId === task.id;
                   const taskCommand = toText(taskPayload.command) || toText(task.title);
                   return (
-                    <label
+                    <div
                       key={task.id}
-                      className={`flex cursor-pointer gap-2 rounded-md border px-2 py-2 ${
+                      className={`flex items-start gap-2 rounded-md border px-2 py-2 ${
                         isSelected ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'
                       }`}
                     >
-                      <input
-                        type="radio"
-                        className="mt-1"
-                        name="continueFromTaskId"
-                        value={task.id}
-                        checked={isSelected}
-                        onChange={() => setContinueFromTaskId(task.id)}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-semibold text-slate-900">{taskCommand}</p>
-                        <p className="mt-0.5 text-xs text-slate-600">
-                          {mapStatusLabel(task.status)} · 업데이트 {formatDateTime(task.updated_at)}
-                        </p>
-                        <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
-                          {toText(task.summary) || '작업 요약이 없습니다.'}
-                        </p>
-                      </span>
-                    </label>
+                      <label className="flex min-w-0 flex-1 cursor-pointer gap-2">
+                        <input
+                          type="radio"
+                          className="mt-1"
+                          name="continueFromTaskId"
+                          value={task.id}
+                          checked={isSelected}
+                          onChange={() => setContinueFromTaskId(task.id)}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold text-slate-900">{taskCommand}</p>
+                          <p className="mt-0.5 text-xs text-slate-600">
+                            {mapStatusLabel(task.status)} · 업데이트 {formatDateTime(task.updated_at)}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                            {toText(task.summary) || '작업 요약이 없습니다.'}
+                          </p>
+                        </span>
+                      </label>
+                      <button
+                        type="button"
+                        className="rounded border border-rose-200 px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                        onClick={() => removeContinuationTask(task.id)}
+                        disabled={Boolean(busyAction)}
+                      >
+                        제거
+                      </button>
+                    </div>
                   );
                 })}
               </div>
             )}
+            <section className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <h5 className="text-sm font-semibold text-slate-900">선택 작업 히스토리 타임라인</h5>
+              {!selectedContinuationTask && (
+                <p className="mt-1 text-xs text-slate-600">작업을 선택하면 입력 명령과 결과 히스토리를 표시합니다.</p>
+              )}
+              {selectedContinuationTask && selectedContinuationHistory.length === 0 && (
+                <p className="mt-1 text-xs text-slate-600">표시할 히스토리가 없습니다.</p>
+              )}
+              {selectedContinuationTask && selectedContinuationHistory.length > 0 && (
+                <div className="mt-2 max-h-56 overflow-y-auto rounded-md border border-slate-200 bg-white p-2">
+                  <ol className="space-y-2">
+                    {selectedContinuationHistory.map((historyItem, index) => {
+                      const selected = historyItem.id === selectedContinuationTask.id;
+                      return (
+                        <li
+                          key={`continuation-history-${historyItem.id}`}
+                          className={`rounded-md border px-2 py-2 ${
+                            selected ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'
+                          }`}
+                        >
+                          <p className="text-xs font-semibold text-slate-900">
+                            {String(index + 1).padStart(2, '0')}. {mapStatusLabel(historyItem.status)}
+                            {historyItem.updatedAt ? ` · ${formatDateTime(historyItem.updatedAt)}` : ''}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                            <strong>입력:</strong> {historyItem.command}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                            <strong>결과:</strong> {historyItem.resultSummary}
+                          </p>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </div>
+              )}
+            </section>
             <label className={`${LABEL_CLASS} mt-3`}>
               새 작업 명령(필수)
               <textarea

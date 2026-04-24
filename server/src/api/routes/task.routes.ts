@@ -51,6 +51,15 @@ export async function handleTaskRoutes({
     sendJson(response, 200, detail);
     return true;
   }
+  if (request.method === 'DELETE' && taskApiMatch) {
+    const taskId = decodeURIComponent(taskApiMatch[1]);
+    service.deleteTask(taskId);
+    sendJson(response, 200, {
+      ok: true,
+      taskId
+    });
+    return true;
+  }
 
   const runCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
   if (request.method === 'POST' && runCodeTaskMatch) {

@@ -143,6 +143,7 @@ export function createRepository(databasePath) {
           result_json = ?, last_error = ?, updated_at = ?
       WHERE id = ?
     `),
+    deleteTask: db.prepare('DELETE FROM tasks WHERE id = ?'),
     deleteArtifactsByType: db.prepare('DELETE FROM artifacts WHERE task_id = ? AND type = ?'),
     insertArtifact: db.prepare(`
       INSERT INTO artifacts (id, task_id, type, external_id, title, content, sort_order, metadata_json, created_at)
@@ -298,6 +299,11 @@ export function createRepository(databasePath) {
     return getTask(taskId);
   }
 
+  function deleteTask(taskId) {
+    const result = statements.deleteTask.run(taskId);
+    return Number(result.changes || 0) > 0;
+  }
+
   function replaceArtifacts(taskId, type, artifacts) {
     db.exec('BEGIN');
     try {
@@ -398,6 +404,7 @@ export function createRepository(databasePath) {
     getTaskByExternalId,
     upsertTask,
     updateTask,
+    deleteTask,
     replaceArtifacts,
     createArtifact,
     listArtifacts,

@@ -59,6 +59,7 @@ export interface Repository {
   getTaskByExternalId: (domain: string, externalId: string) => TaskRecord | null;
   upsertTask: (taskInput: Record<string, unknown>) => TaskRecord;
   updateTask: (taskId: string, fields: Record<string, unknown>) => TaskRecord | null;
+  deleteTask: (taskId: string) => boolean;
   replaceArtifacts: (taskId: string, type: string, artifacts: Array<Record<string, unknown>>) => void;
   createArtifact: (taskId: string, type: string, artifact: Record<string, unknown>) => ArtifactRecord | null;
   listArtifacts: (taskId: string, type?: string) => ArtifactRecord[];

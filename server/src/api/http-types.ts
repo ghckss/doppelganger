@@ -68,6 +68,7 @@ export interface TaskServiceApi {
   }>;
   startCodeExecutionTask(taskId: string): Promise<TaskDetail>;
   resumeCodeExecutionTask(taskId: string): Promise<TaskDetail>;
+  deleteTask(taskId: string): void;
   createCodeExecutionPullRequest(taskId: string, input: { branchName?: string }): Promise<TaskDetail>;
   pollSlackMentions(): Promise<unknown>;
   pollGitHubReviews(): Promise<unknown>;

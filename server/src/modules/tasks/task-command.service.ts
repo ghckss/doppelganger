@@ -168,6 +168,18 @@ export class TaskCommandService {
     return this.queryService.getTaskDetail(taskId);
   }
 
+  deleteTask(taskId: string) {
+    const task = assertTask(taskId, this.repo.getTask(taskId));
+    if (String(task.status || '').toLowerCase() === 'running') {
+      throw new Error('실행 중인 작업은 삭제할 수 없습니다');
+    }
+
+    const deleted = this.repo.deleteTask(taskId);
+    if (!deleted) {
+      throw new Error(`작업 삭제에 실패했습니다: ${taskId}`);
+    }
+  }
+
   async createCodeExecutionPullRequest(taskId: string, options: Record<string, unknown> = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'code_execution') {

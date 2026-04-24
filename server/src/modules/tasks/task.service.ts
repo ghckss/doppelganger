@@ -103,6 +103,10 @@ export class TaskService {
     return this.commandService.resumeCodeExecutionTask(taskId);
   }
 
+  deleteTask(taskId: string) {
+    return this.commandService.deleteTask(taskId);
+  }
+
   async createCodeExecutionPullRequest(taskId: string, options: Record<string, unknown> = {}) {
     return this.commandService.createCodeExecutionPullRequest(taskId, options);
   }
