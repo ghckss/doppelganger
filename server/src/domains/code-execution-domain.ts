@@ -12,8 +12,9 @@ import {
 } from '../modules/code-execution/code-task-prompts.ts';
 import { normalizeWhitespace, safeArray, truncateText } from '../core/utils.ts';
 
-const CODE_REVIEW_ROUNDS = 3;
+const CODE_REVIEW_ROUNDS = 1;
 const CODE_EXECUTION_TOTAL_STEPS = CODE_REVIEW_ROUNDS + 5;
+const CONTINUATION_ALLOWED_STATUSES = new Set(['done', 'awaiting_approval', 'failed']);
 
 interface ExecutionProgressInput {
   phase?: string;
@@ -141,6 +142,65 @@ function formatExecutionError(error) {
 
 function compactStrings(values) {
   return safeArray(values).map((value) => normalizeWhitespace(value)).filter(Boolean);
+}
+
+function asRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return value;
+}
+
+function normalizeTaskStatus(value) {
+  return normalizeWhitespace(value).toLowerCase();
+}
+
+function compactCommitSummaries(commits) {
+  return safeArray(commits).map((entry) => {
+    const record = asRecord(entry);
+    const subject = normalizeWhitespace(record.subject || entry);
+    const sha = normalizeWhitespace(record.sha);
+    if (!subject) {
+      return '';
+    }
+    return sha ? `${subject} (${sha.slice(0, 7)})` : subject;
+  }).filter(Boolean).slice(0, 12);
+}
+
+function compactReviewRoundSummaries(reviewRounds) {
+  return safeArray(reviewRounds).map((entry, index) => {
+    const record = asRecord(entry);
+    const review = asRecord(record.review);
+    const roundRaw = Number(record.round);
+    const round = Number.isFinite(roundRaw) && roundRaw > 0 ? Math.trunc(roundRaw) : index + 1;
+    const findingsCount = safeArray(review.findings || record.findings).length;
+    const approval = normalizeWhitespace(review.approval || record.approval);
+    const suffix = approval ? `, ${approval}` : '';
+    return `round ${round}: findings ${findingsCount}${suffix}`;
+  }).filter(Boolean).slice(0, 6);
+}
+
+function buildContinuationContext(previousTask) {
+  const previousPayload = asRecord(previousTask.payload);
+  const previousResult = asRecord(previousTask.result);
+  const previousPromptPlan = asRecord(previousResult.promptPlan);
+  const parentTaskId = normalizeWhitespace(previousTask.id);
+  const rootTaskId = normalizeWhitespace(previousPayload.rootTaskId || parentTaskId);
+
+  return {
+    continueFromTaskId: parentTaskId,
+    parentTaskId,
+    rootTaskId,
+    previousStatus: normalizeTaskStatus(previousTask.status),
+    previousTitle: normalizeWhitespace(previousTask.title),
+    previousCommand: normalizeWhitespace(previousPayload.command || previousTask.title),
+    previousSummary: normalizeWhitespace(previousTask.summary),
+    previousBaseBranch: normalizeWhitespace(previousPayload.baseBranch || previousResult.baseBranch),
+    previousBranch: normalizeWhitespace(previousResult.branch || previousPayload.branchName),
+    previousPromptPlanSummary: normalizeWhitespace(previousPromptPlan.summary),
+    previousCommits: compactCommitSummaries(previousResult.commits),
+    previousReview: compactReviewRoundSummaries(previousResult.reviewRounds)
+  };
 }
 
 function toSimpleSummary(value) {
@@ -864,12 +924,14 @@ export function createCodeExecutionDomain({
     const currentStep = Math.max(0, toInteger(progress.currentStep, 0));
     const reviewRoundsCount = safeArray(result.reviewRounds).length;
     const hasPromptPlan = Boolean(plans.promptPlan);
+    const reviewStartStep = 4;
+    const prDraftStep = CODE_EXECUTION_TOTAL_STEPS - 1;
 
-    if (phase === 'pr_draft' || currentStep >= CODE_EXECUTION_TOTAL_STEPS - 1) {
-      return 7;
+    if (phase === 'pr_draft' || currentStep >= prDraftStep) {
+      return prDraftStep;
     }
-    if (phase === 'review' || currentStep >= 4 || reviewRoundsCount > 0) {
-      return 4;
+    if (phase === 'review' || (currentStep >= reviewStartStep && currentStep < prDraftStep) || reviewRoundsCount > 0) {
+      return reviewStartStep;
     }
     if ((phase === 'coding' || currentStep >= 3) && hasPromptPlan) {
       return 3;
@@ -1086,18 +1148,61 @@ export function createCodeExecutionDomain({
     });
   }
 
+  function resolveContinuationSource(input) {
+    const continueFromTaskId = normalizeWhitespace(input.continueFromTaskId);
+    if (!continueFromTaskId) {
+      return null;
+    }
+
+    const previousTask = repo.getTask(continueFromTaskId);
+    if (!previousTask) {
+      throw new Error(`이전 코드 작업을 찾을 수 없습니다: ${continueFromTaskId}`);
+    }
+    if (previousTask.domain !== 'code_execution') {
+      throw new Error(`코드 작업만 이어서 실행할 수 있습니다: ${continueFromTaskId}`);
+    }
+
+    const previousStatus = normalizeTaskStatus(previousTask.status);
+    if (!CONTINUATION_ALLOWED_STATUSES.has(previousStatus)) {
+      throw new Error(`현재 상태에서는 이어서 실행할 수 없습니다: ${previousTask.status}`);
+    }
+
+    const previousPayload = asRecord(previousTask.payload);
+    const previousWorkdir = normalizeWhitespace(previousPayload.workdir);
+    if (!previousWorkdir) {
+      throw new Error(`이전 작업의 작업공간 정보를 찾을 수 없습니다: ${continueFromTaskId}`);
+    }
+
+    return {
+      previousTask,
+      previousPayload,
+      previousWorkdir,
+      continuationContext: buildContinuationContext(previousTask)
+    };
+  }
+
   async function createTask(input) {
     const command = normalizeWhitespace(input.command);
-    const project = resolveProjectInput(input);
-    const requestedBranchName = normalizeWhitespace(input.branchName);
     if (!command) {
       throw new Error('작업 지시가 필요합니다');
     }
 
-    const workspace = await inspectWorkspace(project.path, input.baseBranch);
-    const selectedAgent = await getAvailableAgentRunner(input.agentProvider, workspace.git.root);
+    const continuationSource = resolveContinuationSource(input);
+    const project = continuationSource
+      ? resolveProjectInput({ workdir: continuationSource.previousWorkdir })
+      : resolveProjectInput(input);
+    const requestedBranchName = normalizeWhitespace(input.branchName);
+    const requestedBaseBranch = normalizeWhitespace(
+      input.baseBranch || continuationSource?.previousPayload?.baseBranch
+    );
+    const workspace = await inspectWorkspace(project.path, requestedBaseBranch);
+    const selectedAgent = await getAvailableAgentRunner(
+      input.agentProvider || continuationSource?.previousPayload?.agentProvider,
+      workspace.git.root
+    );
+    const continuationContext = continuationSource?.continuationContext || null;
 
-    const task = repo.upsertTask({
+    let task = repo.upsertTask({
       domain: 'code_execution',
       kind: 'implementation',
       title: `[코드] ${command}`,
@@ -1120,7 +1225,15 @@ export function createCodeExecutionDomain({
         requestedBranchName,
         branchName: '',
         restoreBranch: workspace.git.currentBranch || workspace.git.baseBranch,
-        branchManaged: false
+        branchManaged: false,
+        ...(continuationContext
+          ? {
+              continueFromTaskId: continuationContext.continueFromTaskId,
+              parentTaskId: continuationContext.parentTaskId,
+              rootTaskId: continuationContext.rootTaskId,
+              continuationContext
+            }
+          : {})
       },
       result: {
         executionProgress: buildExecutionProgress({
@@ -1130,8 +1243,21 @@ export function createCodeExecutionDomain({
         })
       },
       sourceUrl: workspace.git.remoteUrl || null,
-      summary: `${workspace.git.repoSlug || path.basename(workspace.git.root)}에서 실행 대기 중입니다`
+      summary: continuationContext
+        ? `${workspace.git.repoSlug || path.basename(workspace.git.root)}에서 이전 작업을 이어 실행 대기 중입니다`
+        : `${workspace.git.repoSlug || path.basename(workspace.git.root)}에서 실행 대기 중입니다`
     });
+    if (!continuationContext) {
+      const updatedTask = repo.updateTask(task.id, {
+        payload: {
+          ...asRecord(task.payload),
+          rootTaskId: task.id
+        }
+      });
+      if (updatedTask) {
+        task = updatedTask;
+      }
+    }
 
     storeArtifact(task.id, 'workspace_snapshot', '작업공간 스냅샷', {
       root: workspace.git.root,
@@ -1143,7 +1269,8 @@ export function createCodeExecutionDomain({
       recommendedChecks: workspace.recommendedChecks,
       scripts: workspace.scripts,
       statusLines: workspace.git.statusLines,
-      fileSample: workspace.fileSample.slice(0, 40)
+      fileSample: workspace.fileSample.slice(0, 40),
+      continuedFrom: continuationContext || null
     });
 
     repo.logExecution(task.id, 'create_code_task', 'success', {
@@ -1151,13 +1278,16 @@ export function createCodeExecutionDomain({
         command,
         projectId: project.id,
         workdir: workspace.git.root,
-        branchName: requestedBranchName
+        branchName: requestedBranchName,
+        continueFromTaskId: continuationContext?.continueFromTaskId || ''
       },
       response: {
         repoSlug: workspace.git.repoSlug,
         baseBranch: workspace.git.baseBranch,
         githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
-        agentProvider: selectedAgent.provider
+        agentProvider: selectedAgent.provider,
+        rootTaskId: normalizeWhitespace(task.payload?.rootTaskId),
+        parentTaskId: normalizeWhitespace(task.payload?.parentTaskId)
       }
     });
 

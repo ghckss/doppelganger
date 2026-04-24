@@ -98,6 +98,48 @@ function joinSection(title: string, body?: string): string {
   return [`## ${title}`, body || '- none'].join('\n');
 }
 
+function normalizeTextList(value: unknown, limit = 8): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => normalizeWhitespace(item))
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function continuationContextLines(payload: CodeTaskPayload = {}): string[] {
+  const context = payload.continuationContext;
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    return [];
+  }
+
+  const source = context as Record<string, unknown>;
+  const lines = sentenceList([
+    normalizeWhitespace(source.previousCommand) ? `Previous command: ${normalizeWhitespace(source.previousCommand)}` : '',
+    normalizeWhitespace(source.previousSummary) ? `Previous summary: ${normalizeWhitespace(source.previousSummary)}` : '',
+    normalizeWhitespace(source.previousBaseBranch) ? `Previous base branch: ${normalizeWhitespace(source.previousBaseBranch)}` : '',
+    normalizeWhitespace(source.previousBranch) ? `Previous work branch: ${normalizeWhitespace(source.previousBranch)}` : '',
+    normalizeWhitespace(source.previousStatus) ? `Previous status: ${normalizeWhitespace(source.previousStatus)}` : '',
+    normalizeWhitespace(source.previousPromptPlanSummary)
+      ? `Previous prompt-plan summary: ${normalizeWhitespace(source.previousPromptPlanSummary)}`
+      : '',
+    normalizeWhitespace(source.parentTaskId) && normalizeWhitespace(source.rootTaskId)
+      ? `Task chain: parent=${normalizeWhitespace(source.parentTaskId)}, root=${normalizeWhitespace(source.rootTaskId)}`
+      : normalizeWhitespace(source.parentTaskId)
+        ? `Task chain: parent=${normalizeWhitespace(source.parentTaskId)}`
+        : ''
+  ]);
+  const commits = normalizeTextList(source.previousCommits, 10);
+  const review = normalizeTextList(source.previousReview, 6);
+
+  return [
+    ...lines.split('\n').map((line) => normalizeWhitespace(line.replace(/^- /, ''))).filter(Boolean),
+    ...(commits.length > 0 ? [`Previous commits: ${commits.join(' | ')}`] : []),
+    ...(review.length > 0 ? [`Previous review summary: ${review.join(' | ')}`] : [])
+  ];
+}
+
 export function classifyTask(command: unknown): string {
   const text = String(command || '').toLowerCase();
   if (/design|layout|ui|ux|screen|page|style/.test(text)) {
@@ -117,6 +159,7 @@ export function buildFallbackPromptPlan(
 ): PromptPlan {
   const command = normalizeWhitespace(task.payload?.command || task.title);
   const taskType = classifyTask(command);
+  const continuationLines = continuationContextLines(task.payload || {});
 
   return {
     summary: `Implement the requested repository change for: ${truncateText(command, 180)}`,
@@ -141,7 +184,8 @@ export function buildFallbackPromptPlan(
       `Current branch: ${workspace.git.currentBranch}`,
       `Base branch: ${workspace.git.baseBranch}`,
       `Dirty worktree before start: ${yesNo(workspace.git.isDirty)}`,
-      `Top-level files sampled: ${workspace.fileSample.slice(0, 12).join(', ') || 'none'}`
+      `Top-level files sampled: ${workspace.fileSample.slice(0, 12).join(', ') || 'none'}`,
+      ...continuationLines
     ]
   };
 }
@@ -216,12 +260,16 @@ export function buildCodingPrompt({
   designSpec?: DesignSpec | null;
 }): string {
   const payload = task.payload || {};
+  const continuationLines = continuationContextLines(payload);
   const sections = [
     joinSection('Goal', [
       `Implement the requested change in \`${workspace.git.root}\`.`,
       `User command: ${payload.command}`,
       `Task type: ${promptPlan.taskType}`
     ].join('\n')),
+    ...(continuationLines.length > 0
+      ? [joinSection('Continuation Context', sentenceList(continuationLines))]
+      : []),
     joinSection('Hard Constraints', sentenceList([
       ...promptPlan.constraints,
       `Base branch: ${workspace.git.baseBranch}`,
@@ -285,11 +333,15 @@ export function buildReviewPrompt({
   round: number;
 }): string {
   const payload = task.payload || {};
+  const continuationLines = continuationContextLines(payload);
   const sections = [
     joinSection('Review Goal', [
       `Review round ${round} for the branch \`${payload.branchName}\` against \`${workspace.git.baseBranch}\`.`,
       'Focus on bugs, behavioral regressions, missing tests, design mismatches, and important code quality issues.'
     ].join('\n')),
+    ...(continuationLines.length > 0
+      ? [joinSection('Continuation Context', sentenceList(continuationLines))]
+      : []),
     joinSection('Requested Change', sentenceList([
       promptPlan.summary,
       productPlan?.problem,
@@ -368,6 +420,7 @@ export function buildPullRequestDraft({
   commitSummary: string[];
 }): { title: string; body: string } {
   const command = normalizeWhitespace(task.payload?.command || task.title);
+  const continuationLines = continuationContextLines(task.payload || {});
   const resolvedCounts = reviewRounds
     .map((round: ReviewRound) => `Round ${round.round}: ${(round.findings || []).length} finding(s) reviewed`)
     .join('\n');
@@ -383,6 +436,13 @@ export function buildPullRequestDraft({
     '',
     '## Review Loop',
     ...(resolvedCounts ? resolvedCounts.split('\n') : ['- No review rounds recorded.']),
+    ...(continuationLines.length > 0
+      ? [
+          '',
+          '## Continuation Context',
+          ...continuationLines.map((line) => `- ${line}`)
+        ]
+      : []),
     '',
     '## Validation',
     '- Validation details are attached in the task history.'

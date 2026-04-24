@@ -36,7 +36,7 @@ Current state:
 - Slack mention handling is implemented end-to-end, including automatic summary and reply-draft generation during polling.
 - Slack mention detail supports optional manual repository analysis for deeper replies, while default polling/drafting does not inspect repositories.
 - GitHub PR review is implemented for configured repositories, with open PR candidate polling, draft PR skip, duplicate-review skip, and manual selection from the web UI before posting comments.
-- Local code execution is implemented with prompt planning, optional planning/design phases, coding, review loops, and PR creation.
+- Local code execution is implemented with prompt planning, optional planning/design phases, coding, single review loop, and PR creation.
 - Meeting recording is implemented in the React UI with Korean real-time transcript capture (1s refresh) and Confluence paste-ready summary document generation.
 
 ## Requirements
@@ -174,11 +174,12 @@ Run scripts in `server/`:
 4. Open `http://127.0.0.1:5173` and use the project picker in the "코드 작업 생성" 영역.
    - 필요하면 `작업 브랜치(선택)`에 원하는 브랜치명을 직접 입력할 수 있습니다.
 5. Select the agent (`Codex` or `Claude`) per task.
-6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent (including in-step harness self-check/fix), perform three review loops, and stop before PR creation.
-7. In task detail, `PR 생성` appears only after step `8/8` is complete.
+6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent (including in-step harness self-check/fix), perform one review loop, and stop before PR creation.
+7. In task detail, `PR 생성` appears only after step `6/6` is complete.
 8. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
 9. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
 10. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
+11. 실행 중 목록은 `running` 상태만 보이며, `이전 작업 이어가기` 모달에서 완료/승인대기/실패 작업을 선택해 후속 작업을 시작할 수 있습니다.
 
 ### PR creation rules
 - Source template: `<selected repository>/.github/PULL_REQUEST_TEMPLATE.md`
@@ -198,15 +199,13 @@ Run scripts in `server/`:
 - `2`: 프롬프트/기획/디자인 계획 생성
 - `3`: 코딩 에이전트 실행 + 하네스 자체 점검/수정
 - `4`: 리뷰/수정 라운드 1
-- `5`: 리뷰/수정 라운드 2
-- `6`: 리뷰/수정 라운드 3
-- `7`: PR 초안 정리
-- `8`: 코드 작업 완료
+- `5`: PR 초안 정리
+- `6`: 코드 작업 완료
 
 Resume behavior:
 - `코드 작업 재개`는 항상 1단계부터 다시 시작하지 않습니다.
 - 실패/중단 시점의 체크포인트(`executionProgress.currentStep`, `phase`, 저장된 review rounds/artifacts)를 기준으로 가능한 가장 가까운 단계부터 이어서 실행합니다.
-- UI에서는 진행 카드의 `n/8` 표시 아래에 현재 단계에서 수행 중인 작업 요약 한 줄을 함께 표시합니다.
+- UI에서는 진행 카드의 `n/6` 표시 아래에 현재 단계에서 수행 중인 작업 요약 한 줄을 함께 표시합니다.
 - UI에서는 진행 카드 우상단에 현재 단계 기준 경과 시간(초 단위, `task.updated_at` 기반)을 표시합니다.
 - UI에서는 코드 작업 상세에 `리뷰 라운드 내용` 영역이 표시되며, `result.reviewRounds`와 `review_round/patch_round` 아티팩트를 합쳐 각 라운드의 검토/수정 내역을 확인할 수 있습니다.
 - 코드 작업 완료 시 작업 브랜치 커밋을 `baseBranch`(기준 브랜치)에 `--ff-only`로 먼저 병합한 뒤, 작업 브랜치(`doppelganger/...`)를 로컬에서 삭제하고 기준 브랜치로 복귀합니다.

@@ -50,6 +50,38 @@ function describeWorkspace(workspace: WorkspaceSnapshot): string {
   ].join('\n');
 }
 
+function describeContinuation(task: CodeTaskInput): string {
+  const payload = task.payload && typeof task.payload === 'object'
+    ? task.payload
+    : {};
+  const context = payload.continuationContext;
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    return '';
+  }
+
+  const source = context as Record<string, unknown>;
+  const previousCommand = normalizeWhitespace(source.previousCommand);
+  const previousSummary = normalizeWhitespace(source.previousSummary);
+  const parentTaskId = normalizeWhitespace(source.parentTaskId);
+  const previousStatus = normalizeWhitespace(source.previousStatus);
+  const previousReview = compactArray(source.previousReview);
+  const previousCommits = compactArray(source.previousCommits);
+
+  const lines = [
+    previousCommand ? `Previous command: ${previousCommand}` : '',
+    previousSummary ? `Previous summary: ${previousSummary}` : '',
+    parentTaskId ? `Parent task id: ${parentTaskId}` : '',
+    previousStatus ? `Previous status: ${previousStatus}` : '',
+    previousReview.length > 0 ? `Previous review: ${previousReview.join(' | ')}` : '',
+    previousCommits.length > 0 ? `Previous commits: ${previousCommits.join(' | ')}` : ''
+  ].filter(Boolean);
+  if (lines.length === 0) {
+    return '';
+  }
+
+  return ['Continuation context:', ...lines].join('\n');
+}
+
 export class CodeTaskPlanner {
   generationClient: PlannerGenerationClient | null;
 
@@ -112,8 +144,9 @@ export class CodeTaskPlanner {
 
     const input = [
       `User command: ${task.payload?.command || task.title}`,
+      describeContinuation(task),
       describeWorkspace(workspace)
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
 
     try {
       const text = await this.generateText({ instructions, input, scope: 'code_planning' });
@@ -156,9 +189,10 @@ export class CodeTaskPlanner {
 
     const input = [
       `User command: ${task.payload?.command || task.title}`,
+      describeContinuation(task),
       `Prompt plan: ${JSON.stringify(promptPlan)}`,
       describeWorkspace(workspace)
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
 
     try {
       const text = await this.generateText({ instructions, input, scope: 'code_planning' });
@@ -200,9 +234,10 @@ export class CodeTaskPlanner {
 
     const input = [
       `User command: ${task.payload?.command || task.title}`,
+      describeContinuation(task),
       `Prompt plan: ${JSON.stringify(promptPlan)}`,
       describeWorkspace(workspace)
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
 
     try {
       const text = await this.generateText({ instructions, input, scope: 'code_planning' });
@@ -247,11 +282,12 @@ export class CodeTaskPlanner {
 
     const input = [
       `User command: ${task.payload?.command || task.title}`,
+      describeContinuation(task),
       `Prompt plan: ${JSON.stringify(task.result?.promptPlan || {})}`,
       `Commit summary: ${JSON.stringify(commitSummary)}`,
       `Review rounds: ${JSON.stringify(reviewRounds)}`,
       describeWorkspace(workspace)
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
 
     try {
       const text = await this.generateText({ instructions, input, scope: 'code_planning' });

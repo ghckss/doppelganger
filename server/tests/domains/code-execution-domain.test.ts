@@ -334,7 +334,7 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(createdTask.payload.agentProvider, 'claude');
   assert.equal(createdTask.result.executionProgress.phase, 'queued');
   assert.equal(createdTask.result.executionProgress.currentStep, 0);
-  assert.equal(createdTask.result.executionProgress.totalSteps, 8);
+  assert.equal(createdTask.result.executionProgress.totalSteps, 6);
   assert.equal(createdTask.result.executionProgress.percent, 0);
 
   await domain.start(task.id);
@@ -348,17 +348,17 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(finishedTask.status, 'awaiting_approval');
   assert.equal(finishedTask.result.branch, 'feature/custom-demo-branch');
   assert.equal(finishedTask.result.commits.length, 2);
-  assert.equal(finishedTask.result.reviewRounds.length, 3);
+  assert.equal(finishedTask.result.reviewRounds.length, 1);
   assert.equal(finishedTask.result.executionProgress.phase, 'completed');
-  assert.equal(finishedTask.result.executionProgress.currentStep, 8);
-  assert.equal(finishedTask.result.executionProgress.totalSteps, 8);
+  assert.equal(finishedTask.result.executionProgress.currentStep, 6);
+  assert.equal(finishedTask.result.executionProgress.totalSteps, 6);
   assert.equal(finishedTask.result.executionProgress.percent, 100);
   assert.equal(codexCallCount, 0);
   assert.equal(repo.listArtifacts(task.id, 'prompt_plan').length, 1);
   assert.equal(repo.listArtifacts(task.id, 'product_plan').length, 1);
   assert.equal(repo.listArtifacts(task.id, 'design_spec').length, 1);
-  assert.equal(repo.listArtifacts(task.id, 'review_round').length, 3);
-  assert.equal(repo.listArtifacts(task.id, 'patch_round').length, 3);
+  assert.equal(repo.listArtifacts(task.id, 'review_round').length, 1);
+  assert.equal(repo.listArtifacts(task.id, 'patch_round').length, 1);
   assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
   assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
   assert.equal(read('git', ['show', 'main:README.md'], workspace.repoDir), '# Demo\n\nImplemented by agent.');
@@ -920,7 +920,7 @@ test('code execution domain marks progress as failed when coding runner crashes'
   assert.equal(failedTask.status, 'failed');
   assert.match(failedTask.last_error, /Simulated coding agent crash/);
   assert.equal(failedTask.result.executionProgress.phase, 'failed');
-  assert.equal(failedTask.result.executionProgress.totalSteps, 8);
+  assert.equal(failedTask.result.executionProgress.totalSteps, 6);
   assert.ok(failedTask.result.executionProgress.percent >= 0 && failedTask.result.executionProgress.percent <= 100);
   const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
   assert.ok(executionActions.includes('run_code_execution'));
@@ -1184,4 +1184,191 @@ test('code execution domain resumes from coding checkpoint without rerunning pla
 
   const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
   assert.ok(executionActions.includes('resume_from_checkpoint'));
+});
+
+test('createTask can continue from a previous completed code task', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  let codexAvailableCalls = 0;
+  let claudeAvailableCalls = 0;
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {
+        codexAvailableCalls += 1;
+        throw new Error('codex should not be selected for continuation');
+      },
+      async runExec() {
+        throw new Error('not used');
+      }
+    },
+    claudeCliRunner: {
+      async assertAvailable() {
+        claudeAvailableCalls += 1;
+      },
+      async runExec() {
+        throw new Error('not used');
+      }
+    },
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        throw new Error('not used');
+      },
+      async createPullRequestDraft() {
+        throw new Error('not used');
+      }
+    }
+  });
+
+  const previousTask = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    title: '[코드] Previous task',
+    status: 'done',
+    payload: {
+      command: 'Initial implementation',
+      workdir: workspace.repoDir,
+      baseBranch: 'main',
+      branchName: 'feature/initial',
+      agentProvider: 'claude'
+    },
+    result: {
+      branch: 'feature/initial',
+      promptPlan: {
+        summary: 'Initial plan summary'
+      },
+      commits: [{
+        sha: 'abc1234def',
+        subject: 'feat: initial change'
+      }],
+      reviewRounds: [{
+        round: 1,
+        review: {
+          findings: [{ id: 'review-1' }],
+          approval: 'changes_requested'
+        }
+      }]
+    },
+    summary: 'Initial task summary'
+  });
+
+  const followUpTask = await domain.createTask({
+    command: 'Follow-up implementation',
+    continueFromTaskId: previousTask.id
+  });
+  const createdTask = repo.getTask(followUpTask.id);
+  assert.equal(codexAvailableCalls, 0);
+  assert.equal(claudeAvailableCalls, 1);
+  assert.equal(fs.realpathSync(createdTask.payload.workdir), fs.realpathSync(workspace.repoDir));
+  assert.equal(createdTask.payload.baseBranch, 'main');
+  assert.equal(createdTask.payload.agentProvider, 'claude');
+  assert.equal(createdTask.payload.continueFromTaskId, previousTask.id);
+  assert.equal(createdTask.payload.parentTaskId, previousTask.id);
+  assert.equal(createdTask.payload.rootTaskId, previousTask.id);
+  assert.equal(createdTask.result.executionProgress.totalSteps, 6);
+  assert.equal(createdTask.result.executionProgress.reviewTotalRounds, 1);
+  assert.match(createdTask.summary, /이전 작업을 이어 실행 대기 중입니다/);
+  assert.deepEqual(createdTask.payload.continuationContext.previousCommits, [
+    'feat: initial change (abc1234)'
+  ]);
+  assert.deepEqual(createdTask.payload.continuationContext.previousReview, [
+    'round 1: findings 1, changes_requested'
+  ]);
+  assert.equal(createdTask.payload.continuationContext.previousPromptPlanSummary, 'Initial plan summary');
+});
+
+test('createTask rejects continuation when previous task is still running', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'claude'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('not used');
+      }
+    },
+    claudeCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('not used');
+      }
+    },
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        throw new Error('not used');
+      },
+      async createPullRequestDraft() {
+        throw new Error('not used');
+      }
+    }
+  });
+
+  const runningTask = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    title: '[코드] Running task',
+    status: 'running',
+    payload: {
+      command: 'Running implementation',
+      workdir: workspace.repoDir,
+      baseBranch: 'main'
+    }
+  });
+
+  await assert.rejects(
+    () => domain.createTask({
+      command: 'Should fail',
+      continueFromTaskId: runningTask.id
+    }),
+    /현재 상태에서는 이어서 실행할 수 없습니다/
+  );
 });

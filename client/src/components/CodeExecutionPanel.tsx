@@ -7,6 +7,7 @@ import type {
   ExecutionProgress
 } from '../task-view';
 import {
+  formatDateTime,
   getExecutionProgress,
   getExecutionStepElapsedSeconds,
   mapStatusLabel,
@@ -81,20 +82,20 @@ const EXECUTION_STEP_ITEMS = [
   { step: 2, label: '프롬프트/기획/디자인 계획 생성' },
   { step: 3, label: '코딩 에이전트 실행' },
   { step: 4, label: '리뷰/수정 라운드 1' },
-  { step: 5, label: '리뷰/수정 라운드 2' },
-  { step: 6, label: '리뷰/수정 라운드 3' },
-  { step: 7, label: 'PR 초안 정리' },
-  { step: 8, label: '코드 작업 완료' }
+  { step: 5, label: 'PR 초안 정리' },
+  { step: 6, label: '코드 작업 완료' }
 ] as const;
+
+const CONTINUATION_SOURCE_STATUSES = new Set(['done', 'awaiting_approval', 'failed']);
 
 const DEFAULT_PROGRESS: ExecutionProgress = {
   phase: '',
   label: '',
   currentStep: 0,
-  totalSteps: 8,
+  totalSteps: 6,
   percent: 0,
   reviewRound: 0,
-  reviewTotalRounds: 3
+  reviewTotalRounds: 1
 };
 
 function stepState(currentStep: number, step: number): 'done' | 'current' | 'pending' {
@@ -309,6 +310,9 @@ export function CodeExecutionPanel({
   const [collapsedTimelineByTaskId, setCollapsedTimelineByTaskId] = useState<Record<string, boolean>>({});
   const [createPrTaskId, setCreatePrTaskId] = useState('');
   const [prBranchName, setPrBranchName] = useState('');
+  const [resumeHistoryModalOpen, setResumeHistoryModalOpen] = useState(false);
+  const [continueFromTaskId, setContinueFromTaskId] = useState('');
+  const [continueCommand, setContinueCommand] = useState('');
 
   const detailByTaskId = useMemo(() => {
     const next: Record<string, TaskDetail> = {};
@@ -325,6 +329,17 @@ export function CodeExecutionPanel({
     list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
     return list;
   }, [tasks]);
+  const continuationCandidates = useMemo(() => {
+    const list = tasks
+      .filter((task) => CONTINUATION_SOURCE_STATUSES.has(String(task.status || '').toLowerCase()))
+      .slice();
+    list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
+    return list;
+  }, [tasks]);
+  const selectedContinuationTask = useMemo(
+    () => continuationCandidates.find((task) => task.id === continueFromTaskId) || null,
+    [continuationCandidates, continueFromTaskId]
+  );
 
   const runningTaskViews = useMemo(
     () => runningTasks.map((task) => {
@@ -350,7 +365,7 @@ export function CodeExecutionPanel({
         taskMessage,
         pullRequestUrl,
         currentTaskBranch: resolveTaskBranch(sourceTask),
-        canShowCreatePrButton: currentStep >= 8 && !pullRequestUrl,
+        canShowCreatePrButton: currentStep >= Math.max(1, Number(progress.totalSteps || DEFAULT_PROGRESS.totalSteps)) && !pullRequestUrl,
         canResumeTask,
         hasTokenOrAuthError
       };
@@ -422,6 +437,16 @@ export function CodeExecutionPanel({
       setPrBranchName('');
     }
   }, [createPrTaskId, runningTaskViews]);
+  useEffect(() => {
+    if (!resumeHistoryModalOpen) {
+      return;
+    }
+    setContinueFromTaskId((current) => (
+      continuationCandidates.some((task) => task.id === current)
+        ? current
+        : continuationCandidates[0]?.id || ''
+    ));
+  }, [continuationCandidates, resumeHistoryModalOpen]);
 
   function toggleRunningTask(taskId: string) {
     setCollapsedTaskById((current) => ({
@@ -445,6 +470,44 @@ export function CodeExecutionPanel({
   function closeCreatePrModal() {
     setCreatePrTaskId('');
     setPrBranchName('');
+  }
+
+  function openResumeHistoryModal() {
+    if (continuationCandidates.length === 0) {
+      return;
+    }
+    setResumeHistoryModalOpen(true);
+    setContinueFromTaskId(continuationCandidates[0]?.id || '');
+    setContinueCommand('');
+  }
+
+  function closeResumeHistoryModal() {
+    setResumeHistoryModalOpen(false);
+    setContinueFromTaskId('');
+    setContinueCommand('');
+  }
+
+  function submitContinueTask() {
+    const selectedTask = selectedContinuationTask;
+    const normalizedCommand = continueCommand.trim();
+    if (!selectedTask || !normalizedCommand) {
+      return;
+    }
+
+    onRunAction('이전 작업 이어가기', async () => {
+      const created = await createCodeTask({
+        command: normalizedCommand,
+        projectId,
+        baseBranch,
+        branchName,
+        continueFromTaskId: selectedTask.id,
+        agentProvider,
+        needsPlanning,
+        needsDesign
+      });
+      return created.task.id;
+    });
+    closeResumeHistoryModal();
   }
 
   function submitCreatePullRequest() {
@@ -477,9 +540,19 @@ export function CodeExecutionPanel({
           <section className="grid gap-3">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-slate-900">코드 작업 생성</h3>
-              <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('code_create')}>
-                {collapsedSections.code_create ? '펼치기' : '접기'}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className={SUB_BUTTON_CLASS}
+                  onClick={openResumeHistoryModal}
+                  disabled={Boolean(busyAction) || continuationCandidates.length === 0}
+                >
+                  이전 작업 이어가기
+                </button>
+                <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('code_create')}>
+                  {collapsedSections.code_create ? '펼치기' : '접기'}
+                </button>
+              </div>
             </div>
             {!collapsedSections.code_create && (
               <form
@@ -767,6 +840,82 @@ export function CodeExecutionPanel({
             )}
           </section>
         </>
+      )}
+
+      {resumeHistoryModalOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/55 p-4">
+          <section className="w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-4 shadow-lg">
+            <h4 className="text-base font-semibold text-slate-900">이전 작업 이어가기</h4>
+            <p className="mt-1 text-sm text-slate-700">
+              이전 코드 작업의 맥락을 이어서 새 코드 작업을 시작합니다. 새 작업 명령은 필수입니다.
+            </p>
+            {continuationCandidates.length === 0 ? (
+              <p className="mt-3 text-sm text-slate-600">이어갈 수 있는 이전 코드 작업이 없습니다.</p>
+            ) : (
+              <div className="mt-3 max-h-72 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+                {continuationCandidates.map((task) => {
+                  const taskPayload = toRecord(task.payload);
+                  const isSelected = continueFromTaskId === task.id;
+                  const taskCommand = toText(taskPayload.command) || toText(task.title);
+                  return (
+                    <label
+                      key={task.id}
+                      className={`flex cursor-pointer gap-2 rounded-md border px-2 py-2 ${
+                        isSelected ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        className="mt-1"
+                        name="continueFromTaskId"
+                        value={task.id}
+                        checked={isSelected}
+                        onChange={() => setContinueFromTaskId(task.id)}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold text-slate-900">{taskCommand}</p>
+                        <p className="mt-0.5 text-xs text-slate-600">
+                          {mapStatusLabel(task.status)} · 업데이트 {formatDateTime(task.updated_at)}
+                        </p>
+                        <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                          {toText(task.summary) || '작업 요약이 없습니다.'}
+                        </p>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <label className={`${LABEL_CLASS} mt-3`}>
+              새 작업 명령(필수)
+              <textarea
+                className={INPUT_CLASS}
+                value={continueCommand}
+                onChange={(event) => setContinueCommand(event.target.value)}
+                rows={3}
+                placeholder="예: 이전 작업의 캐시 전략은 유지하고, 상세 페이지 에러 복구 흐름만 보완"
+              />
+            </label>
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                className={SUB_BUTTON_CLASS}
+                onClick={closeResumeHistoryModal}
+                disabled={Boolean(busyAction)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className={BUTTON_CLASS}
+                onClick={submitContinueTask}
+                disabled={Boolean(busyAction) || !selectedContinuationTask || !continueCommand.trim()}
+              >
+                이어서 작업 시작
+              </button>
+            </div>
+          </section>
+        </div>
       )}
 
       {createPrTarget && (

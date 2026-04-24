@@ -32,6 +32,7 @@ export async function handleTaskRoutes({
       projectId: readStringField(body, 'projectId'),
       baseBranch: readStringField(body, 'baseBranch'),
       branchName: readStringField(body, 'branchName'),
+      continueFromTaskId: readStringField(body, 'continueFromTaskId'),
       agentProvider: readStringField(body, 'agentProvider'),
       needsPlanning: String(body.needsPlanning || '').toLowerCase() === 'true',
       needsDesign: String(body.needsDesign || '').toLowerCase() === 'true'

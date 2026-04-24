@@ -74,6 +74,7 @@ export function createCodeTask(input: {
   projectId: string;
   baseBranch: string;
   branchName: string;
+  continueFromTaskId?: string;
   agentProvider: string;
   needsPlanning: boolean;
   needsDesign: boolean;
