@@ -1373,6 +1373,121 @@ test('createTask rejects continuation when previous task is still running', asyn
   );
 });
 
+test('createTask treats unknown baseBranch as requested branch name when branchName is empty', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('not used');
+      }
+    },
+    claudeCliRunner: null,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        throw new Error('not used');
+      },
+      async createPullRequestDraft() {
+        throw new Error('not used');
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Implement follow-up change',
+    projectId: 'repo',
+    baseBranch: 'work/hochan/FROMM-2985/FROMM-3102',
+    branchName: ''
+  });
+  const createdTask = repo.getTask(task.id);
+
+  assert.equal(createdTask.payload.baseBranch, 'main');
+  assert.equal(createdTask.payload.requestedBranchName, 'work/hochan/FROMM-2985/FROMM-3102');
+});
+
+test('createTask returns friendly error when explicit baseBranch is not found', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('not used');
+      }
+    },
+    claudeCliRunner: null,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        throw new Error('not used');
+      },
+      async createPullRequestDraft() {
+        throw new Error('not used');
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => domain.createTask({
+      command: 'Explicit invalid base branch',
+      projectId: 'repo',
+      baseBranch: 'missing/base',
+      branchName: 'work/hochan/FROMM-3102'
+    }),
+    /기준 브랜치를 찾지 못했습니다: missing\/base/
+  );
+});
+
 test('code execution domain supports plan mode and stops after planning with confirmation requests', async () => {
   const workspace = createGitWorkspace();
   const repo = createRepository(path.join(workspace.root, 'agent.db'));

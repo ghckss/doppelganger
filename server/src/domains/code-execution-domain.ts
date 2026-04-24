@@ -609,6 +609,65 @@ export function createCodeExecutionDomain({
     return result.stdout.trim();
   }
 
+  async function gitRevisionExists(workdir, revision) {
+    const normalizedRevision = normalizeWhitespace(revision);
+    if (!normalizedRevision) {
+      return false;
+    }
+
+    try {
+      await runGit(workdir, ['rev-parse', '--verify', normalizedRevision]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function branchRefExists(workdir, branchName) {
+    const normalized = normalizeWhitespace(branchName);
+    if (!normalized) {
+      return false;
+    }
+
+    const candidates = [
+      `refs/heads/${normalized}^{commit}`,
+      `refs/remotes/origin/${normalized}^{commit}`,
+      `${normalized}^{commit}`
+    ];
+    for (const candidate of candidates) {
+      if (await gitRevisionExists(workdir, candidate)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  async function resolveBaseBranch(workdir, requestedBaseBranch = '', currentBranch = '') {
+    const requested = normalizeWhitespace(requestedBaseBranch);
+    const fallbackCandidates = Array.from(new Set([
+      normalizeWhitespace(currentBranch),
+      'master',
+      'main'
+    ].filter(Boolean)));
+    const candidates = requested ? [requested] : fallbackCandidates;
+
+    for (const candidate of candidates) {
+      if (await branchRefExists(workdir, candidate)) {
+        return candidate;
+      }
+    }
+
+    if (requested) {
+      throw new Error(
+        `기준 브랜치를 찾지 못했습니다: ${requested}. `
+        + '기준 브랜치에는 기존 브랜치(main/master 등)를 입력하고, 새 작업 브랜치는 작업 브랜치명에 입력해 주세요.'
+      );
+    }
+
+    throw new Error('기준 브랜치를 찾지 못했습니다. main/master 브랜치가 존재하는지 확인해 주세요.');
+  }
+
   async function listWorkspaceFiles(workdir) {
     try {
       const result = await workspaceRunner.run('rg', ['--files'], { workdir });
@@ -623,8 +682,7 @@ export function createCodeExecutionDomain({
     const absoluteWorkdir = workspaceRunner.assertAllowed(workdir);
     const root = await runGit(absoluteWorkdir, ['rev-parse', '--show-toplevel']);
     const currentBranch = await runGit(root, ['branch', '--show-current']);
-    const baseBranch = normalizeWhitespace(requestedBaseBranch || currentBranch || 'main');
-    await runGit(root, ['rev-parse', '--verify', baseBranch]);
+    const baseBranch = await resolveBaseBranch(root, requestedBaseBranch, currentBranch);
 
     let remoteUrl = '';
     try {
@@ -1319,10 +1377,17 @@ export function createCodeExecutionDomain({
     const project = continuationSource
       ? resolveProjectInput({ workdir: continuationSource.previousWorkdir })
       : resolveProjectInput(input);
-    const requestedBranchName = normalizeWhitespace(input.branchName);
-    const requestedBaseBranch = normalizeWhitespace(
+    let requestedBranchName = normalizeWhitespace(input.branchName);
+    let requestedBaseBranch = normalizeWhitespace(
       input.baseBranch || continuationSource?.previousPayload?.baseBranch
     );
+    if (requestedBaseBranch && !requestedBranchName) {
+      const looksLikeExistingBase = await branchRefExists(project.path, requestedBaseBranch);
+      if (!looksLikeExistingBase) {
+        requestedBranchName = requestedBaseBranch;
+        requestedBaseBranch = '';
+      }
+    }
     const executionMode = normalizeExecutionMode(
       input.executionMode || continuationSource?.previousPayload?.executionMode,
       'full'
