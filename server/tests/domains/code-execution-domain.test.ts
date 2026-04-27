@@ -321,10 +321,6 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
       workspace: {
         projectsRoot: workspace.root
       },
-      figma: {
-        fileUrl: 'https://www.figma.com/file/AbCdEf1234567890/Fromm-UI',
-        pluginId: '1234567890'
-      },
       github: {
         owner: '',
         repositories: []
@@ -473,10 +469,6 @@ test('createPullRequest retries with owner-prefixed head when refs are unreadabl
       workspace: {
         projectsRoot: workspace.root
       },
-      figma: {
-        fileUrl: 'https://www.figma.com/file/AbCdEf1234567890/Fromm-UI',
-        pluginId: '1234567890'
-      },
       github: {
         owner: '',
         repositories: []
@@ -587,10 +579,6 @@ test('createPullRequest formats title with FRM prefix and branch ticket token', 
       },
       workspace: {
         projectsRoot: workspace.root
-      },
-      figma: {
-        fileUrl: 'https://www.figma.com/file/AbCdEf1234567890/Fromm-UI',
-        pluginId: '1234567890'
       },
       github: {
         owner: '',
@@ -1647,10 +1635,6 @@ test('code execution domain can generate figma import artifact from design spec'
       workspace: {
         projectsRoot: workspace.root
       },
-      figma: {
-        fileUrl: 'https://www.figma.com/file/AbCdEf1234567890/Fromm-UI',
-        pluginId: '1234567890'
-      },
       github: {
         owner: '',
         repositories: []
@@ -1713,17 +1697,6 @@ test('code execution domain can generate figma import artifact from design spec'
   assert.match(String(figmaArtifact.content || ''), /doppelganger\.figma-import\.v1/);
   assert.equal(String(figmaArtifact.metadata?.schema || ''), 'doppelganger.figma-import.v1');
   assert.equal(Array.isArray(figmaArtifact.metadata?.document?.pages), true);
-
-  await domain.createFigmaPluginBundle(task.id, {
-    sourceArtifactId: figmaArtifact.id
-  });
-
-  const figmaLinkArtifacts = repo.listArtifacts(task.id, 'figma_open_link');
-  assert.equal(figmaLinkArtifacts.length, 1);
-  const figmaLinkArtifact = figmaLinkArtifacts[0];
-  assert.match(String(figmaLinkArtifact.content || ''), /https:\/\/www\.figma\.com\/file\//);
-  assert.equal(String(figmaLinkArtifact.metadata?.pluginConfigured || ''), 'true');
-  assert.match(String(figmaLinkArtifact.metadata?.pluginRunUrl || ''), /https:\/\/www\.figma\.com\/plugin\//);
 });
 
 test('code execution domain supports plan mode and stops after planning with confirmation requests', async () => {

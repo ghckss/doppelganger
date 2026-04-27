@@ -111,23 +111,6 @@ export async function handleTaskRoutes({
     return true;
   }
 
-  const generateFigmaLinkMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/figma-link$/);
-  const generateFigmaPluginMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/figma-plugin$/);
-  if (request.method === 'POST' && (generateFigmaLinkMatch || generateFigmaPluginMatch)) {
-    const targetMatch = generateFigmaLinkMatch || generateFigmaPluginMatch;
-    const taskId = decodeURIComponent(String(targetMatch?.[1] || ''));
-    const body = await parseRequestBody(request);
-    const detail = await service.generateCodeExecutionFigmaPluginBundle(taskId, {
-      sourceArtifactId: readStringField(body, 'sourceArtifactId')
-    });
-    sendJson(response, 200, {
-      ok: true,
-      taskId,
-      status: detail.task.status
-    });
-    return true;
-  }
-
   const resumeCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
   if (request.method === 'POST' && resumeCodeTaskMatch) {
     const taskId = decodeURIComponent(resumeCodeTaskMatch[1]);

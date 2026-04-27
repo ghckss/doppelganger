@@ -186,13 +186,6 @@ Run scripts in `server/`:
 14. 실행 중 목록은 `running` 상태의 전체 실행 작업만 보이며, 플랜 모드 선택 대기 작업은 별도 `플랜 모드 확인 요청` 영역에 표시됩니다.
 15. `이전 작업 이어가기` 모달에서 완료/승인대기/실패 작업을 선택해 후속 작업을 시작할 수 있습니다.
 
-### Figma link flow
-- `design_spec` 아티팩트에서 `Figma JSON 생성` 후 `Figma 링크 생성`을 실행하면 `Figma 링크` 아티팩트가 생성됩니다.
-- `Figma 링크` 아티팩트에서 `Figma 파일 열기` 버튼으로 지정한 Figma 파일을 즉시 열 수 있습니다.
-- 플러그인 링크까지 함께 쓰려면 서버 환경변수에 아래 값을 설정하세요.
-- `FIGMA_FILE_URL`: 대상 Figma 파일 URL
-- `FIGMA_PLUGIN_ID` 또는 `FIGMA_PLUGIN_URL`: 플러그인 실행 링크 생성용
-
 ### PR creation rules
 - Source template: `<selected repository>/.github/PULL_REQUEST_TEMPLATE.md`
 - PR title format: `[SERVICE_PREFIX/BRANCH_TOKEN] PR_SIMPLE_SUMMARY`
