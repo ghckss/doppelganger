@@ -26,38 +26,6 @@ interface ExecutionProgressInput {
   reviewTotalRounds?: number;
 }
 
-interface DesignSpecSnapshot {
-  summary: string;
-  targets: string[];
-  layoutChanges: string[];
-  visualRules: string[];
-  interactionStates: string[];
-  accessibilityChecks: string[];
-  responsiveNotes: string[];
-}
-
-interface FigmaTextBlock {
-  type: 'heading' | 'paragraph' | 'bullet_list';
-  title?: string;
-  text?: string;
-  items?: string[];
-}
-
-interface FigmaFrame {
-  id: string;
-  name: string;
-  viewport: {
-    width: number;
-    height: number;
-  };
-  layout: {
-    mode: 'vertical';
-    gap: number;
-    padding: number;
-  };
-  blocks: FigmaTextBlock[];
-}
-
 function parseBoolean(value) {
   if (typeof value === 'boolean') {
     return value;
@@ -182,108 +150,6 @@ function asRecord(value) {
     return {};
   }
   return value;
-}
-
-function designSpecFromMetadata(value): DesignSpecSnapshot {
-  const source = asRecord(value);
-  return {
-    summary: normalizeWhitespace(source.summary),
-    targets: compactStrings(source.targets).slice(0, 12),
-    layoutChanges: compactStrings(source.layoutChanges).slice(0, 12),
-    visualRules: compactStrings(source.visualRules).slice(0, 12),
-    interactionStates: compactStrings(source.interactionStates).slice(0, 12),
-    accessibilityChecks: compactStrings(source.accessibilityChecks).slice(0, 12),
-    responsiveNotes: compactStrings(source.responsiveNotes).slice(0, 12)
-  };
-}
-
-function nonEmptyDesignSections(designSpec: DesignSpecSnapshot): FigmaTextBlock[] {
-  const blocks: FigmaTextBlock[] = [];
-
-  if (designSpec.summary) {
-    blocks.push({
-      type: 'paragraph',
-      title: 'Summary',
-      text: designSpec.summary
-    });
-  }
-  if (designSpec.layoutChanges.length > 0) {
-    blocks.push({
-      type: 'bullet_list',
-      title: 'Layout Changes',
-      items: designSpec.layoutChanges
-    });
-  }
-  if (designSpec.visualRules.length > 0) {
-    blocks.push({
-      type: 'bullet_list',
-      title: 'Visual Rules',
-      items: designSpec.visualRules
-    });
-  }
-  if (designSpec.interactionStates.length > 0) {
-    blocks.push({
-      type: 'bullet_list',
-      title: 'Interaction States',
-      items: designSpec.interactionStates
-    });
-  }
-  if (designSpec.accessibilityChecks.length > 0) {
-    blocks.push({
-      type: 'bullet_list',
-      title: 'Accessibility Checks',
-      items: designSpec.accessibilityChecks
-    });
-  }
-  if (designSpec.responsiveNotes.length > 0) {
-    blocks.push({
-      type: 'bullet_list',
-      title: 'Responsive Notes',
-      items: designSpec.responsiveNotes
-    });
-  }
-
-  if (blocks.length === 0) {
-    blocks.push({
-      type: 'paragraph',
-      title: 'Summary',
-      text: '디자인 명세 본문이 비어 있습니다. source metadata를 확인해 주세요.'
-    });
-  }
-
-  return blocks;
-}
-
-function figmaFrameListFromDesignSpec(designSpec: DesignSpecSnapshot): FigmaFrame[] {
-  const screenTargets = designSpec.targets.length > 0
-    ? designSpec.targets
-    : ['Main Experience'];
-  const sharedBlocks = nonEmptyDesignSections(designSpec);
-
-  return screenTargets.map((target, index) => {
-    const normalizedTarget = normalizeWhitespace(target) || `Screen ${index + 1}`;
-    const viewport = index === 0
-      ? { width: 1440, height: 1024 }
-      : { width: 390, height: 844 };
-
-    return {
-      id: `frame_${index + 1}`,
-      name: normalizedTarget,
-      viewport,
-      layout: {
-        mode: 'vertical',
-        gap: 16,
-        padding: 24
-      },
-      blocks: [
-        {
-          type: 'heading',
-          text: normalizedTarget
-        },
-        ...sharedBlocks
-      ]
-    };
-  });
 }
 
 function normalizeTaskStatus(value) {
@@ -1492,20 +1358,6 @@ export function createCodeExecutionDomain({
     });
   }
 
-  function storeJsonArtifact(taskId, type, title, data) {
-    const sortOrder = repo.listArtifacts(taskId, type).length;
-    repo.createArtifact(taskId, type, {
-      title,
-      content: `${JSON.stringify(data, null, 2)}\n`,
-      sortOrder,
-      metadata: data
-    });
-  }
-
-  function latestArtifact(taskId, type) {
-    return repo.listArtifacts(taskId, type).at(-1) || null;
-  }
-
   function updateTaskProgress(taskId, summary, resultPatch = {}) {
     const task = repo.getTask(taskId);
     repo.updateTask(taskId, {
@@ -1871,107 +1723,6 @@ export function createCodeExecutionDomain({
     }
 
     return reviewRounds;
-  }
-
-  function createFigmaImport(taskId, options: { sourceArtifactId?: string } = {}) {
-    const task = repo.getTask(taskId);
-    if (!task || task.domain !== 'code_execution') {
-      throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
-    }
-
-    const sourceArtifactId = normalizeWhitespace(options.sourceArtifactId);
-    const designArtifacts = repo.listArtifacts(taskId, 'design_spec');
-    if (designArtifacts.length === 0) {
-      throw new Error('디자인 명세 아티팩트를 찾지 못했습니다. 디자인 단계를 먼저 실행해 주세요.');
-    }
-
-    const sourceArtifact = sourceArtifactId
-      ? designArtifacts.find((artifact) => normalizeWhitespace(artifact.id) === sourceArtifactId) || null
-      : designArtifacts.at(-1) || null;
-    if (!sourceArtifact) {
-      throw new Error(`선택한 디자인 아티팩트를 찾지 못했습니다: ${sourceArtifactId}`);
-    }
-
-    const designSpec = designSpecFromMetadata(sourceArtifact.metadata);
-    const promptPlan = asRecord(latestArtifact(taskId, 'prompt_plan')?.metadata);
-    const productPlan = asRecord(latestArtifact(taskId, 'product_plan')?.metadata);
-    const frameList = figmaFrameListFromDesignSpec(designSpec);
-    const command = normalizeWhitespace(task.payload?.command || task.title);
-
-    const figmaImportPayload = {
-      schema: 'doppelganger.figma-import.v1',
-      generatedAt: new Date().toISOString(),
-      task: {
-        id: task.id,
-        title: normalizeWhitespace(task.title),
-        command,
-        status: normalizeWhitespace(task.status)
-      },
-      source: {
-        artifactId: sourceArtifact.id,
-        artifactTitle: normalizeWhitespace(sourceArtifact.title),
-        artifactCreatedAt: sourceArtifact.created_at || '',
-        type: sourceArtifact.type
-      },
-      document: {
-        name: `${truncateText(command || 'Design Spec', 80)}`,
-        description: designSpec.summary || normalizeWhitespace(productPlan.summary) || '',
-        pages: [
-          {
-            id: 'page_1',
-            name: 'UI/UX Spec',
-            frames: frameList
-          }
-        ]
-      },
-      tokens: {
-        spacing: {
-          xs: 4,
-          sm: 8,
-          md: 12,
-          lg: 16,
-          xl: 24
-        },
-        radius: {
-          sm: 6,
-          md: 10,
-          lg: 14
-        },
-        color: {
-          surface: '#FFFFFF',
-          background: '#F8FAFC',
-          textPrimary: '#0F172A',
-          textSecondary: '#334155',
-          accent: '#0EA5E9'
-        }
-      },
-      planningContext: {
-        promptPlanSummary: normalizeWhitespace(promptPlan.summary),
-        productPlanSummary: normalizeWhitespace(productPlan.summary),
-        targets: designSpec.targets
-      },
-      importGuide: {
-        note: '이 JSON은 Figma import 플러그인에서 프레임/텍스트 블록 기반 레이아웃을 구성하기 위한 중간 포맷입니다.',
-        recommendedWorkflow: [
-          'Figma에서 JSON import 지원 플러그인을 실행합니다.',
-          '다운로드한 figma_import_json 파일을 업로드합니다.',
-          '생성된 프레임을 기반으로 컴포넌트와 스타일 토큰을 보정합니다.'
-        ]
-      }
-    };
-
-    storeJsonArtifact(taskId, 'figma_import_json', 'Figma Import JSON', figmaImportPayload);
-    repo.logExecution(taskId, 'generate_figma_import', 'success', {
-      request: {
-        sourceArtifactId: sourceArtifact.id
-      },
-      response: {
-        frameCount: frameList.length,
-        pageCount: 1
-      }
-    });
-
-    return repo.getTask(taskId);
   }
 
   function savePlanSelections(taskId, options: { selections?: Record<string, unknown> } = {}) {
@@ -2525,7 +2276,6 @@ export function createCodeExecutionDomain({
     listProjects,
     createTask,
     savePlanSelections,
-    createFigmaImport,
     start: runTask,
     createPullRequest
   };

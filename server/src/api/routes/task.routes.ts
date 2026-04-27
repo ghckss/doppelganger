@@ -96,21 +96,6 @@ export async function handleTaskRoutes({
     return true;
   }
 
-  const generateFigmaImportMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/figma-import$/);
-  if (request.method === 'POST' && generateFigmaImportMatch) {
-    const taskId = decodeURIComponent(generateFigmaImportMatch[1]);
-    const body = await parseRequestBody(request);
-    const detail = await service.generateCodeExecutionFigmaImport(taskId, {
-      sourceArtifactId: readStringField(body, 'sourceArtifactId')
-    });
-    sendJson(response, 200, {
-      ok: true,
-      taskId,
-      status: detail.task.status
-    });
-    return true;
-  }
-
   const resumeCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
   if (request.method === 'POST' && resumeCodeTaskMatch) {
     const taskId = decodeURIComponent(resumeCodeTaskMatch[1]);

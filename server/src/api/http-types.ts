@@ -70,7 +70,6 @@ export interface TaskServiceApi {
   resumeCodeExecutionTask(taskId: string): Promise<TaskDetail>;
   deleteTask(taskId: string): void;
   saveCodeExecutionPlanSelections(taskId: string, input: { selections?: Record<string, unknown> }): Promise<TaskDetail>;
-  generateCodeExecutionFigmaImport(taskId: string, input?: { sourceArtifactId?: string }): Promise<TaskDetail>;
   createCodeExecutionPullRequest(taskId: string, input: { branchName?: string }): Promise<TaskDetail>;
   pollSlackMentions(): Promise<unknown>;
   pollGitHubReviews(): Promise<unknown>;
