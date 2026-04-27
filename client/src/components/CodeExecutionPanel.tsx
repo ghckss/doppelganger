@@ -4,6 +4,7 @@ import {
   createPullRequest,
   deleteTask,
   generateCodeTaskFigmaImport,
+  generateCodeTaskFigmaLink,
   resumeCodeTask,
   runTask,
   saveCodeTaskPlanSelections
@@ -116,13 +117,24 @@ const PLANNING_ARTIFACT_LABELS: Record<string, string> = {
   prompt_plan: '프롬프트 계획',
   product_plan: '기획안',
   design_spec: '디자인 명세',
-  figma_import_json: 'Figma Import JSON'
+  figma_import_json: 'Figma Import JSON',
+  figma_open_link: 'Figma 링크'
 };
 const PLANNING_ARTIFACT_ORDER: Record<string, number> = {
   prompt_plan: 0,
   product_plan: 1,
   design_spec: 2,
-  figma_import_json: 3
+  figma_import_json: 3,
+  figma_open_link: 4
+};
+const PLANNING_ARTIFACT_EXTENSIONS: Record<string, 'json' | 'js' | 'html' | 'md'> = {
+  figma_import_json: 'json'
+};
+const PLANNING_ARTIFACT_MIME_TYPES: Record<string, string> = {
+  json: 'application/json;charset=utf-8',
+  js: 'text/javascript;charset=utf-8',
+  html: 'text/html;charset=utf-8',
+  md: 'text/markdown;charset=utf-8'
 };
 
 const DEFAULT_PROGRESS: ExecutionProgress = {
@@ -185,6 +197,11 @@ function toTextList(value: unknown): string[] {
     return [];
   }
   return value.map((entry) => toText(entry)).filter(Boolean);
+}
+
+function toUrlText(value: unknown): string {
+  const url = toText(value);
+  return /^https?:\/\//i.test(url) ? url : '';
 }
 
 function parseReviewFinding(value: unknown): ReviewFindingView {
@@ -917,23 +934,28 @@ export function CodeExecutionPanel({
   }
 
   function downloadPlanningArtifact(taskId: string, artifact: TaskArtifact) {
-    const forceJson = artifact.type === 'figma_import_json';
+    const forcedExtension = PLANNING_ARTIFACT_EXTENSIONS[artifact.type];
     const content = toText(artifact.content);
     const fallbackMetadata = Object.keys(artifact.metadata || {}).length > 0
       ? JSON.stringify(artifact.metadata, null, 2)
       : '';
-    const payload = forceJson
-      ? (content || fallbackMetadata || '{}')
-      : (content || fallbackMetadata || '-');
-    const extension = forceJson ? 'json' : (content ? 'md' : 'json');
+    const payload = content || fallbackMetadata || (forcedExtension === 'json' ? '{}' : '-');
+    const extension = forcedExtension || (content ? 'md' : 'json');
     const filename = [
       toSafeFileToken(taskId),
       toSafeFileToken(artifact.type),
       toSafeFileToken(artifact.title || '')
     ].join('-') + `.${extension}`;
+    const mimeType = extension === 'md'
+      ? PLANNING_ARTIFACT_MIME_TYPES.md
+      : extension === 'js'
+        ? PLANNING_ARTIFACT_MIME_TYPES.js
+        : extension === 'html'
+          ? PLANNING_ARTIFACT_MIME_TYPES.html
+          : PLANNING_ARTIFACT_MIME_TYPES.json;
 
     const blob = new Blob([payload], {
-      type: extension === 'md' ? 'text/markdown;charset=utf-8' : 'application/json;charset=utf-8'
+      type: mimeType
     });
     const objectUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -959,6 +981,13 @@ export function CodeExecutionPanel({
             {planningArtifacts.map((artifact) => {
               const artifactContent = toText(artifact.content)
                 || (Object.keys(artifact.metadata || {}).length > 0 ? JSON.stringify(artifact.metadata, null, 2) : '-');
+              const metadata = toRecord(artifact.metadata);
+              const figmaFileUrl = artifact.type === 'figma_open_link'
+                ? toUrlText(metadata.figmaFileUrl)
+                : '';
+              const pluginRunUrl = artifact.type === 'figma_open_link'
+                ? toUrlText(metadata.pluginRunUrl)
+                : '';
               return (
                 <details key={`${taskId}-${artifact.id}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
                   <summary className="cursor-pointer text-sm font-semibold text-slate-900">
@@ -982,6 +1011,41 @@ export function CodeExecutionPanel({
                         >
                           Figma JSON 생성
                         </button>
+                      )}
+                      {artifact.type === 'figma_import_json' && (
+                        <button
+                          type="button"
+                          className={SUB_BUTTON_CLASS}
+                          onClick={() => onRunAction('Figma 링크 생성', async () => {
+                            await generateCodeTaskFigmaLink(taskId, {
+                              sourceArtifactId: artifact.id
+                            });
+                            return taskId;
+                          })}
+                          disabled={Boolean(busyAction)}
+                        >
+                          Figma 링크 생성
+                        </button>
+                      )}
+                      {artifact.type === 'figma_open_link' && figmaFileUrl && (
+                        <a
+                          className={SUB_BUTTON_CLASS}
+                          href={figmaFileUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Figma 파일 열기
+                        </a>
+                      )}
+                      {artifact.type === 'figma_open_link' && pluginRunUrl && (
+                        <a
+                          className={SUB_BUTTON_CLASS}
+                          href={pluginRunUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          플러그인 실행
+                        </a>
                       )}
                       <button
                         type="button"

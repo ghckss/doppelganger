@@ -96,6 +96,7 @@ export interface TaskDomain extends DomainDescriptor {
   start?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
   createPullRequest?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
   createFigmaImport?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
+  createFigmaPluginBundle?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
 }
 
 export type DomainRegistry = Record<string, TaskDomain>;

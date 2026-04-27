@@ -119,6 +119,10 @@ export class TaskService {
     return this.commandService.generateCodeExecutionFigmaImport(taskId, options);
   }
 
+  async generateCodeExecutionFigmaPluginBundle(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.generateCodeExecutionFigmaPluginBundle(taskId, options);
+  }
+
   saveDraft(taskId: string, input: {
     content?: string;
     summary?: string;

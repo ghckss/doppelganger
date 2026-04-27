@@ -134,6 +134,16 @@ export function generateCodeTaskFigmaImport(
   });
 }
 
+export function generateCodeTaskFigmaLink(
+  taskId: string,
+  input: { sourceArtifactId?: string } = {}
+): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/figma-link`, {
+    method: 'POST',
+    body: input
+  });
+}
+
 export function pollSlackMentions(): Promise<Record<string, unknown>> {
   return requestJson<Record<string, unknown>>('/internal/poll/slack-mentions', {
     method: 'POST'

@@ -390,6 +390,11 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
       owner: readValue(mergedEnv, 'GITHUB_OWNER', ''),
       repositories: readList(mergedEnv, 'GITHUB_REPOSITORIES')
     },
+    figma: {
+      fileUrl: readValue(mergedEnv, 'FIGMA_FILE_URL', ''),
+      pluginId: readValue(mergedEnv, 'FIGMA_PLUGIN_ID', ''),
+      pluginUrl: readValue(mergedEnv, 'FIGMA_PLUGIN_URL', '')
+    },
     workspace: {
       projectsRoot,
       allowlist: configuredAllowlist.length > 0 ? configuredAllowlist : [projectsRoot]

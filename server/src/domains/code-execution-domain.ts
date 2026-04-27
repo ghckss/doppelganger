@@ -286,6 +286,85 @@ function figmaFrameListFromDesignSpec(designSpec: DesignSpecSnapshot): FigmaFram
   });
 }
 
+function extractFigmaFileKey(figmaFileUrl) {
+  const fileUrl = normalizeWhitespace(figmaFileUrl);
+  if (!fileUrl) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(fileUrl);
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const markerIndex = segments.findIndex((segment) => segment === 'file' || segment === 'design');
+    if (markerIndex >= 0 && segments[markerIndex + 1]) {
+      return normalizeWhitespace(segments[markerIndex + 1]);
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+function buildUrlWithQueryParams(baseUrl, params) {
+  const normalizedBaseUrl = normalizeWhitespace(baseUrl);
+  if (!normalizedBaseUrl) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(normalizedBaseUrl);
+    for (const [key, rawValue] of Object.entries(params || {})) {
+      const value = normalizeWhitespace(rawValue);
+      if (!value) {
+        continue;
+      }
+      parsed.searchParams.set(key, value);
+    }
+    return parsed.toString();
+  } catch {
+    const query = Object.entries(params || {})
+      .map(([key, rawValue]) => {
+        const value = normalizeWhitespace(rawValue);
+        if (!value) {
+          return '';
+        }
+        return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+      })
+      .filter(Boolean)
+      .join('&');
+    if (!query) {
+      return normalizedBaseUrl;
+    }
+    return `${normalizedBaseUrl}${normalizedBaseUrl.includes('?') ? '&' : '?'}${query}`;
+  }
+}
+
+function buildFigmaPluginRunUrl({
+  pluginId,
+  pluginUrl,
+  resourceId,
+  taskId,
+  sourceArtifactId
+}) {
+  const params = {
+    resource_id: resourceId,
+    doppelganger_task_id: taskId,
+    doppelganger_source_artifact_id: sourceArtifactId
+  };
+
+  const normalizedPluginUrl = normalizeWhitespace(pluginUrl);
+  if (normalizedPluginUrl) {
+    return buildUrlWithQueryParams(normalizedPluginUrl, params);
+  }
+
+  const normalizedPluginId = normalizeWhitespace(pluginId);
+  if (!normalizedPluginId) {
+    return '';
+  }
+  const baseUrl = `https://www.figma.com/plugin/${encodeURIComponent(normalizedPluginId)}`;
+  return buildUrlWithQueryParams(baseUrl, params);
+}
+
 function normalizeTaskStatus(value) {
   return normalizeWhitespace(value).toLowerCase();
 }
@@ -1953,8 +2032,8 @@ export function createCodeExecutionDomain({
       importGuide: {
         note: '이 JSON은 Figma import 플러그인에서 프레임/텍스트 블록 기반 레이아웃을 구성하기 위한 중간 포맷입니다.',
         recommendedWorkflow: [
-          'Figma에서 JSON import 지원 플러그인을 실행합니다.',
-          '다운로드한 figma_import_json 파일을 업로드합니다.',
+          '코드 작업 상세에서 Figma 링크 생성을 실행합니다.',
+          'Figma 링크 아티팩트의 파일/플러그인 링크를 통해 Figma에서 이어서 작업합니다.',
           '생성된 프레임을 기반으로 컴포넌트와 스타일 토큰을 보정합니다.'
         ]
       }
@@ -1968,6 +2047,74 @@ export function createCodeExecutionDomain({
       response: {
         frameCount: frameList.length,
         pageCount: 1
+      }
+    });
+
+    return repo.getTask(taskId);
+  }
+
+  function createFigmaPluginBundle(taskId, options: { sourceArtifactId?: string } = {}) {
+    const task = repo.getTask(taskId);
+    if (!task || task.domain !== 'code_execution') {
+      throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
+    }
+
+    let figmaImportArtifacts = repo.listArtifacts(taskId, 'figma_import_json');
+    if (figmaImportArtifacts.length === 0) {
+      createFigmaImport(taskId, {});
+      figmaImportArtifacts = repo.listArtifacts(taskId, 'figma_import_json');
+    }
+    if (figmaImportArtifacts.length === 0) {
+      throw new Error('Figma import 아티팩트를 생성하지 못했습니다.');
+    }
+
+    const sourceArtifactId = normalizeWhitespace(options.sourceArtifactId);
+    const sourceArtifact = sourceArtifactId
+      ? figmaImportArtifacts.find((artifact) => normalizeWhitespace(artifact.id) === sourceArtifactId) || null
+      : figmaImportArtifacts.at(-1) || null;
+    if (!sourceArtifact) {
+      throw new Error(`선택한 Figma import 아티팩트를 찾지 못했습니다: ${sourceArtifactId}`);
+    }
+
+    const figmaFileUrl = normalizeWhitespace(config.figma?.fileUrl);
+    const figmaPluginId = normalizeWhitespace(config.figma?.pluginId);
+    const figmaPluginUrl = normalizeWhitespace(config.figma?.pluginUrl);
+    if (!figmaFileUrl) {
+      throw new Error('Figma 링크를 생성하려면 FIGMA_FILE_URL을 설정해 주세요.');
+    }
+
+    const resourceId = extractFigmaFileKey(figmaFileUrl);
+    const pluginRunUrl = buildFigmaPluginRunUrl({
+      pluginId: figmaPluginId,
+      pluginUrl: figmaPluginUrl,
+      resourceId,
+      taskId,
+      sourceArtifactId: sourceArtifact.id
+    });
+    const command = normalizeWhitespace(task.payload?.command || task.title);
+    const figmaOpenLink = {
+      summary: normalizeWhitespace(command) || '코드 작업 결과를 Figma에서 확인할 수 있습니다.',
+      figmaFileUrl,
+      pluginRunUrl,
+      pluginConfigured: Boolean(pluginRunUrl),
+      pluginGuide: pluginRunUrl
+        ? '아래 플러그인 실행 링크로 Figma 플러그인을 바로 실행하세요.'
+        : 'FIGMA_PLUGIN_URL 또는 FIGMA_PLUGIN_ID를 설정하면 플러그인 실행 링크를 함께 생성합니다.',
+      taskId,
+      sourceArtifactId: sourceArtifact.id,
+      generatedAt: new Date().toISOString()
+    };
+
+    storeArtifact(taskId, 'figma_open_link', 'Figma 링크', figmaOpenLink);
+    repo.logExecution(taskId, 'generate_figma_open_link', 'success', {
+      request: {
+        sourceArtifactId: sourceArtifact.id
+      },
+      response: {
+        figmaFileUrl,
+        pluginRunUrl,
+        pluginConfigured: Boolean(pluginRunUrl),
+        resourceId
       }
     });
 
@@ -2526,6 +2673,7 @@ export function createCodeExecutionDomain({
     createTask,
     savePlanSelections,
     createFigmaImport,
+    createFigmaPluginBundle,
     start: runTask,
     createPullRequest
   };
