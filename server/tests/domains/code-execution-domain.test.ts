@@ -375,12 +375,13 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(repo.listArtifacts(task.id, 'review_round').length, 1);
   assert.equal(repo.listArtifacts(task.id, 'patch_round').length, 1);
   assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
-  assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
-  assert.equal(read('git', ['show', 'main:README.md'], workspace.repoDir), '# Demo\n\nImplemented by agent.');
-  assert.equal(read('git', ['show', 'main:src/index.js'], workspace.repoDir), 'export const value = 2;');
+  assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), true);
+  assert.equal(read('git', ['show', `${finishedTask.result.branch}:README.md`], workspace.repoDir), '# Demo\n\nImplemented by agent.');
+  assert.equal(read('git', ['show', `${finishedTask.result.branch}:src/index.js`], workspace.repoDir), 'export const value = 2;');
+  assert.equal(read('git', ['show', 'main:src/index.js'], workspace.repoDir), 'export const value = 1;');
   assert.equal(typeof finishedTask.result.sourceCommit, 'string');
   assert.ok(finishedTask.result.sourceCommit.length > 0);
-  assert.equal(finishedTask.result.branchCleanup?.deleted, true);
+  assert.equal(finishedTask.result.branchCleanup?.deleted, false);
 
   const remoteBranch = 'release/demo-pr';
   await domain.createPullRequest(task.id, {
@@ -1195,7 +1196,7 @@ test('code execution domain resumes from coding checkpoint without rerunning pla
   const resumedTask = repo.getTask(task.id);
   assert.equal(resumedTask.status, 'awaiting_approval');
   assert.equal(promptPlanCalls, 1);
-  assert.match(resumedTask.summary, /PR 생성 준비/);
+  assert.match(resumedTask.summary, /PR 생성을 진행할 수 있습니다/);
 
   const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
   assert.ok(executionActions.includes('resume_from_checkpoint'));
@@ -1608,14 +1609,15 @@ test('code execution can run on repository without commit history', async () => 
 
   await waitFor(() => {
     const current = repo.getTask(task.id);
-    return current?.status === 'awaiting_approval';
+    return current?.status === 'done';
   }, 'Timed out waiting for code task to finish in empty repository');
 
   const finishedTask = repo.getTask(task.id);
-  assert.equal(finishedTask.status, 'awaiting_approval');
-  assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
-  assert.equal(read('git', ['show', 'main:README.md'], workspace.repoDir), '# Bootstrap');
-  assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
+  assert.equal(finishedTask.status, 'done');
+  assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), finishedTask.result.branch);
+  assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), true);
+  assert.equal(read('git', ['show', `${finishedTask.result.branch}:README.md`], workspace.repoDir), '# Bootstrap');
+  assert.equal(Boolean(finishedTask.result.canCreatePullRequest), false);
 });
 
 test('code execution domain supports plan mode and stops after planning with confirmation requests', async () => {
@@ -1903,6 +1905,6 @@ test('plan mode requires selection before start and can continue into coding aft
   assert.equal(finishedTask.result.executionProgress.currentStep, 6);
   assert.ok(Array.isArray(finishedTask.result.commits));
   assert.ok(finishedTask.result.commits.length >= 1);
-  assert.equal(read('git', ['show', 'main:src/plan-mode.js'], workspace.repoDir), 'export const planMode = true;');
+  assert.equal(read('git', ['show', `${finishedTask.result.branch}:src/plan-mode.js`], workspace.repoDir), 'export const planMode = true;');
   assert.equal(runExecCount, 2);
 });

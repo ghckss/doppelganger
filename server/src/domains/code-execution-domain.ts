@@ -2019,22 +2019,19 @@ export function createCodeExecutionDomain({
         response: pullRequest
       });
       const sourceCommit = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
-      const mergeResult = await mergeTaskBranchIntoBase(taskId, workspace, {
-        workBranch: branchName,
-        baseBranch: workspace.git.baseBranch
-      });
+      const hasRemote = Boolean(normalizeWhitespace(workspace.git.remoteUrl));
       const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
         workBranch: branchName,
         preferredRestoreBranch: workspace.git.baseBranch,
-        deleteWorkBranch: branchState.branchManaged
+        deleteWorkBranch: false
       });
-      const completionSummary = `${branchName} 브랜치 커밋을 ${mergeResult.baseBranch || workspace.git.baseBranch}에 병합했고 `
-        + `${workspaceCleanup.restoreBranch || workspace.git.baseBranch} 브랜치로 복귀 후 작업 브랜치를 정리했습니다. `
-        + 'PR 생성 준비가 되었습니다.';
+      const completionSummary = hasRemote
+        ? `${branchName} 브랜치에서 코드 작업이 완료되었습니다. 작업 브랜치는 유지되며 PR 생성을 진행할 수 있습니다.`
+        : `${branchName} 브랜치에서 코드 작업이 완료되었습니다. 원격 저장소(origin)가 없어 PR 생성 단계 없이 종료합니다.`;
 
       repo.updateTask(taskId, {
-        status: 'awaiting_approval',
-        approvalState: 'pending',
+        status: hasRemote ? 'awaiting_approval' : 'done',
+        approvalState: hasRemote ? 'pending' : 'approved',
         summary: completionSummary,
         result: {
           ...asRecord(repo.getTask(taskId)?.result),
@@ -2042,9 +2039,11 @@ export function createCodeExecutionDomain({
           baseBranch: workspace.git.baseBranch,
           sourceCommit,
           restoreBranch: workspaceCleanup.restoreBranch || branchState.restoreBranch || workspace.git.baseBranch,
-          merge: mergeResult,
           branchCleanup: workspaceCleanup,
           repoSlug: workspace.git.repoSlug,
+          remoteUrl: workspace.git.remoteUrl,
+          hasRemote,
+          canCreatePullRequest: hasRemote,
           promptPlan: plans.promptPlan,
           codingSummary: codingSummary || '이전 실행의 코딩 결과를 재사용했습니다.',
           commits,
@@ -2138,6 +2137,9 @@ export function createCodeExecutionDomain({
           + 'WORKSPACE_ALLOWLIST 기준 코드 작업 실행은 계속 가능합니다.'
         );
       }
+      if (!normalizeWhitespace(workspace.git.remoteUrl)) {
+        throw new Error('원격 저장소(origin)가 연결되지 않아 PR을 생성할 수 없습니다.');
+      }
 
       const branchRestoreResult = await checkoutTaskBranchFromSourceCommit(task, workspace, sourceBranch);
       await assertCleanWorktree(workspace.git.root, 'PR 생성 전에 작업 트리가 깨끗해야 합니다');
@@ -2213,7 +2215,7 @@ export function createCodeExecutionDomain({
       const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
         workBranch: sourceBranch,
         preferredRestoreBranch: normalizeWhitespace(task.result?.restoreBranch || task.payload?.restoreBranch),
-        deleteWorkBranch: Boolean(task.payload?.branchManaged)
+        deleteWorkBranch: false
       });
 
       repo.updateTask(taskId, {

@@ -178,13 +178,14 @@ Run scripts in `server/`:
 6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent (including in-step harness self-check/fix), perform one review loop, and stop before PR creation.
 7. `플랜 모드`를 선택하면 코딩은 실행하지 않고 계획 + 확인 요청 항목만 생성됩니다.
 8. 플랜 모드 카드에서 확인 항목을 선택/저장한 뒤 `플랜 확정 후 코드 실행`으로 같은 작업을 이어서 실행할 수 있습니다.
-9. 코드 실행이 완료되면 task는 `awaiting_approval` 상태로 PR 생성 대기 상태가 됩니다.
-10. In task detail, `PR 생성` appears only after step `6/6` is complete.
-11. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
-12. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
-13. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
-14. 실행 중 목록은 `running` 상태의 전체 실행 작업만 보이며, 플랜 모드 선택 대기 작업은 별도 `플랜 모드 확인 요청` 영역에 표시됩니다.
-15. `이전 작업 이어가기` 모달에서 완료/승인대기/실패 작업을 선택해 후속 작업을 시작할 수 있습니다.
+9. 코드 실행이 완료되면 작업 브랜치는 유지된 채 기준 브랜치로 복귀합니다. 자동 병합/자동 브랜치 삭제는 하지 않습니다.
+10. `origin` remote가 있으면 task는 `awaiting_approval` 상태로 전환되고, step `6/6` 완료 후 `PR 생성` 버튼이 노출됩니다.
+11. `origin` remote가 없으면 PR 단계 없이 task를 `done`으로 종료합니다.
+12. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
+13. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
+14. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
+15. 실행 중 목록은 전체 실행의 `running/awaiting_approval/failed` 상태 작업을 함께 보여주며, 플랜 모드 선택 대기 작업은 별도 `플랜 모드 확인 요청` 영역에 표시됩니다.
+16. `이전 작업 이어가기` 모달에서 완료/승인대기/실패 작업을 선택해 후속 작업을 시작할 수 있습니다.
 
 ### PR creation rules
 - Source template: `<selected repository>/.github/PULL_REQUEST_TEMPLATE.md`
@@ -219,8 +220,8 @@ Resume behavior:
 - UI에서는 진행 카드의 `n/6` 표시 아래에 현재 단계에서 수행 중인 작업 요약 한 줄을 함께 표시합니다.
 - UI에서는 진행 카드 우상단에 현재 단계 기준 경과 시간(초 단위, `task.updated_at` 기반)을 표시합니다.
 - UI에서는 코드 작업 상세에 `리뷰 라운드 내용` 영역이 표시되며, `result.reviewRounds`와 `review_round/patch_round` 아티팩트를 합쳐 각 라운드의 검토/수정 내역을 확인할 수 있습니다.
-- 코드 작업 완료 시 작업 브랜치 커밋을 `baseBranch`(기준 브랜치)에 `--ff-only`로 먼저 병합한 뒤, 작업 브랜치(`doppelganger/...`)를 로컬에서 삭제하고 기준 브랜치로 복귀합니다.
-- 병합에 실패하면 작업은 `failed`로 전환되고 작업 브랜치는 보존됩니다.
+- 코드 작업 완료 후에는 기준 브랜치로 복귀만 수행하고, 작업 브랜치는 삭제하지 않습니다.
+- 자동 병합은 수행하지 않으며, 기준 브랜치 반영은 별도 PR/수동 머지로 진행합니다.
 
 ### Code task harness rules
 - 코드 작업 에이전트(coding/review/patch)에 공통/단계별 규칙을 주입하려면 아래 파일을 수정합니다.

@@ -376,6 +376,19 @@ function resolvePullRequestUrl(task: Task): string {
   return toText(pullRequest.url);
 }
 
+function resolveCanCreatePullRequest(task: Task): boolean {
+  const payload = toRecord(task.payload);
+  const result = toRecord(task.result);
+  if (typeof result.canCreatePullRequest === 'boolean') {
+    return result.canCreatePullRequest;
+  }
+  if (typeof payload.canCreatePullRequest === 'boolean') {
+    return payload.canCreatePullRequest;
+  }
+  const remoteUrl = toText(result.remoteUrl) || toText(payload.remoteUrl);
+  return Boolean(remoteUrl);
+}
+
 function resolveExecutionMode(task: Task): 'full' | 'plan' {
   const mode = toText(toRecord(task.payload).executionMode).toLowerCase();
   if (mode === 'plan' || mode === 'plan_only') {
@@ -527,7 +540,11 @@ export function CodeExecutionPanel({
 
   const runningTasks = useMemo(() => {
     const list = tasks
-      .filter((task) => String(task.status || '').toLowerCase() === 'running' && resolveExecutionMode(task) === 'full')
+      .filter((task) => {
+        const status = String(task.status || '').toLowerCase();
+        return resolveExecutionMode(task) === 'full'
+          && (status === 'running' || status === 'awaiting_approval' || status === 'failed');
+      })
       .slice();
     list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
     return list;
@@ -605,6 +622,7 @@ export function CodeExecutionPanel({
       const pullRequestUrl = resolvePullRequestUrl(sourceTask);
       const canResumeTask = ['failed', 'running'].includes(String(sourceTask.status || '').toLowerCase());
       const hasTokenOrAuthError = /token|auth|unauthorized|forbidden|401|403|인증/i.test(String(sourceTask.last_error || ''));
+      const canCreatePullRequest = resolveCanCreatePullRequest(sourceTask);
       return {
         task: sourceTask,
         detail,
@@ -617,7 +635,10 @@ export function CodeExecutionPanel({
         taskMessage,
         pullRequestUrl,
         currentTaskBranch: resolveTaskBranch(sourceTask),
-        canShowCreatePrButton: currentStep >= Math.max(1, Number(progress.totalSteps || DEFAULT_PROGRESS.totalSteps)) && !pullRequestUrl,
+        canShowCreatePrButton:
+          canCreatePullRequest
+          && currentStep >= Math.max(1, Number(progress.totalSteps || DEFAULT_PROGRESS.totalSteps))
+          && !pullRequestUrl,
         canResumeTask,
         hasTokenOrAuthError
       };
