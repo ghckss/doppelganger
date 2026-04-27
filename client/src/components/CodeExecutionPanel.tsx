@@ -7,7 +7,7 @@ import {
   runTask,
   saveCodeTaskPlanSelections
 } from '../api';
-import type { MetaResponse, Task, TaskArtifact, TaskDetail } from '../types';
+import type { MetaResponse, Task, TaskDetail } from '../types';
 import type {
   CollapsibleSectionId,
   CollapsibleState,
@@ -111,16 +111,6 @@ const EXECUTION_STEP_ITEMS = [
 ] as const;
 
 const CONTINUATION_SOURCE_STATUSES = new Set(['done', 'awaiting_approval', 'failed']);
-const PLANNING_ARTIFACT_LABELS: Record<string, string> = {
-  prompt_plan: '프롬프트 계획',
-  product_plan: '기획안',
-  design_spec: '디자인 명세'
-};
-const PLANNING_ARTIFACT_ORDER: Record<string, number> = {
-  prompt_plan: 0,
-  product_plan: 1,
-  design_spec: 2
-};
 
 const DEFAULT_PROGRESS: ExecutionProgress = {
   phase: '',
@@ -490,29 +480,6 @@ function resolveContinuationResultSummary(task: Task): string {
     return parts.join(' · ');
   }
   return '결과 요약이 없습니다.';
-}
-
-function toSafeFileToken(value: unknown): string {
-  const normalized = toText(value).toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '');
-  return normalized || 'artifact';
-}
-
-function resolvePlanningArtifacts(detail: TaskDetail | null): TaskArtifact[] {
-  if (!detail) {
-    return [];
-  }
-
-  return detail.artifacts
-    .filter((artifact) => Object.prototype.hasOwnProperty.call(PLANNING_ARTIFACT_LABELS, artifact.type))
-    .slice()
-    .sort((left, right) => {
-      const leftOrder = PLANNING_ARTIFACT_ORDER[left.type] ?? 99;
-      const rightOrder = PLANNING_ARTIFACT_ORDER[right.type] ?? 99;
-      if (leftOrder !== rightOrder) {
-        return leftOrder - rightOrder;
-      }
-      return String(left.created_at || '').localeCompare(String(right.created_at || ''));
-    });
 }
 
 export function CodeExecutionPanel({
@@ -913,76 +880,6 @@ export function CodeExecutionPanel({
     closeCreatePrModal();
   }
 
-  function downloadPlanningArtifact(taskId: string, artifact: TaskArtifact) {
-    const content = toText(artifact.content);
-    const fallbackMetadata = Object.keys(artifact.metadata || {}).length > 0
-      ? JSON.stringify(artifact.metadata, null, 2)
-      : '';
-    const payload = content || fallbackMetadata || '-';
-    const extension = content ? 'md' : 'json';
-    const filename = [
-      toSafeFileToken(taskId),
-      toSafeFileToken(artifact.type),
-      toSafeFileToken(artifact.title || '')
-    ].join('-') + `.${extension}`;
-
-    const blob = new Blob([payload], {
-      type: extension === 'md' ? 'text/markdown;charset=utf-8' : 'application/json;charset=utf-8'
-    });
-    const objectUrl = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = objectUrl;
-    link.download = filename;
-    link.click();
-    window.URL.revokeObjectURL(objectUrl);
-  }
-
-  function renderPlanningArtifactSection(taskId: string, detail: TaskDetail | null) {
-    const planningArtifacts = resolvePlanningArtifacts(detail);
-    return (
-      <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <h4 className="text-sm font-semibold text-slate-900">기획/디자인 아티팩트</h4>
-          <p className="text-xs text-slate-500">{planningArtifacts.length}건</p>
-        </div>
-        {planningArtifacts.length === 0 && (
-          <p className="text-xs text-slate-600">기획/디자인 아티팩트가 아직 없습니다.</p>
-        )}
-        {planningArtifacts.length > 0 && (
-          <div className="grid gap-2">
-            {planningArtifacts.map((artifact) => {
-              const artifactContent = toText(artifact.content)
-                || (Object.keys(artifact.metadata || {}).length > 0 ? JSON.stringify(artifact.metadata, null, 2) : '-');
-              return (
-                <details key={`${taskId}-${artifact.id}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                  <summary className="cursor-pointer text-sm font-semibold text-slate-900">
-                    {PLANNING_ARTIFACT_LABELS[artifact.type] || artifact.type}
-                    {artifact.title ? ` · ${artifact.title}` : ''}
-                    {artifact.created_at ? ` · ${formatDateTime(artifact.created_at)}` : ''}
-                  </summary>
-                  <div className="mt-2 grid gap-2">
-                    <div className="flex justify-end">
-                      <button
-                        type="button"
-                        className={SUB_BUTTON_CLASS}
-                        onClick={() => downloadPlanningArtifact(taskId, artifact)}
-                      >
-                        다운로드
-                      </button>
-                    </div>
-                    <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
-                      {artifactContent}
-                    </pre>
-                  </div>
-                </details>
-              );
-            })}
-          </div>
-        )}
-      </section>
-    );
-  }
-
   return (
     <section className={`${PANEL_CLASS} border-amber-200 bg-amber-50/70`}>
       <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-100/80 px-3 py-2">
@@ -1121,9 +1018,6 @@ export function CodeExecutionPanel({
                     <p className="mt-2 whitespace-pre-wrap break-words text-xs text-slate-700">
                       {toText(view.task.summary) || '플랜 모드 설명이 아직 없습니다.'}
                     </p>
-                    <div className="mt-3">
-                      {renderPlanningArtifactSection(view.task.id, view.detail)}
-                    </div>
 
                     {view.requests.length === 0 ? (
                       <p className="mt-3 text-xs text-slate-600">
@@ -1261,8 +1155,6 @@ export function CodeExecutionPanel({
                               {view.commandText || '작업 요청 메시지가 아직 없습니다.'}
                             </p>
                           </section>
-
-                          {renderPlanningArtifactSection(view.task.id, view.detail)}
 
                           <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                             <div className="flex items-start justify-between gap-3">
