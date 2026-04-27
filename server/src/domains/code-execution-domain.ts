@@ -623,6 +623,10 @@ export function createCodeExecutionDomain({
     }
   }
 
+  async function repositoryHasHeadCommit(workdir) {
+    return gitRevisionExists(workdir, 'HEAD^{commit}');
+  }
+
   async function branchRefExists(workdir, branchName) {
     const normalized = normalizeWhitespace(branchName);
     if (!normalized) {
@@ -634,8 +638,23 @@ export function createCodeExecutionDomain({
 
   async function resolveBaseBranch(workdir, requestedBaseBranch = '', currentBranch = '') {
     const requested = normalizeWhitespace(requestedBaseBranch);
+    const normalizedCurrent = normalizeWhitespace(currentBranch);
+    const hasHeadCommit = await repositoryHasHeadCommit(workdir);
+    if (!hasHeadCommit) {
+      if (requested && normalizedCurrent && requested === normalizedCurrent) {
+        return requested;
+      }
+      if (normalizedCurrent) {
+        return normalizedCurrent;
+      }
+      if (requested) {
+        return requested;
+      }
+      return 'main';
+    }
+
     const fallbackCandidates = Array.from(new Set([
-      normalizeWhitespace(currentBranch),
+      normalizedCurrent,
       'master',
       'main'
     ].filter(Boolean)));
@@ -671,6 +690,7 @@ export function createCodeExecutionDomain({
     const absoluteWorkdir = workspaceRunner.assertAllowed(workdir);
     const root = await runGit(absoluteWorkdir, ['rev-parse', '--show-toplevel']);
     const currentBranch = await runGit(root, ['branch', '--show-current']);
+    const hasCommits = await repositoryHasHeadCommit(root);
     const baseBranch = await resolveBaseBranch(root, requestedBaseBranch, currentBranch);
 
     let remoteUrl = '';
@@ -697,6 +717,7 @@ export function createCodeExecutionDomain({
         name: parsedRemote.name,
         repoSlug: parsedRemote.repoSlug,
         githubRepositoryAllowed,
+        hasCommits,
         isDirty: Boolean(statusOutput.trim()),
         statusLines: statusOutput.split(/\r?\n/).filter(Boolean)
       },
@@ -922,12 +943,16 @@ export function createCodeExecutionDomain({
 
       if (normalizedBaseBranch !== normalizedWorkBranch) {
         const baseExists = await localBranchExists(workspace.git.root, normalizedBaseBranch);
-        if (!baseExists) {
-          throw new Error(`기준 브랜치를 찾을 수 없습니다: ${normalizedBaseBranch}`);
+        if (baseExists) {
+          await runGit(workspace.git.root, ['checkout', normalizedBaseBranch]);
+          await runGit(workspace.git.root, ['merge', '--ff-only', normalizedWorkBranch]);
+        } else {
+          const workExists = await localBranchExists(workspace.git.root, normalizedWorkBranch);
+          if (!workExists) {
+            throw new Error(`병합할 작업 브랜치를 찾을 수 없습니다: ${normalizedWorkBranch}`);
+          }
+          await runGit(workspace.git.root, ['checkout', '-B', normalizedBaseBranch, normalizedWorkBranch]);
         }
-
-        await runGit(workspace.git.root, ['checkout', normalizedBaseBranch]);
-        await runGit(workspace.git.root, ['merge', '--ff-only', normalizedWorkBranch]);
       }
 
       const head = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
@@ -1014,6 +1039,26 @@ export function createCodeExecutionDomain({
       };
     }
 
+    if (!workspace.git.hasCommits) {
+      if (workspace.git.currentBranch !== branchName) {
+        await runGit(workspace.git.root, ['checkout', '-B', branchName]);
+      }
+      const branchManagedWithoutHistory = branchName !== restoreBranch;
+      repo.updateTask(task.id, {
+        payload: {
+          ...currentTask.payload,
+          branchName,
+          restoreBranch,
+          branchManaged: branchManagedWithoutHistory
+        }
+      });
+      return {
+        branchName,
+        restoreBranch,
+        branchManaged: branchManagedWithoutHistory
+      };
+    }
+
     await runGit(workspace.git.root, ['checkout', '-b', branchName, workspace.git.baseBranch]);
     repo.updateTask(task.id, {
       payload: {
@@ -1031,7 +1076,18 @@ export function createCodeExecutionDomain({
   }
 
   async function listCommitsSince(workdir, baseBranch) {
-    const result = await runGit(workdir, ['log', '--reverse', '--format=%H%x1f%s', `${baseBranch}..HEAD`]);
+    const hasHeadCommit = await repositoryHasHeadCommit(workdir);
+    if (!hasHeadCommit) {
+      return [];
+    }
+
+    const normalizedBaseBranch = normalizeWhitespace(baseBranch);
+    const baseExists = normalizedBaseBranch
+      ? await branchRefExists(workdir, normalizedBaseBranch)
+      : false;
+    const result = baseExists
+      ? await runGit(workdir, ['log', '--reverse', '--format=%H%x1f%s', `${normalizedBaseBranch}..HEAD`])
+      : await runGit(workdir, ['log', '--reverse', '--format=%H%x1f%s', 'HEAD']);
     return result
       .split(/\r?\n/)
       .filter(Boolean)
@@ -1370,7 +1426,8 @@ export function createCodeExecutionDomain({
     let requestedBaseBranch = normalizeWhitespace(
       input.baseBranch || continuationSource?.previousPayload?.baseBranch
     );
-    if (requestedBaseBranch && !requestedBranchName) {
+    const hasCommitHistory = await repositoryHasHeadCommit(project.path);
+    if (requestedBaseBranch && !requestedBranchName && hasCommitHistory) {
       const looksLikeExistingBase = await branchRefExists(project.path, requestedBaseBranch);
       if (!looksLikeExistingBase) {
         requestedBranchName = requestedBaseBranch;

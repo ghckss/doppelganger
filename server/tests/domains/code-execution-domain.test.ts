@@ -72,6 +72,21 @@ function createGitWorkspace() {
   };
 }
 
+function createEmptyGitWorkspace() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-code-domain-empty-'));
+  const repoDir = path.join(root, 'repo');
+
+  fs.mkdirSync(repoDir, { recursive: true });
+  run('git', ['init', '-b', 'main'], repoDir);
+  run('git', ['config', 'user.name', 'Test User'], repoDir);
+  run('git', ['config', 'user.email', 'test@example.com'], repoDir);
+
+  return {
+    root,
+    repoDir
+  };
+}
+
 async function waitFor(predicate, message) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -1486,6 +1501,121 @@ test('createTask returns friendly error when explicit baseBranch is not found', 
     }),
     /기준 브랜치를 찾지 못했습니다: missing\/base/
   );
+});
+
+test('code execution can run on repository without commit history', async () => {
+  const workspace = createEmptyGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec({ workdir, schema }) {
+        if (schema.required.includes('findings')) {
+          return {
+            parsed: {
+              summary: 'No issues found.',
+              findings: [],
+              approval: 'approved_with_no_changes',
+              residualRisks: []
+            },
+            stdout: '',
+            stderr: '',
+            durationMs: 1
+          };
+        }
+
+        if (schema.required.includes('resolvedFindingIds')) {
+          throw new Error('patch round should not run');
+        }
+
+        writeFile(path.join(workdir, 'README.md'), '# Bootstrap\n');
+        run('git', ['add', 'README.md'], workdir);
+        run('git', ['commit', '-m', 'feat: bootstrap repository'], workdir);
+        return {
+          parsed: {
+            summary: 'Bootstrapped repository files.',
+            testsRun: [],
+            notes: []
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+    },
+    claudeCliRunner: null,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        return {
+          summary: 'Bootstrap repository',
+          goal: 'Create initial project files',
+          taskType: 'feature',
+          successCriteria: ['Initial files committed'],
+          deliverables: ['README'],
+          constraints: [],
+          relevantContext: []
+        };
+      },
+      async createProductPlan() {
+        throw new Error('not used');
+      },
+      async createDesignSpec() {
+        throw new Error('not used');
+      },
+      async createPullRequestDraft() {
+        return {
+          title: 'feat: bootstrap repository',
+          body: '- bootstrap'
+        };
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Bootstrap repository',
+    projectId: 'repo',
+    baseBranch: 'master'
+  });
+  const createdTask = repo.getTask(task.id);
+  assert.equal(createdTask.payload.baseBranch, 'main');
+
+  await domain.start(task.id);
+
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval';
+  }, 'Timed out waiting for code task to finish in empty repository');
+
+  const finishedTask = repo.getTask(task.id);
+  assert.equal(finishedTask.status, 'awaiting_approval');
+  assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
+  assert.equal(read('git', ['show', 'main:README.md'], workspace.repoDir), '# Bootstrap');
+  assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
 });
 
 test('code execution domain supports plan mode and stops after planning with confirmation requests', async () => {
