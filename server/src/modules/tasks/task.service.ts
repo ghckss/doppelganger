@@ -115,6 +115,10 @@ export class TaskService {
     return this.commandService.saveCodeExecutionPlanSelections(taskId, options);
   }
 
+  async generateCodeExecutionFigmaImport(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.generateCodeExecutionFigmaImport(taskId, options);
+  }
+
   saveDraft(taskId: string, input: {
     content?: string;
     summary?: string;

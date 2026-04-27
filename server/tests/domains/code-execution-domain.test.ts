@@ -1618,6 +1618,87 @@ test('code execution can run on repository without commit history', async () => 
   assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), false);
 });
 
+test('code execution domain can generate figma import artifact from design spec', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: {
+        defaultProvider: 'codex'
+      },
+      workspace: {
+        projectsRoot: workspace.root
+      },
+      github: {
+        owner: '',
+        repositories: []
+      }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {},
+      async runExec() {
+        throw new Error('not used');
+      }
+    },
+    claudeCliRunner: null,
+    codeTaskPlanner: {
+      async createPromptPlan() {
+        throw new Error('not used');
+      },
+      async createPullRequestDraft() {
+        throw new Error('not used');
+      }
+    }
+  });
+
+  const task = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    title: '[코드] 디자인 아티팩트 변환 테스트',
+    status: 'awaiting_approval',
+    payload: {
+      command: 'Figma import JSON 생성 테스트'
+    },
+    result: {}
+  });
+
+  repo.createArtifact(task.id, 'design_spec', {
+    title: '디자인 명세',
+    content: '# Design Spec',
+    metadata: {
+      summary: '테스트용 디자인 명세',
+      targets: ['홈 화면', '결과 화면'],
+      layoutChanges: ['상단 요약 카드 배치', '결과 CTA 고정'],
+      visualRules: ['강조 색상은 단일 톤 유지'],
+      interactionStates: ['버튼 로딩/비활성 상태 명시'],
+      accessibilityChecks: ['명도 대비 4.5:1 이상'],
+      responsiveNotes: ['모바일 우선 레이아웃']
+    }
+  });
+
+  await domain.createFigmaImport(task.id, {});
+
+  const figmaArtifacts = repo.listArtifacts(task.id, 'figma_import_json');
+  assert.equal(figmaArtifacts.length, 1);
+  const figmaArtifact = figmaArtifacts[0];
+  assert.match(String(figmaArtifact.content || ''), /doppelganger\.figma-import\.v1/);
+  assert.equal(String(figmaArtifact.metadata?.schema || ''), 'doppelganger.figma-import.v1');
+  assert.equal(Array.isArray(figmaArtifact.metadata?.document?.pages), true);
+});
+
 test('code execution domain supports plan mode and stops after planning with confirmation requests', async () => {
   const workspace = createGitWorkspace();
   const repo = createRepository(path.join(workspace.root, 'agent.db'));

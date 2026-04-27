@@ -3,6 +3,7 @@ import {
   createCodeTask,
   createPullRequest,
   deleteTask,
+  generateCodeTaskFigmaImport,
   resumeCodeTask,
   runTask,
   saveCodeTaskPlanSelections
@@ -114,12 +115,14 @@ const CONTINUATION_SOURCE_STATUSES = new Set(['done', 'awaiting_approval', 'fail
 const PLANNING_ARTIFACT_LABELS: Record<string, string> = {
   prompt_plan: '프롬프트 계획',
   product_plan: '기획안',
-  design_spec: '디자인 명세'
+  design_spec: '디자인 명세',
+  figma_import_json: 'Figma Import JSON'
 };
 const PLANNING_ARTIFACT_ORDER: Record<string, number> = {
   prompt_plan: 0,
   product_plan: 1,
-  design_spec: 2
+  design_spec: 2,
+  figma_import_json: 3
 };
 
 const DEFAULT_PROGRESS: ExecutionProgress = {
@@ -914,12 +917,15 @@ export function CodeExecutionPanel({
   }
 
   function downloadPlanningArtifact(taskId: string, artifact: TaskArtifact) {
+    const forceJson = artifact.type === 'figma_import_json';
     const content = toText(artifact.content);
     const fallbackMetadata = Object.keys(artifact.metadata || {}).length > 0
       ? JSON.stringify(artifact.metadata, null, 2)
       : '';
-    const payload = content || fallbackMetadata || '-';
-    const extension = content ? 'md' : 'json';
+    const payload = forceJson
+      ? (content || fallbackMetadata || '{}')
+      : (content || fallbackMetadata || '-');
+    const extension = forceJson ? 'json' : (content ? 'md' : 'json');
     const filename = [
       toSafeFileToken(taskId),
       toSafeFileToken(artifact.type),
@@ -961,7 +967,22 @@ export function CodeExecutionPanel({
                     {artifact.created_at ? ` · ${formatDateTime(artifact.created_at)}` : ''}
                   </summary>
                   <div className="mt-2 grid gap-2">
-                    <div className="flex justify-end">
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {artifact.type === 'design_spec' && (
+                        <button
+                          type="button"
+                          className={SUB_BUTTON_CLASS}
+                          onClick={() => onRunAction('Figma JSON 생성', async () => {
+                            await generateCodeTaskFigmaImport(taskId, {
+                              sourceArtifactId: artifact.id
+                            });
+                            return taskId;
+                          })}
+                          disabled={Boolean(busyAction)}
+                        >
+                          Figma JSON 생성
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={SUB_BUTTON_CLASS}

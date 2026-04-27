@@ -163,6 +163,21 @@ export class TaskCommandService {
     return this.queryService.getTaskDetail(taskId);
   }
 
+  async generateCodeExecutionFigmaImport(taskId: string, options: Record<string, unknown> = {}) {
+    const task = assertTask(taskId, this.repo.getTask(taskId));
+    if (task.domain !== 'code_execution') {
+      throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
+    }
+
+    const domain = this.domains.code_execution;
+    if (!domain?.createFigmaImport) {
+      throw new Error('코드 작업 도메인에서 Figma import 생성 기능을 지원하지 않습니다');
+    }
+
+    await domain.createFigmaImport(taskId, options);
+    return this.queryService.getTaskDetail(taskId);
+  }
+
   async resumeCodeExecutionTask(taskId: string) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'code_execution') {
