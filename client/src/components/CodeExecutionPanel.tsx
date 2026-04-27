@@ -5,7 +5,8 @@ import {
   deleteTask,
   resumeCodeTask,
   runTask,
-  saveCodeTaskPlanSelections
+  saveCodeTaskPlanSelections,
+  updateCodeTaskStatus
 } from '../api';
 import type { MetaResponse, Task, TaskDetail } from '../types';
 import type {
@@ -101,6 +102,8 @@ type PlanConfirmationRequestView = {
   options: PlanConfirmationOptionView[];
 };
 
+type ManualCodeTaskStatus = 'running' | 'awaiting_approval' | 'failed' | 'done';
+
 const EXECUTION_STEP_ITEMS = [
   { step: 1, label: '작업 환경 점검 + 브랜치 준비' },
   { step: 2, label: '프롬프트/기획/디자인 계획 생성' },
@@ -111,6 +114,7 @@ const EXECUTION_STEP_ITEMS = [
 ] as const;
 
 const CONTINUATION_SOURCE_STATUSES = new Set(['done', 'awaiting_approval', 'failed']);
+const MANUAL_STATUS_OPTIONS: ManualCodeTaskStatus[] = ['running', 'awaiting_approval', 'failed', 'done'];
 
 const DEFAULT_PROGRESS: ExecutionProgress = {
   phase: '',
@@ -172,6 +176,14 @@ function toTextList(value: unknown): string[] {
     return [];
   }
   return value.map((entry) => toText(entry)).filter(Boolean);
+}
+
+function normalizeManualCodeTaskStatus(value: unknown): ManualCodeTaskStatus {
+  const normalized = toText(value).toLowerCase();
+  if (MANUAL_STATUS_OPTIONS.includes(normalized as ManualCodeTaskStatus)) {
+    return normalized as ManualCodeTaskStatus;
+  }
+  return 'running';
 }
 
 function parseReviewFinding(value: unknown): ReviewFindingView {
@@ -529,6 +541,7 @@ export function CodeExecutionPanel({
   const [continueFromTaskId, setContinueFromTaskId] = useState('');
   const [continueCommand, setContinueCommand] = useState('');
   const [planSelectionsByTaskId, setPlanSelectionsByTaskId] = useState<Record<string, Record<string, string>>>({});
+  const [statusDraftByTaskId, setStatusDraftByTaskId] = useState<Record<string, ManualCodeTaskStatus>>({});
 
   const detailByTaskId = useMemo(() => {
     const next: Record<string, TaskDetail> = {};
@@ -701,6 +714,27 @@ export function CodeExecutionPanel({
   }, [runningTasks]);
 
   useEffect(() => {
+    setStatusDraftByTaskId((current) => {
+      const next: Record<string, ManualCodeTaskStatus> = {};
+      let changed = false;
+      for (const task of runningTasks) {
+        const status = normalizeManualCodeTaskStatus(task.status);
+        if (Object.prototype.hasOwnProperty.call(current, task.id)) {
+          next[task.id] = current[task.id];
+        } else {
+          next[task.id] = status;
+          changed = true;
+        }
+      }
+      const hasRemoved = Object.keys(current).some((taskId) => !runningTasks.some((task) => task.id === taskId));
+      if (!changed && !hasRemoved && Object.keys(current).length === Object.keys(next).length) {
+        return current;
+      }
+      return next;
+    });
+  }, [runningTasks]);
+
+  useEffect(() => {
     setCollapsedTimelineByTaskId((current) => {
       const next: Record<string, boolean> = {};
       let changed = false;
@@ -789,6 +823,13 @@ export function CodeExecutionPanel({
     setCollapsedTimelineByTaskId((current) => ({
       ...current,
       [taskId]: !current[taskId]
+    }));
+  }
+
+  function selectManualStatus(taskId: string, status: ManualCodeTaskStatus) {
+    setStatusDraftByTaskId((current) => ({
+      ...current,
+      [taskId]: status
     }));
   }
 
@@ -899,6 +940,16 @@ export function CodeExecutionPanel({
       return taskId;
     });
     closeCreatePrModal();
+  }
+
+  function submitTaskStatusChange(taskId: string) {
+    const targetStatus = statusDraftByTaskId[taskId] || 'running';
+    onRunAction('코드 작업 상태 변경', async () => {
+      await updateCodeTaskStatus(taskId, {
+        status: targetStatus
+      });
+      return taskId;
+    });
   }
 
   return (
@@ -1144,6 +1195,9 @@ export function CodeExecutionPanel({
                 {runningTaskViews.map((view) => {
                   const isCollapsed = Boolean(collapsedTaskById[view.task.id]);
                   const timelineCollapsed = collapsedTimelineByTaskId[view.task.id] ?? collapsedSections.code_timeline;
+                  const currentStatus = normalizeManualCodeTaskStatus(view.task.status);
+                  const selectedManualStatus = statusDraftByTaskId[view.task.id] || currentStatus;
+                  const canSubmitManualStatus = selectedManualStatus !== currentStatus;
                   return (
                     <article key={view.task.id} className="rounded-xl border border-slate-200 bg-white p-3">
                       <header className="flex items-start justify-between gap-3">
@@ -1294,6 +1348,40 @@ export function CodeExecutionPanel({
                           {view.task.last_error && (
                             <p className="text-sm text-rose-700">오류: {view.task.last_error}</p>
                           )}
+
+                          <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex flex-wrap items-end justify-between gap-2">
+                              <label className="grid gap-1 text-xs text-slate-700">
+                                상태 변경
+                                <select
+                                  className={INPUT_CLASS}
+                                  value={selectedManualStatus}
+                                  onChange={(event) => selectManualStatus(
+                                    view.task.id,
+                                    normalizeManualCodeTaskStatus(event.target.value)
+                                  )}
+                                  disabled={Boolean(busyAction)}
+                                >
+                                  {MANUAL_STATUS_OPTIONS.map((statusOption) => (
+                                    <option key={`${view.task.id}-status-${statusOption}`} value={statusOption}>
+                                      {mapStatusLabel(statusOption)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <button
+                                type="button"
+                                className={SUB_BUTTON_CLASS}
+                                onClick={() => submitTaskStatusChange(view.task.id)}
+                                disabled={Boolean(busyAction) || !canSubmitManualStatus}
+                              >
+                                상태 변경 적용
+                              </button>
+                            </div>
+                            <p className="mt-2 text-xs text-slate-600">
+                              실행이 멈춘 경우 상태를 수동 정리할 수 있습니다.
+                            </p>
+                          </section>
 
                           <section className="flex flex-wrap justify-end gap-2">
                             {view.canShowCreatePrButton && (

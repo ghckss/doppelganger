@@ -103,6 +103,10 @@ export class TaskService {
     return this.commandService.resumeCodeExecutionTask(taskId);
   }
 
+  async updateCodeExecutionTaskStatus(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.updateCodeExecutionTaskStatus(taskId, options);
+  }
+
   deleteTask(taskId: string) {
     return this.commandService.deleteTask(taskId);
   }

@@ -108,6 +108,23 @@ export async function handleTaskRoutes({
     return true;
   }
 
+  const codeTaskStatusMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/code-execution\/status$/);
+  if (request.method === 'POST' && codeTaskStatusMatch) {
+    const taskId = decodeURIComponent(codeTaskStatusMatch[1]);
+    const body = await parseRequestBody(request);
+    const detail = await service.updateCodeExecutionTaskStatus(taskId, {
+      status: readStringField(body, 'status'),
+      summary: readStringField(body, 'summary'),
+      lastError: readStringField(body, 'lastError')
+    });
+    sendJson(response, 200, {
+      ok: true,
+      taskId,
+      status: detail.task.status
+    });
+    return true;
+  }
+
   const createPrMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/create-pr$/);
   if (request.method === 'POST' && createPrMatch) {
     const taskId = decodeURIComponent(createPrMatch[1]);

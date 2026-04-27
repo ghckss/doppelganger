@@ -151,6 +151,9 @@ export function SlackPanel({
   const normalizedReactionName = normalizeReactionName(editor?.reactionName || '');
   const reactionGlyph = resolveReactionGlyph(normalizedReactionName);
   const isCodeReviewRunning = toText(codeReview?.analysisStatus).toLowerCase() === 'running';
+  const receivedMessage = detail
+    ? toText(detail.task.payload?.text) || toText(messageArtifacts.at(0)?.content)
+    : '';
 
   return (
     <section className={`${PANEL_CLASS} border-sky-200 bg-sky-50/70`}>
@@ -411,6 +414,15 @@ export function SlackPanel({
                     </div>
                   </>
                 )}
+              </section>
+
+              <section className="grid gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-sm font-semibold text-slate-900">받은 메시지</h4>
+                </div>
+                <pre className="m-0 whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                  {receivedMessage || '(받은 메시지를 확인할 수 없습니다)'}
+                </pre>
               </section>
 
               <section className="grid gap-2">

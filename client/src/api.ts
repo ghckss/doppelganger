@@ -99,6 +99,17 @@ export function resumeCodeTask(taskId: string): Promise<{ ok: boolean }> {
   });
 }
 
+export function updateCodeTaskStatus(taskId: string, input: {
+  status: 'running' | 'awaiting_approval' | 'failed' | 'done';
+  summary?: string;
+  lastError?: string;
+}): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/code-execution/status`, {
+    method: 'POST',
+    body: input
+  });
+}
+
 export function deleteTask(taskId: string): Promise<{ ok: boolean }> {
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
     method: 'DELETE'

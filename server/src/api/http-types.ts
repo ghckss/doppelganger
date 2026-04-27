@@ -68,6 +68,11 @@ export interface TaskServiceApi {
   }>;
   startCodeExecutionTask(taskId: string, input?: { startFromPlan?: boolean }): Promise<TaskDetail>;
   resumeCodeExecutionTask(taskId: string): Promise<TaskDetail>;
+  updateCodeExecutionTaskStatus(taskId: string, input: {
+    status: string;
+    summary?: string;
+    lastError?: string;
+  }): Promise<TaskDetail>;
   deleteTask(taskId: string): void;
   saveCodeExecutionPlanSelections(taskId: string, input: { selections?: Record<string, unknown> }): Promise<TaskDetail>;
   createCodeExecutionPullRequest(taskId: string, input: { branchName?: string }): Promise<TaskDetail>;
