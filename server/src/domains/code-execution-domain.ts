@@ -629,18 +629,7 @@ export function createCodeExecutionDomain({
       return false;
     }
 
-    const candidates = [
-      `refs/heads/${normalized}^{commit}`,
-      `refs/remotes/origin/${normalized}^{commit}`,
-      `${normalized}^{commit}`
-    ];
-    for (const candidate of candidates) {
-      if (await gitRevisionExists(workdir, candidate)) {
-        return true;
-      }
-    }
-
-    return false;
+    return gitRevisionExists(workdir, `refs/heads/${normalized}^{commit}`);
   }
 
   async function resolveBaseBranch(workdir, requestedBaseBranch = '', currentBranch = '') {
