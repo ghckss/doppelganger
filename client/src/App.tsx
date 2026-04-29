@@ -424,7 +424,7 @@ export default function App() {
         <header className="flex flex-col gap-4 py-5 text-slate-100 md:flex-row md:items-end md:justify-between">
           <div>
             <p className="text-xs uppercase tracking-[0.08em] text-slate-300">작업 관제 콘솔</p>
-            <h1 className="mt-1 text-2xl font-bold">Doppelganger</h1>
+            <h1 className="mt-1 text-2xl font-bold">Doppelgänger</h1>
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" className={BUTTON_CLASS} onClick={() => void runAction('일괄 업데이트', runBatchUpdate)} disabled={Boolean(busyAction)}>
