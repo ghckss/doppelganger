@@ -458,3 +458,62 @@ test('TaskService reports already-running state when starting code execution tas
     /작업이 이미 실행 중입니다/
   );
 });
+
+test('TaskService deletes non-running tasks and cascades related records', () => {
+  const repo = createRepo();
+  const task = repo.upsertTask({
+    domain: 'code_execution',
+    kind: 'implementation',
+    externalId: 'delete-target',
+    title: 'Delete target',
+    status: 'done',
+    payload: {
+      command: 'Delete me'
+    }
+  });
+  repo.createArtifact(task.id, 'workspace_snapshot', {
+    title: '스냅샷',
+    metadata: {
+      root: '/tmp/demo'
+    }
+  });
+  repo.createDraft(task.id, 'draft content', {
+    provider: 'manual'
+  });
+  repo.logExecution(task.id, 'create_code_task', 'success');
+
+  const service = new TaskService({
+    config: {},
+    repo,
+    domains: {}
+  });
+
+  service.deleteTask(task.id);
+  assert.equal(repo.getTask(task.id), null);
+  assert.equal(repo.listArtifacts(task.id, 'workspace_snapshot').length, 0);
+  assert.equal(repo.listDrafts(task.id).length, 0);
+  assert.equal(repo.listExecutions(task.id).length, 0);
+});
+
+test('TaskService rejects deleting a running task', () => {
+  const repo = createRepo();
+  const task = repo.upsertTask({
+    domain: 'slack_mention',
+    kind: 'reply',
+    externalId: 'delete-running',
+    title: 'Delete running',
+    status: 'running',
+    payload: {}
+  });
+
+  const service = new TaskService({
+    config: {},
+    repo,
+    domains: {}
+  });
+
+  assert.throws(
+    () => service.deleteTask(task.id),
+    /실행 중인 작업은 삭제할 수 없습니다/
+  );
+});

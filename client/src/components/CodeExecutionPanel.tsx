@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { createCodeTask, createPullRequest, resumeCodeTask } from '../api';
+import {
+  createCodeTask,
+  createPullRequest,
+  deleteTask,
+  resumeCodeTask,
+  runTask,
+  saveCodeTaskPlanSelections,
+  updateCodeTaskStatus
+} from '../api';
 import type { MetaResponse, Task, TaskDetail } from '../types';
 import type {
   CollapsibleSectionId,
@@ -7,6 +15,7 @@ import type {
   ExecutionProgress
 } from '../task-view';
 import {
+  formatDateTime,
   getExecutionProgress,
   getExecutionStepElapsedSeconds,
   mapStatusLabel,
@@ -17,6 +26,7 @@ import {
   EMPTY_CLASS,
   INPUT_CLASS,
   LABEL_CLASS,
+  modeButtonClass,
   PANEL_CLASS,
   StatusBadge,
   SUB_BUTTON_CLASS
@@ -55,7 +65,7 @@ type ReviewRoundView = {
 type CodeExecutionPanelProps = {
   meta: MetaResponse | null;
   tasks: Task[];
-  runningDetails: TaskDetail[];
+  taskDetails: TaskDetail[];
   collapsedSections: CollapsibleState;
   busyAction: string;
   command: string;
@@ -63,6 +73,7 @@ type CodeExecutionPanelProps = {
   baseBranch: string;
   branchName: string;
   agentProvider: string;
+  executionMode: 'full' | 'plan';
   needsPlanning: boolean;
   needsDesign: boolean;
   onToggleSection: (sectionId: CollapsibleSectionId) => void;
@@ -71,30 +82,48 @@ type CodeExecutionPanelProps = {
   onSetBaseBranch: (value: string) => void;
   onSetBranchName: (value: string) => void;
   onSetAgentProvider: (value: string) => void;
+  onSetExecutionMode: (value: 'full' | 'plan') => void;
   onSetNeedsPlanning: (value: boolean) => void;
   onSetNeedsDesign: (value: boolean) => void;
   onRunAction: (label: string, action: () => Promise<string | string[] | void>) => void;
 };
+
+type PlanConfirmationOptionView = {
+  id: string;
+  label: string;
+  description: string;
+  recommended: boolean;
+};
+
+type PlanConfirmationRequestView = {
+  id: string;
+  title: string;
+  question: string;
+  options: PlanConfirmationOptionView[];
+};
+
+type ManualCodeTaskStatus = 'running' | 'awaiting_approval' | 'failed' | 'done';
 
 const EXECUTION_STEP_ITEMS = [
   { step: 1, label: '작업 환경 점검 + 브랜치 준비' },
   { step: 2, label: '프롬프트/기획/디자인 계획 생성' },
   { step: 3, label: '코딩 에이전트 실행' },
   { step: 4, label: '리뷰/수정 라운드 1' },
-  { step: 5, label: '리뷰/수정 라운드 2' },
-  { step: 6, label: '리뷰/수정 라운드 3' },
-  { step: 7, label: 'PR 초안 정리' },
-  { step: 8, label: '코드 작업 완료' }
+  { step: 5, label: 'PR 초안 정리' },
+  { step: 6, label: '코드 작업 완료' }
 ] as const;
+
+const CONTINUATION_SOURCE_STATUSES = new Set(['done', 'awaiting_approval', 'failed']);
+const MANUAL_STATUS_OPTIONS: ManualCodeTaskStatus[] = ['running', 'awaiting_approval', 'failed', 'done'];
 
 const DEFAULT_PROGRESS: ExecutionProgress = {
   phase: '',
   label: '',
   currentStep: 0,
-  totalSteps: 8,
+  totalSteps: 6,
   percent: 0,
   reviewRound: 0,
-  reviewTotalRounds: 3
+  reviewTotalRounds: 1
 };
 
 function stepState(currentStep: number, step: number): 'done' | 'current' | 'pending' {
@@ -149,6 +178,14 @@ function toTextList(value: unknown): string[] {
   return value.map((entry) => toText(entry)).filter(Boolean);
 }
 
+function normalizeManualCodeTaskStatus(value: unknown): ManualCodeTaskStatus {
+  const normalized = toText(value).toLowerCase();
+  if (MANUAL_STATUS_OPTIONS.includes(normalized as ManualCodeTaskStatus)) {
+    return normalized as ManualCodeTaskStatus;
+  }
+  return 'running';
+}
+
 function parseReviewFinding(value: unknown): ReviewFindingView {
   const source = toRecord(value);
   return {
@@ -199,6 +236,76 @@ function parsePatchSection(value: unknown): ReviewRoundView['patch'] {
 function parseRoundNumber(value: unknown): number {
   const direct = toNumber(value, 0);
   return direct > 0 ? Math.trunc(direct) : 0;
+}
+
+function normalizeIdentifier(value: unknown): string {
+  return toText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parsePlanConfirmationOption(value: unknown, requestId: string, index: number): PlanConfirmationOptionView {
+  const source = toRecord(value);
+  const optionId = normalizeIdentifier(source.id) || `${requestId}_option_${index + 1}`;
+  const label = toText(source.label) || `옵션 ${index + 1}`;
+  const description = toText(source.description) || label;
+  return {
+    id: optionId,
+    label,
+    description,
+    recommended: Boolean(source.recommended)
+  };
+}
+
+function parsePlanConfirmationRequest(value: unknown, index: number): PlanConfirmationRequestView | null {
+  const source = toRecord(value);
+  const requestId = normalizeIdentifier(source.id) || `confirm_${index + 1}`;
+  if (!requestId) {
+    return null;
+  }
+
+  const options = Array.isArray(source.options)
+    ? source.options.map((option, optionIndex) => parsePlanConfirmationOption(option, requestId, optionIndex))
+    : [];
+  if (options.length === 0) {
+    options.push({
+      id: `${requestId}_default`,
+      label: '기본안',
+      description: '기본 권장안으로 진행합니다.',
+      recommended: true
+    });
+  }
+
+  if (!options.some((option) => option.recommended)) {
+    options[0] = {
+      ...options[0],
+      recommended: true
+    };
+  }
+
+  return {
+    id: requestId,
+    title: toText(source.title) || `확인 항목 ${index + 1}`,
+    question: toText(source.question) || '작업 진행 전에 선택이 필요합니다.',
+    options
+  };
+}
+
+function parsePlanSelections(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.entries(value as Record<string, unknown>).reduce((accumulator, [requestId, optionId]) => {
+    const normalizedRequestId = normalizeIdentifier(requestId);
+    const normalizedOptionId = normalizeIdentifier(optionId);
+    if (!normalizedRequestId || !normalizedOptionId) {
+      return accumulator;
+    }
+    accumulator[normalizedRequestId] = normalizedOptionId;
+    return accumulator;
+  }, {} as Record<string, string>);
 }
 
 function extractRoundFromTitle(value: unknown): number {
@@ -281,10 +388,129 @@ function resolvePullRequestUrl(task: Task): string {
   return toText(pullRequest.url);
 }
 
+function resolveCanCreatePullRequest(task: Task): boolean {
+  const payload = toRecord(task.payload);
+  const result = toRecord(task.result);
+  if (typeof result.canCreatePullRequest === 'boolean') {
+    return result.canCreatePullRequest;
+  }
+  if (typeof payload.canCreatePullRequest === 'boolean') {
+    return payload.canCreatePullRequest;
+  }
+  const remoteUrl = toText(result.remoteUrl) || toText(payload.remoteUrl);
+  return Boolean(remoteUrl);
+}
+
+function resolveExecutionMode(task: Task): 'full' | 'plan' {
+  const mode = toText(toRecord(task.payload).executionMode).toLowerCase();
+  if (mode === 'plan' || mode === 'plan_only') {
+    return 'plan';
+  }
+  return 'full';
+}
+
+function resolvePlanConfirmationRequests(task: Task, detail: TaskDetail | null): PlanConfirmationRequestView[] {
+  const result = toRecord(task.result);
+  const planMode = toRecord(result.planMode);
+  const requestsSource = Array.isArray(planMode.confirmationRequests)
+    ? planMode.confirmationRequests
+    : [];
+  if (requestsSource.length > 0) {
+    return requestsSource
+      .map((request, index) => parsePlanConfirmationRequest(request, index))
+      .filter((request): request is PlanConfirmationRequestView => Boolean(request));
+  }
+
+  const promptPlan = toRecord(result.promptPlan);
+  const fallbackSource = Array.isArray(promptPlan.confirmationRequests)
+    ? promptPlan.confirmationRequests
+    : detail?.artifacts
+      ?.filter((artifact) => artifact.type === 'plan_confirmation_requests')
+      .at(-1)
+      ?.metadata
+      ?.confirmationRequests;
+
+  if (!Array.isArray(fallbackSource)) {
+    return [];
+  }
+
+  return fallbackSource
+    .map((request, index) => parsePlanConfirmationRequest(request, index))
+    .filter((request): request is PlanConfirmationRequestView => Boolean(request));
+}
+
+function resolvePlanSelections(task: Task): Record<string, string> {
+  const payload = toRecord(task.payload);
+  const result = toRecord(task.result);
+  const planMode = toRecord(result.planMode);
+  return {
+    ...parsePlanSelections(payload.planSelections),
+    ...parsePlanSelections(planMode.selections)
+  };
+}
+
+type ContinuationHistoryItem = {
+  id: string;
+  status: string;
+  command: string;
+  resultSummary: string;
+  updatedAt: string;
+};
+
+function resolveContinuationRootTaskId(taskId: string, taskById: Map<string, Task>): string {
+  let currentTask = taskById.get(taskId) || null;
+  if (!currentTask) {
+    return taskId;
+  }
+
+  const visited = new Set<string>();
+  while (currentTask && !visited.has(currentTask.id)) {
+    visited.add(currentTask.id);
+    const payload = toRecord(currentTask.payload);
+    const explicitRoot = toText(payload.rootTaskId);
+    if (explicitRoot) {
+      return explicitRoot;
+    }
+    const parentTaskId = toText(payload.parentTaskId);
+    if (!parentTaskId) {
+      return currentTask.id;
+    }
+    currentTask = taskById.get(parentTaskId) || null;
+  }
+
+  return taskId;
+}
+
+function resolveContinuationResultSummary(task: Task): string {
+  const summaryText = toText(task.summary);
+  if (summaryText) {
+    return summaryText;
+  }
+
+  const result = toRecord(task.result);
+  const commitCount = Array.isArray(result.commits) ? result.commits.length : 0;
+  const reviewRoundCount = Array.isArray(result.reviewRounds) ? result.reviewRounds.length : 0;
+  const pullRequestUrl = toText(toRecord(result.pullRequest).url);
+  const parts: string[] = [];
+  if (commitCount > 0) {
+    parts.push(`커밋 ${commitCount}건`);
+  }
+  if (reviewRoundCount > 0) {
+    parts.push(`리뷰 ${reviewRoundCount}회`);
+  }
+  if (pullRequestUrl) {
+    parts.push(`PR ${pullRequestUrl}`);
+  }
+  if (parts.length > 0) {
+    return parts.join(' · ');
+  }
+  return '결과 요약이 없습니다.';
+}
+
 export function CodeExecutionPanel({
   meta,
   tasks,
-  runningDetails,
+  taskDetails,
   collapsedSections,
   busyAction,
   command,
@@ -292,6 +518,7 @@ export function CodeExecutionPanel({
   baseBranch,
   branchName,
   agentProvider,
+  executionMode,
   needsPlanning,
   needsDesign,
   onToggleSection,
@@ -300,6 +527,7 @@ export function CodeExecutionPanel({
   onSetBaseBranch,
   onSetBranchName,
   onSetAgentProvider,
+  onSetExecutionMode,
   onSetNeedsPlanning,
   onSetNeedsDesign,
   onRunAction
@@ -309,22 +537,91 @@ export function CodeExecutionPanel({
   const [collapsedTimelineByTaskId, setCollapsedTimelineByTaskId] = useState<Record<string, boolean>>({});
   const [createPrTaskId, setCreatePrTaskId] = useState('');
   const [prBranchName, setPrBranchName] = useState('');
+  const [resumeHistoryModalOpen, setResumeHistoryModalOpen] = useState(false);
+  const [continueFromTaskId, setContinueFromTaskId] = useState('');
+  const [continueCommand, setContinueCommand] = useState('');
+  const [planSelectionsByTaskId, setPlanSelectionsByTaskId] = useState<Record<string, Record<string, string>>>({});
+  const [statusDraftByTaskId, setStatusDraftByTaskId] = useState<Record<string, ManualCodeTaskStatus>>({});
 
   const detailByTaskId = useMemo(() => {
     const next: Record<string, TaskDetail> = {};
-    for (const detail of runningDetails) {
+    for (const detail of taskDetails) {
       next[detail.task.id] = detail;
     }
     return next;
-  }, [runningDetails]);
+  }, [taskDetails]);
 
   const runningTasks = useMemo(() => {
     const list = tasks
-      .filter((task) => String(task.status || '').toLowerCase() === 'running')
+      .filter((task) => {
+        const status = String(task.status || '').toLowerCase();
+        return resolveExecutionMode(task) === 'full'
+          && (status === 'running' || status === 'awaiting_approval' || status === 'failed');
+      })
       .slice();
     list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
     return list;
   }, [tasks]);
+  const planModeTasks = useMemo(() => {
+    const list = tasks
+      .filter((task) => {
+        const status = String(task.status || '').toLowerCase();
+        return resolveExecutionMode(task) === 'plan'
+          && (status === 'awaiting_approval' || status === 'running' || status === 'failed');
+      })
+      .slice();
+    list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
+    return list;
+  }, [tasks]);
+  const continuationCandidates = useMemo(() => {
+    const list = tasks
+      .filter((task) => CONTINUATION_SOURCE_STATUSES.has(String(task.status || '').toLowerCase()))
+      .slice();
+    list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
+    return list;
+  }, [tasks]);
+  const selectedContinuationTask = useMemo(
+    () => continuationCandidates.find((task) => task.id === continueFromTaskId) || null,
+    [continuationCandidates, continueFromTaskId]
+  );
+  const selectedContinuationHistory = useMemo((): ContinuationHistoryItem[] => {
+    if (!selectedContinuationTask) {
+      return [];
+    }
+
+    const taskById = new Map(tasks.map((task) => [task.id, task]));
+    const rootTaskId = resolveContinuationRootTaskId(selectedContinuationTask.id, taskById);
+    const historyTasks = tasks
+      .filter((task) => {
+        const payload = toRecord(task.payload);
+        const taskRootId = toText(payload.rootTaskId);
+        if (task.id === rootTaskId) {
+          return true;
+        }
+        if (taskRootId && taskRootId === rootTaskId) {
+          return true;
+        }
+        const parentTaskId = toText(payload.parentTaskId);
+        if (!taskRootId && parentTaskId && taskById.has(parentTaskId)) {
+          const derivedRoot = resolveContinuationRootTaskId(task.id, taskById);
+          return derivedRoot === rootTaskId;
+        }
+        return false;
+      })
+      .sort((left, right) => String(left.created_at || '').localeCompare(String(right.created_at || '')));
+
+    if (historyTasks.length === 0) {
+      historyTasks.push(selectedContinuationTask);
+    }
+
+    return historyTasks.map((task) => ({
+      id: task.id,
+      status: String(task.status || ''),
+      command: resolveCommand(task) || toText(task.title) || task.id,
+      resultSummary: resolveContinuationResultSummary(task),
+      updatedAt: toText(task.updated_at)
+    }));
+  }, [selectedContinuationTask, tasks]);
 
   const runningTaskViews = useMemo(
     () => runningTasks.map((task) => {
@@ -338,6 +635,7 @@ export function CodeExecutionPanel({
       const pullRequestUrl = resolvePullRequestUrl(sourceTask);
       const canResumeTask = ['failed', 'running'].includes(String(sourceTask.status || '').toLowerCase());
       const hasTokenOrAuthError = /token|auth|unauthorized|forbidden|401|403|인증/i.test(String(sourceTask.last_error || ''));
+      const canCreatePullRequest = resolveCanCreatePullRequest(sourceTask);
       return {
         task: sourceTask,
         detail,
@@ -350,12 +648,44 @@ export function CodeExecutionPanel({
         taskMessage,
         pullRequestUrl,
         currentTaskBranch: resolveTaskBranch(sourceTask),
-        canShowCreatePrButton: currentStep >= 8 && !pullRequestUrl,
+        canShowCreatePrButton:
+          canCreatePullRequest
+          && currentStep >= Math.max(1, Number(progress.totalSteps || DEFAULT_PROGRESS.totalSteps))
+          && !pullRequestUrl,
         canResumeTask,
         hasTokenOrAuthError
       };
     }),
     [detailByTaskId, nowMs, runningTasks]
+  );
+  const planTaskViews = useMemo(
+    () => planModeTasks.map((task) => {
+      const detail = detailByTaskId[task.id] || null;
+      const sourceTask = detail?.task || task;
+      const requests = resolvePlanConfirmationRequests(sourceTask, detail);
+      const persistedSelections = resolvePlanSelections(sourceTask);
+      const localSelections = planSelectionsByTaskId[sourceTask.id] || {};
+      const selections = {
+        ...persistedSelections,
+        ...localSelections
+      };
+      const unresolvedRequestIds = requests
+        .map((request) => request.id)
+        .filter((requestId) => !selections[requestId]);
+      const status = String(sourceTask.status || '').toLowerCase();
+      return {
+        task: sourceTask,
+        detail,
+        commandText: resolveCommand(sourceTask) || toText(sourceTask.title) || sourceTask.id,
+        requests,
+        selections,
+        unresolvedRequestIds,
+        canSave: requests.length > 0,
+        canStart: status === 'awaiting_approval' && unresolvedRequestIds.length === 0,
+        canResume: status === 'failed'
+      };
+    }),
+    [detailByTaskId, planModeTasks, planSelectionsByTaskId]
   );
 
   const createPrTarget = useMemo(
@@ -372,6 +702,27 @@ export function CodeExecutionPanel({
           next[task.id] = current[task.id];
         } else {
           next[task.id] = false;
+          changed = true;
+        }
+      }
+      const hasRemoved = Object.keys(current).some((taskId) => !runningTasks.some((task) => task.id === taskId));
+      if (!changed && !hasRemoved && Object.keys(current).length === Object.keys(next).length) {
+        return current;
+      }
+      return next;
+    });
+  }, [runningTasks]);
+
+  useEffect(() => {
+    setStatusDraftByTaskId((current) => {
+      const next: Record<string, ManualCodeTaskStatus> = {};
+      let changed = false;
+      for (const task of runningTasks) {
+        const status = normalizeManualCodeTaskStatus(task.status);
+        if (Object.prototype.hasOwnProperty.call(current, task.id)) {
+          next[task.id] = current[task.id];
+        } else {
+          next[task.id] = status;
           changed = true;
         }
       }
@@ -423,6 +774,44 @@ export function CodeExecutionPanel({
     }
   }, [createPrTaskId, runningTaskViews]);
 
+  useEffect(() => {
+    if (planTaskViews.length === 0) {
+      return;
+    }
+    setPlanSelectionsByTaskId((current) => {
+      const next: Record<string, Record<string, string>> = {};
+      let changed = false;
+      for (const view of planTaskViews) {
+        const existing = current[view.task.id] || {};
+        next[view.task.id] = {
+          ...view.selections,
+          ...existing
+        };
+        const before = JSON.stringify(existing);
+        const after = JSON.stringify(next[view.task.id]);
+        if (before !== after) {
+          changed = true;
+        }
+      }
+      const hasRemoved = Object.keys(current).some((taskId) => !planTaskViews.some((view) => view.task.id === taskId));
+      if (!changed && !hasRemoved) {
+        return current;
+      }
+      return next;
+    });
+  }, [planTaskViews]);
+
+  useEffect(() => {
+    if (!resumeHistoryModalOpen) {
+      return;
+    }
+    setContinueFromTaskId((current) => (
+      continuationCandidates.some((task) => task.id === current)
+        ? current
+        : continuationCandidates[0]?.id || ''
+    ));
+  }, [continuationCandidates, resumeHistoryModalOpen]);
+
   function toggleRunningTask(taskId: string) {
     setCollapsedTaskById((current) => ({
       ...current,
@@ -437,6 +826,40 @@ export function CodeExecutionPanel({
     }));
   }
 
+  function selectManualStatus(taskId: string, status: ManualCodeTaskStatus) {
+    setStatusDraftByTaskId((current) => ({
+      ...current,
+      [taskId]: status
+    }));
+  }
+
+  function selectPlanOption(taskId: string, requestId: string, optionId: string) {
+    setPlanSelectionsByTaskId((current) => ({
+      ...current,
+      [taskId]: {
+        ...(current[taskId] || {}),
+        [requestId]: optionId
+      }
+    }));
+  }
+
+  function savePlanSelections(taskId: string) {
+    const selections = planSelectionsByTaskId[taskId] || {};
+    onRunAction('플랜 선택 저장', async () => {
+      await saveCodeTaskPlanSelections(taskId, selections);
+      return taskId;
+    });
+  }
+
+  function startFromPlan(taskId: string) {
+    const selections = planSelectionsByTaskId[taskId] || {};
+    onRunAction('플랜 확정 후 코드 실행', async () => {
+      await saveCodeTaskPlanSelections(taskId, selections);
+      await runTask(taskId, { startFromPlan: true });
+      return taskId;
+    });
+  }
+
   function openCreatePrModal(taskId: string, suggestedBranch: string) {
     setCreatePrTaskId(taskId);
     setPrBranchName(suggestedBranch);
@@ -445,6 +868,62 @@ export function CodeExecutionPanel({
   function closeCreatePrModal() {
     setCreatePrTaskId('');
     setPrBranchName('');
+  }
+
+  function openResumeHistoryModal() {
+    if (continuationCandidates.length === 0) {
+      return;
+    }
+    setResumeHistoryModalOpen(true);
+    setContinueFromTaskId(continuationCandidates[0]?.id || '');
+    setContinueCommand('');
+  }
+
+  function closeResumeHistoryModal() {
+    setResumeHistoryModalOpen(false);
+    setContinueFromTaskId('');
+    setContinueCommand('');
+  }
+
+  function removeContinuationTask(taskId: string) {
+    const targetTask = continuationCandidates.find((task) => task.id === taskId) || null;
+    if (!targetTask) {
+      return;
+    }
+    const targetCommand = resolveCommand(targetTask) || toText(targetTask.title) || taskId;
+    const confirmed = window.confirm(`이전 작업을 목록에서 제거할까요?\n\n${targetCommand}`);
+    if (!confirmed) {
+      return;
+    }
+
+    onRunAction('이전 작업 제거', async () => {
+      await deleteTask(taskId);
+      setContinueFromTaskId((current) => (current === taskId ? '' : current));
+    });
+  }
+
+  function submitContinueTask() {
+    const selectedTask = selectedContinuationTask;
+    const normalizedCommand = continueCommand.trim();
+    if (!selectedTask || !normalizedCommand) {
+      return;
+    }
+
+    onRunAction('이전 작업 이어가기', async () => {
+      const created = await createCodeTask({
+        command: normalizedCommand,
+        projectId,
+        baseBranch,
+        branchName,
+        continueFromTaskId: selectedTask.id,
+        agentProvider,
+        executionMode,
+        needsPlanning,
+        needsDesign
+      });
+      return created.task.id;
+    });
+    closeResumeHistoryModal();
   }
 
   function submitCreatePullRequest() {
@@ -463,6 +942,16 @@ export function CodeExecutionPanel({
     closeCreatePrModal();
   }
 
+  function submitTaskStatusChange(taskId: string) {
+    const targetStatus = statusDraftByTaskId[taskId] || 'running';
+    onRunAction('코드 작업 상태 변경', async () => {
+      await updateCodeTaskStatus(taskId, {
+        status: targetStatus
+      });
+      return taskId;
+    });
+  }
+
   return (
     <section className={`${PANEL_CLASS} border-amber-200 bg-amber-50/70`}>
       <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-100/80 px-3 py-2">
@@ -477,13 +966,23 @@ export function CodeExecutionPanel({
           <section className="grid gap-3">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-slate-900">코드 작업 생성</h3>
-              <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('code_create')}>
-                {collapsedSections.code_create ? '펼치기' : '접기'}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className={SUB_BUTTON_CLASS}
+                  onClick={openResumeHistoryModal}
+                  disabled={Boolean(busyAction) || continuationCandidates.length === 0}
+                >
+                  이전 작업 이어가기
+                </button>
+                <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('code_create')}>
+                  {collapsedSections.code_create ? '펼치기' : '접기'}
+                </button>
+              </div>
             </div>
             {!collapsedSections.code_create && (
               <form
-                className="grid gap-3 md:grid-cols-4"
+                className="grid gap-3 md:grid-cols-5"
                 onSubmit={(event) => {
                   event.preventDefault();
                   onRunAction('코드 작업 생성', async () => {
@@ -493,6 +992,7 @@ export function CodeExecutionPanel({
                       baseBranch,
                       branchName,
                       agentProvider,
+                      executionMode,
                       needsPlanning,
                       needsDesign
                     });
@@ -530,7 +1030,18 @@ export function CodeExecutionPanel({
                     <option value="claude">Claude</option>
                   </select>
                 </label>
-                <label className={`${LABEL_CLASS} md:col-span-4`}>
+                <label className={LABEL_CLASS}>
+                  실행 모드
+                  <select
+                    className={INPUT_CLASS}
+                    value={executionMode}
+                    onChange={(event) => onSetExecutionMode(event.target.value === 'plan' ? 'plan' : 'full')}
+                  >
+                    <option value="full">전체 실행 (플랜+코딩)</option>
+                    <option value="plan">플랜 모드 (계획/확인 요청)</option>
+                  </select>
+                </label>
+                <label className={`${LABEL_CLASS} md:col-span-5`}>
                   명령
                   <textarea
                     className={INPUT_CLASS}
@@ -541,7 +1052,7 @@ export function CodeExecutionPanel({
                     required
                   />
                 </label>
-                <div className='flex gap-2'>
+                <div className='flex gap-2 md:col-span-2'>
                   <label className="flex items-center gap-2 text-sm text-slate-700">
                     <input type="checkbox" checked={needsPlanning} onChange={(event) => onSetNeedsPlanning(event.target.checked)} />
                     기획 단계 실행
@@ -555,6 +1066,115 @@ export function CodeExecutionPanel({
                   <button type="submit" className={BUTTON_CLASS} disabled={Boolean(busyAction)}>실행</button>
                 </div>
               </form>
+            )}
+          </section>
+
+          <section className="mt-4 border-t border-slate-200 pt-4">
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-900">플랜 모드 확인 요청 ({planTaskViews.length})</h3>
+            </div>
+            {planTaskViews.length === 0 && (
+              <p className={EMPTY_CLASS}>선택 대기 중인 플랜 모드 작업이 없습니다.</p>
+            )}
+            {planTaskViews.length > 0 && (
+              <div className="space-y-3">
+                {planTaskViews.map((view) => (
+                  <article key={`plan-task-${view.task.id}`} className="rounded-xl border border-slate-200 bg-white p-3">
+                    <header className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-900">{view.commandText}</p>
+                        <p className="mt-1 text-xs text-slate-600">{mapStatusLabel(view.task.status)}</p>
+                      </div>
+                      <StatusBadge status={view.task.status} label={mapStatusLabel(view.task.status)} />
+                    </header>
+                    <p className="mt-2 whitespace-pre-wrap break-words text-xs text-slate-700">
+                      {toText(view.task.summary) || '플랜 모드 설명이 아직 없습니다.'}
+                    </p>
+
+                    {view.requests.length === 0 ? (
+                      <p className="mt-3 text-xs text-slate-600">
+                        {view.canStart
+                          ? '추가 확인 항목이 없어 바로 코드 실행을 시작할 수 있습니다.'
+                          : '확인 요청 항목을 불러오는 중입니다.'}
+                      </p>
+                    ) : (
+                      <div className="mt-3 grid gap-2">
+                        {view.requests.map((request) => {
+                          const selectedOptionId = normalizeIdentifier(view.selections[request.id]);
+                          return (
+                            <section key={`${view.task.id}-${request.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-2">
+                              <p className="text-xs font-semibold text-slate-900">{request.title}</p>
+                              <p className="mt-1 text-xs text-slate-700">{request.question}</p>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {request.options.map((option) => {
+                                  const selected = selectedOptionId === option.id;
+                                  return (
+                                    <button
+                                      key={`${view.task.id}-${request.id}-${option.id}`}
+                                      type="button"
+                                      className={modeButtonClass(selected)}
+                                      onClick={() => selectPlanOption(view.task.id, request.id, option.id)}
+                                      disabled={Boolean(busyAction)}
+                                    >
+                                      {option.label}{option.recommended ? ' (권장)' : ''}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <p className="mt-1 text-[11px] text-slate-600">
+                                {request.options.find((option) => option.id === selectedOptionId)?.description
+                                  || '옵션을 선택해 주세요.'}
+                              </p>
+                            </section>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {view.unresolvedRequestIds.length > 0 && (
+                      <p className="mt-2 text-xs text-amber-700">
+                        미선택 항목: {view.unresolvedRequestIds.join(', ')}
+                      </p>
+                    )}
+
+                    <section className="mt-3 flex flex-wrap justify-end gap-2">
+                      {view.canSave && (
+                        <button
+                          type="button"
+                          className={SUB_BUTTON_CLASS}
+                          onClick={() => savePlanSelections(view.task.id)}
+                          disabled={Boolean(busyAction)}
+                        >
+                          선택 저장
+                        </button>
+                      )}
+                      {view.canStart && (
+                        <button
+                          type="button"
+                          className={BUTTON_CLASS}
+                          onClick={() => startFromPlan(view.task.id)}
+                          disabled={Boolean(busyAction)}
+                        >
+                          플랜 확정 후 코드 실행
+                        </button>
+                      )}
+                      {view.canResume && (
+                        <button
+                          type="button"
+                          className={BUTTON_CLASS}
+                          onClick={() => onRunAction('코드 작업 재개', async () => {
+                            await resumeCodeTask(view.task.id);
+                            return view.task.id;
+                          })}
+                          disabled={Boolean(busyAction)}
+                        >
+                          플랜 모드 재개
+                        </button>
+                      )}
+                    </section>
+                  </article>
+                ))}
+              </div>
             )}
           </section>
 
@@ -575,6 +1195,9 @@ export function CodeExecutionPanel({
                 {runningTaskViews.map((view) => {
                   const isCollapsed = Boolean(collapsedTaskById[view.task.id]);
                   const timelineCollapsed = collapsedTimelineByTaskId[view.task.id] ?? collapsedSections.code_timeline;
+                  const currentStatus = normalizeManualCodeTaskStatus(view.task.status);
+                  const selectedManualStatus = statusDraftByTaskId[view.task.id] || currentStatus;
+                  const canSubmitManualStatus = selectedManualStatus !== currentStatus;
                   return (
                     <article key={view.task.id} className="rounded-xl border border-slate-200 bg-white p-3">
                       <header className="flex items-start justify-between gap-3">
@@ -726,6 +1349,40 @@ export function CodeExecutionPanel({
                             <p className="text-sm text-rose-700">오류: {view.task.last_error}</p>
                           )}
 
+                          <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex flex-wrap items-end justify-between gap-2">
+                              <label className="grid gap-1 text-xs text-slate-700">
+                                상태 변경
+                                <select
+                                  className={INPUT_CLASS}
+                                  value={selectedManualStatus}
+                                  onChange={(event) => selectManualStatus(
+                                    view.task.id,
+                                    normalizeManualCodeTaskStatus(event.target.value)
+                                  )}
+                                  disabled={Boolean(busyAction)}
+                                >
+                                  {MANUAL_STATUS_OPTIONS.map((statusOption) => (
+                                    <option key={`${view.task.id}-status-${statusOption}`} value={statusOption}>
+                                      {mapStatusLabel(statusOption)}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                              <button
+                                type="button"
+                                className={SUB_BUTTON_CLASS}
+                                onClick={() => submitTaskStatusChange(view.task.id)}
+                                disabled={Boolean(busyAction) || !canSubmitManualStatus}
+                              >
+                                상태 변경 적용
+                              </button>
+                            </div>
+                            <p className="mt-2 text-xs text-slate-600">
+                              실행이 멈춘 경우 상태를 수동 정리할 수 있습니다.
+                            </p>
+                          </section>
+
                           <section className="flex flex-wrap justify-end gap-2">
                             {view.canShowCreatePrButton && (
                               <button
@@ -767,6 +1424,129 @@ export function CodeExecutionPanel({
             )}
           </section>
         </>
+      )}
+
+      {resumeHistoryModalOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/55 p-4">
+          <section className="w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-4 shadow-lg">
+            <h4 className="text-base font-semibold text-slate-900">이전 작업 이어가기</h4>
+            <p className="mt-1 text-sm text-slate-700">
+              이전 코드 작업의 맥락을 이어서 새 코드 작업을 시작합니다. 새 작업 명령은 필수입니다.
+            </p>
+            {continuationCandidates.length === 0 ? (
+              <p className="mt-3 text-sm text-slate-600">이어갈 수 있는 이전 코드 작업이 없습니다.</p>
+            ) : (
+              <div className="mt-3 max-h-72 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+                {continuationCandidates.map((task) => {
+                  const taskPayload = toRecord(task.payload);
+                  const isSelected = continueFromTaskId === task.id;
+                  const taskCommand = toText(taskPayload.command) || toText(task.title);
+                  return (
+                    <div
+                      key={task.id}
+                      className={`flex items-start gap-2 rounded-md border px-2 py-2 ${
+                        isSelected ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'
+                      }`}
+                    >
+                      <label className="flex min-w-0 flex-1 cursor-pointer gap-2">
+                        <input
+                          type="radio"
+                          className="mt-1"
+                          name="continueFromTaskId"
+                          value={task.id}
+                          checked={isSelected}
+                          onChange={() => setContinueFromTaskId(task.id)}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold text-slate-900">{taskCommand}</p>
+                          <p className="mt-0.5 text-xs text-slate-600">
+                            {mapStatusLabel(task.status)} · 업데이트 {formatDateTime(task.updated_at)}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                            {toText(task.summary) || '작업 요약이 없습니다.'}
+                          </p>
+                        </span>
+                      </label>
+                      <button
+                        type="button"
+                        className="rounded border border-rose-200 px-2 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                        onClick={() => removeContinuationTask(task.id)}
+                        disabled={Boolean(busyAction)}
+                      >
+                        제거
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <section className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <h5 className="text-sm font-semibold text-slate-900">선택 작업 히스토리 타임라인</h5>
+              {!selectedContinuationTask && (
+                <p className="mt-1 text-xs text-slate-600">작업을 선택하면 입력 명령과 결과 히스토리를 표시합니다.</p>
+              )}
+              {selectedContinuationTask && selectedContinuationHistory.length === 0 && (
+                <p className="mt-1 text-xs text-slate-600">표시할 히스토리가 없습니다.</p>
+              )}
+              {selectedContinuationTask && selectedContinuationHistory.length > 0 && (
+                <div className="mt-2 max-h-56 overflow-y-auto rounded-md border border-slate-200 bg-white p-2">
+                  <ol className="space-y-2">
+                    {selectedContinuationHistory.map((historyItem, index) => {
+                      const selected = historyItem.id === selectedContinuationTask.id;
+                      return (
+                        <li
+                          key={`continuation-history-${historyItem.id}`}
+                          className={`rounded-md border px-2 py-2 ${
+                            selected ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'
+                          }`}
+                        >
+                          <p className="text-xs font-semibold text-slate-900">
+                            {String(index + 1).padStart(2, '0')}. {mapStatusLabel(historyItem.status)}
+                            {historyItem.updatedAt ? ` · ${formatDateTime(historyItem.updatedAt)}` : ''}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                            <strong>입력:</strong> {historyItem.command}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap break-words text-xs text-slate-700">
+                            <strong>결과:</strong> {historyItem.resultSummary}
+                          </p>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </div>
+              )}
+            </section>
+            <label className={`${LABEL_CLASS} mt-3`}>
+              새 작업 명령(필수)
+              <textarea
+                className={INPUT_CLASS}
+                value={continueCommand}
+                onChange={(event) => setContinueCommand(event.target.value)}
+                rows={3}
+                placeholder="예: 이전 작업의 캐시 전략은 유지하고, 상세 페이지 에러 복구 흐름만 보완"
+              />
+            </label>
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                className={SUB_BUTTON_CLASS}
+                onClick={closeResumeHistoryModal}
+                disabled={Boolean(busyAction)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className={BUTTON_CLASS}
+                onClick={submitContinueTask}
+                disabled={Boolean(busyAction) || !selectedContinuationTask || !continueCommand.trim()}
+              >
+                이어서 작업 시작
+              </button>
+            </div>
+          </section>
+        </div>
       )}
 
       {createPrTarget && (

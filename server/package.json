@@ -1,0 +1,23 @@
+{
+  "name": "doppelganger-agent-server",
+  "version": "1.1.4",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "dev:server": "tsx watch src/index.ts",
+    "dev:client": "npm --prefix ../client run dev",
+    "poll:slack": "tsx src/cli.ts poll slack-mentions",
+    "poll:github": "tsx src/cli.ts poll github-reviews",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
+    "typecheck": "node ./node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
+    "typecheck:server": "npm run typecheck",
+    "build:client": "npm --prefix ../client run build",
+    "build": "npm run build:client"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.3"
+  }
+}

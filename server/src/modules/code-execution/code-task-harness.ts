@@ -127,37 +127,69 @@ function renderRuleList(values: string[]): string {
   return values.map((value) => `- ${value}`).join('\n');
 }
 
-function stageLabel(stage: CodeTaskHarnessStage): string {
+function collectRuleGroups(stage: CodeTaskHarnessStage): Array<{ title: string; rules: string[] }> {
+  const globalRules = normalizeRules(CODE_TASK_HARNESS_RULES.global);
+  const codingRules = normalizeRules(CODE_TASK_HARNESS_RULES.coding);
+  const reviewRules = normalizeRules(CODE_TASK_HARNESS_RULES.review);
+  const patchRules = normalizeRules(CODE_TASK_HARNESS_RULES.patch);
+
   if (stage === 'coding') {
-    return 'Coding Stage Rules';
+    return [
+      { title: 'Global Rules', rules: globalRules },
+      { title: 'Coding Stage Rules', rules: codingRules }
+    ];
   }
+
   if (stage === 'review') {
-    return 'Review Stage Rules';
+    return [
+      { title: 'Global Rules', rules: globalRules },
+      { title: 'Review Stage Rules', rules: reviewRules }
+    ];
   }
-  return 'Patch Stage Rules';
+
+  return [
+    { title: 'Global Rules', rules: globalRules },
+    { title: 'Patch Stage Rules', rules: patchRules }
+  ];
+}
+
+function stageGuidance(stage: CodeTaskHarnessStage): string[] {
+  if (stage === 'coding') {
+    return [
+      'Treat rule mismatches as in-stage rework: fix them before returning final JSON when the fix is safe and in scope.',
+      'Do not defer harness-only cleanup to review/patch stages unless the change is unsafe in the current run.'
+    ];
+  }
+
+  if (stage === 'review') {
+    return [
+      'Prioritize behavioral regressions, structural risks, and policy/safety concerns.',
+      'Do not raise findings for cosmetic/style-only harness mismatches that should already be handled in coding.'
+    ];
+  }
+
+  return [
+    'Apply review findings safely with minimal diff and avoid widening scope.'
+  ];
 }
 
 export function buildCodeTaskHarnessSection(stage: CodeTaskHarnessStage): string {
-  const globalRules = normalizeRules(CODE_TASK_HARNESS_RULES.global);
-  const stageRules = normalizeRules(CODE_TASK_HARNESS_RULES[stage]);
-  if (globalRules.length === 0 && stageRules.length === 0) {
+  const groups = collectRuleGroups(stage).filter((group) => group.rules.length > 0);
+  if (groups.length === 0) {
     return '';
   }
 
   const sections: string[] = [
     '## Execution Harness',
-    'The following rules are mandatory for this run.'
+    'The following rules are quality guidance for this run.',
+    'Do not abort execution solely for rule mismatch.',
+    ...stageGuidance(stage)
   ];
 
-  if (globalRules.length > 0) {
-    sections.push('### Global Rules');
-    sections.push(renderRuleList(globalRules));
-  }
-
-  if (stageRules.length > 0) {
-    sections.push(`### ${stageLabel(stage)}`);
-    sections.push(renderRuleList(stageRules));
-  }
+  groups.forEach((group) => {
+    sections.push(`### ${group.title}`);
+    sections.push(renderRuleList(group.rules));
+  });
 
   return sections.join('\n');
 }

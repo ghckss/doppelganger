@@ -36,7 +36,7 @@ Current state:
 - Slack mention handling is implemented end-to-end, including automatic summary and reply-draft generation during polling.
 - Slack mention detail supports optional manual repository analysis for deeper replies, while default polling/drafting does not inspect repositories.
 - GitHub PR review is implemented for configured repositories, with open PR candidate polling, draft PR skip, duplicate-review skip, and manual selection from the web UI before posting comments.
-- Local code execution is implemented with prompt planning, optional planning/design phases, coding, review loops, and PR creation.
+- Local code execution is implemented with prompt planning, optional planning/design phases, coding, single review loop, and PR creation.
 - Meeting recording is implemented in the React UI with Korean real-time transcript capture (1s refresh) and Confluence paste-ready summary document generation.
 
 ## Requirements
@@ -44,25 +44,30 @@ Current state:
 - SQLite available through Node's built-in `node:sqlite`
 
 ## Setup
-1. Copy `server/.env.example` to `server/.env`.
-2. Fill in the server/service keys you want to use.
-3. Set client API target in `client/.env`:
+1. Move to the server workspace:
+   ```bash
+   cd server
+   npm install
+   ```
+2. Copy `.env.example` to `.env`.
+3. Fill in the server/service keys you want to use.
+4. Set client API target in `../client/.env`:
    ```bash
    VITE_SERVER_URL=http://127.0.0.1:4318
    ```
-   - If client and server origins differ in dev, add allowed origins in `server/.env`:
+   - If client and server origins differ in dev, add allowed origins in `./.env`:
      ```bash
      APP_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
      ```
-4. Start the server:
+5. Start the server:
    ```bash
    npm start
    ```
-5. Start the client (development):
+6. Start the client (development):
    ```bash
    npm run dev:client
    ```
-6. Open:
+7. Open:
    - React UI (Vite dev): `http://127.0.0.1:5173`
    - Server API: `http://127.0.0.1:4318/api/*`
 
@@ -83,7 +88,7 @@ A practical setup is often:
 
 ## Cron example
 ```cron
-*/10 * * * * cd /Users/hwanghochan/workspace/playground/doppelganger && /usr/bin/env node server/src/cli.js poll slack-mentions >> .local/cron.log 2>&1
+*/10 * * * * cd /Users/hwanghochan/workspace/playground/doppelganger/server && npm run poll:slack >> .local/cron.log 2>&1
 ```
 
 ## Slack manual code review in detail view
@@ -111,6 +116,7 @@ Notes:
 - Browser speech recognition support is required (Chrome-family recommended).
 
 ## Scripts
+Run scripts in `server/`:
 - `npm start`: run the HTTP server
 - `npm run dev`: run the HTTP server with watch mode
 - `npm run dev:client`: run the React client in Vite dev mode
@@ -167,12 +173,19 @@ Notes:
    - Claude: `CLAUDE_COMMAND` (default `claude`)
 4. Open `http://127.0.0.1:5173` and use the project picker in the "코드 작업 생성" 영역.
    - 필요하면 `작업 브랜치(선택)`에 원하는 브랜치명을 직접 입력할 수 있습니다.
+   - 실행 모드는 `전체 실행`(플랜+코딩) 또는 `플랜 모드`(계획/확인 요청) 중에서 선택할 수 있습니다.
 5. Select the agent (`Codex` or `Claude`) per task.
-6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent, perform three review loops, and stop before PR creation.
-7. In task detail, `PR 생성` appears only after step `8/8` is complete.
-8. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
-9. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
-10. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
+6. The server will generate a prompt plan, optionally run planning/design phases, run a coding agent (including in-step harness self-check/fix), perform one review loop, and stop before PR creation.
+7. `플랜 모드`를 선택하면 코딩은 실행하지 않고 계획 + 확인 요청 항목만 생성됩니다.
+8. 플랜 모드 카드에서 확인 항목을 선택/저장한 뒤 `플랜 확정 후 코드 실행`으로 같은 작업을 이어서 실행할 수 있습니다.
+9. 코드 실행이 완료되면 작업 브랜치는 유지된 채 기준 브랜치로 복귀합니다. 자동 병합/자동 브랜치 삭제는 하지 않습니다.
+10. `origin` remote가 있으면 task는 `awaiting_approval` 상태로 전환되고, step `6/6` 완료 후 `PR 생성` 버튼이 노출됩니다.
+11. `origin` remote가 없으면 PR 단계 없이 task를 `done`으로 종료합니다.
+12. Click `PR 생성`, enter the branch name in the modal, then push + PR creation runs with that branch.
+13. 코드 작업 실행 자체는 `WORKSPACE_ALLOWLIST`를 기준으로 허용되며, `GITHUB_REPOSITORIES`에 없는 저장소도 실행할 수 있습니다.
+14. 단, `GITHUB_REPOSITORIES`에 없는 저장소는 `PR 생성` 단계에서만 제한됩니다.
+15. 실행 중 목록은 전체 실행의 `running/awaiting_approval/failed` 상태 작업을 함께 보여주며, 플랜 모드 선택 대기 작업은 별도 `플랜 모드 확인 요청` 영역에 표시됩니다.
+16. `이전 작업 이어가기` 모달에서 완료/승인대기/실패 작업을 선택해 후속 작업을 시작할 수 있습니다.
 
 ### PR creation rules
 - Source template: `<selected repository>/.github/PULL_REQUEST_TEMPLATE.md`
@@ -190,26 +203,32 @@ Notes:
 - `0`: queued (작업 시작 대기)
 - `1`: 작업 환경 점검 + 브랜치 준비
 - `2`: 프롬프트/기획/디자인 계획 생성
-- `3`: 코딩 에이전트 실행
+- `3`: 코딩 에이전트 실행 + 하네스 자체 점검/수정
 - `4`: 리뷰/수정 라운드 1
-- `5`: 리뷰/수정 라운드 2
-- `6`: 리뷰/수정 라운드 3
-- `7`: PR 초안 정리
-- `8`: 코드 작업 완료
+- `5`: PR 초안 정리
+- `6`: 코드 작업 완료
+
+### Plan mode step map (`executionProgress.currentStep`, `executionMode=plan`)
+- `0`: queued (플랜 모드 시작 대기)
+- `1`: 플랜 모드 작업 환경 점검
+- `2`: 플랜 생성 + 확인 요청 항목 정리
+- `3`: 플랜 모드 완료 (사용자 선택 대기 또는 즉시 실행 가능)
 
 Resume behavior:
 - `코드 작업 재개`는 항상 1단계부터 다시 시작하지 않습니다.
 - 실패/중단 시점의 체크포인트(`executionProgress.currentStep`, `phase`, 저장된 review rounds/artifacts)를 기준으로 가능한 가장 가까운 단계부터 이어서 실행합니다.
-- UI에서는 진행 카드의 `n/8` 표시 아래에 현재 단계에서 수행 중인 작업 요약 한 줄을 함께 표시합니다.
+- UI에서는 진행 카드의 `n/6` 표시 아래에 현재 단계에서 수행 중인 작업 요약 한 줄을 함께 표시합니다.
 - UI에서는 진행 카드 우상단에 현재 단계 기준 경과 시간(초 단위, `task.updated_at` 기반)을 표시합니다.
 - UI에서는 코드 작업 상세에 `리뷰 라운드 내용` 영역이 표시되며, `result.reviewRounds`와 `review_round/patch_round` 아티팩트를 합쳐 각 라운드의 검토/수정 내역을 확인할 수 있습니다.
-- 코드 작업 완료 시 작업 브랜치 커밋을 `baseBranch`(기준 브랜치)에 `--ff-only`로 먼저 병합한 뒤, 작업 브랜치(`doppelganger/...`)를 로컬에서 삭제하고 기준 브랜치로 복귀합니다.
-- 병합에 실패하면 작업은 `failed`로 전환되고 작업 브랜치는 보존됩니다.
+- 코드 작업 완료 후에는 기준 브랜치로 복귀만 수행하고, 작업 브랜치는 삭제하지 않습니다.
+- 자동 병합은 수행하지 않으며, 기준 브랜치 반영은 별도 PR/수동 머지로 진행합니다.
 
 ### Code task harness rules
 - 코드 작업 에이전트(coding/review/patch)에 공통/단계별 규칙을 주입하려면 아래 파일을 수정합니다.
 - `server/src/modules/code-execution/code-task-harness.ts`
 - `CODE_TASK_HARNESS_RULES.global|coding|review|patch` 배열에 문자열 규칙을 추가하면 다음 실행부터 프롬프트에 자동 포함됩니다.
+- 코딩 단계는 하네스 규칙 위반을 리뷰 라운드로 넘기지 않고 단계 내부에서 먼저 수정하도록 유도합니다.
+- 리뷰 단계는 하네스의 단순 스타일 준수보다 정책/구조/안정성 관점의 이슈 식별에 집중합니다.
 
 ## Notes
 - 현재 서버는 기존 Node.js 런타임을 유지하고, TypeScript 전환 기반(`server/tsconfig.json`)만 먼저 적용했습니다.

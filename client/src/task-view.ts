@@ -142,6 +142,11 @@ export function summarizeExecutionStep(progress: ExecutionProgress): string {
   const currentStep = Math.max(0, Number(progress.currentStep || 0));
   const reviewRound = Math.max(0, Number(progress.reviewRound || 0));
   const reviewTotalRounds = Math.max(0, Number(progress.reviewTotalRounds || 0));
+  const effectiveReviewRounds = Math.max(1, reviewTotalRounds || 1);
+  const reviewStartStep = 4;
+  const reviewEndStep = reviewStartStep + effectiveReviewRounds - 1;
+  const prDraftStep = reviewEndStep + 1;
+  const completedStep = prDraftStep + 1;
 
   if (currentStep <= 0) {
     return '작업 대기 상태입니다. 실행이 시작되면 저장소 점검부터 순차적으로 진행됩니다.';
@@ -155,16 +160,17 @@ export function summarizeExecutionStep(progress: ExecutionProgress): string {
   if (currentStep === 3) {
     return '코딩 에이전트가 실제 코드를 수정하고 커밋 단위로 구현을 진행합니다.';
   }
-  if (currentStep >= 4 && currentStep <= 6) {
+  if (currentStep >= reviewStartStep && currentStep <= reviewEndStep) {
+    const fallbackRound = currentStep - reviewStartStep + 1;
     const roundLabel = reviewRound > 0 && reviewTotalRounds > 0
       ? `${reviewRound}/${reviewTotalRounds}`
-      : `${currentStep - 3}/3`;
+      : `${fallbackRound}/${effectiveReviewRounds}`;
     return `리뷰 라운드 ${roundLabel} 진행 중입니다. 검토 결과에 따라 수정·재검토를 반복합니다.`;
   }
-  if (currentStep === 7) {
+  if (currentStep === prDraftStep) {
     return '커밋/리뷰 결과를 정리해 PR 설명(초안 제목·본문)과 제출 정보를 준비합니다.';
   }
-  if (currentStep >= 8) {
+  if (currentStep >= completedStep) {
     return '코드 작업이 완료되어 PR 생성 또는 후속 승인/전송 단계를 진행할 수 있습니다.';
   }
 

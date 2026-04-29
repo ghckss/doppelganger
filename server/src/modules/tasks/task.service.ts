@@ -95,16 +95,28 @@ export class TaskService {
     return this.commandService.createCodeExecutionTask(input);
   }
 
-  async startCodeExecutionTask(taskId: string) {
-    return this.commandService.startCodeExecutionTask(taskId);
+  async startCodeExecutionTask(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.startCodeExecutionTask(taskId, options);
   }
 
   async resumeCodeExecutionTask(taskId: string) {
     return this.commandService.resumeCodeExecutionTask(taskId);
   }
 
+  async updateCodeExecutionTaskStatus(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.updateCodeExecutionTaskStatus(taskId, options);
+  }
+
+  deleteTask(taskId: string) {
+    return this.commandService.deleteTask(taskId);
+  }
+
   async createCodeExecutionPullRequest(taskId: string, options: Record<string, unknown> = {}) {
     return this.commandService.createCodeExecutionPullRequest(taskId, options);
+  }
+
+  async saveCodeExecutionPlanSelections(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.saveCodeExecutionPlanSelections(taskId, options);
   }
 
   saveDraft(taskId: string, input: {

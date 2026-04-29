@@ -17,6 +17,26 @@ interface TaskCommandDependencies extends TaskModuleDependencies {
   slackCodeReviewJobs: Map<string, Promise<unknown>>;
 }
 
+const MANUAL_CODE_TASK_STATUSES = ['running', 'awaiting_approval', 'failed', 'done'] as const;
+type ManualCodeTaskStatus = (typeof MANUAL_CODE_TASK_STATUSES)[number];
+
+const MANUAL_STATUS_SUMMARY: Record<ManualCodeTaskStatus, string> = {
+  running: '수동으로 실행 상태로 전환했습니다.',
+  awaiting_approval: '수동으로 승인 대기 상태로 전환했습니다.',
+  failed: '수동으로 실패 상태로 전환했습니다.',
+  done: '수동으로 완료 상태로 전환했습니다.'
+};
+
+function normalizeManualCodeTaskStatus(value: unknown): ManualCodeTaskStatus | null {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  return MANUAL_CODE_TASK_STATUSES.includes(normalized as ManualCodeTaskStatus)
+    ? (normalized as ManualCodeTaskStatus)
+    : null;
+}
+
 export class TaskCommandService {
   config: TaskModuleDependencies['config'];
   repo: TaskRepository;
@@ -126,14 +146,18 @@ export class TaskCommandService {
     return this.queryService.getTaskDetail(task.id);
   }
 
-  async startCodeExecutionTask(taskId: string) {
+  async startCodeExecutionTask(taskId: string, options: Record<string, unknown> = {}) {
     const task = assertTask(taskId, this.repo.getTask(taskId));
     if (task.domain !== 'code_execution') {
       throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
     }
 
     const domain = this.domains.code_execution;
-    const startResult = await domain.start(taskId, { resumeFromCheckpoint: false });
+    const startResult = await domain.start(taskId, {
+      resumeFromCheckpoint: false,
+      startFromPlan: String(options.startFromPlan || '').toLowerCase() === 'true'
+        || options.startFromPlan === true
+    });
     const alreadyRunning = startResult
       && typeof startResult === 'object'
       && 'started' in startResult
@@ -141,6 +165,21 @@ export class TaskCommandService {
     if (alreadyRunning) {
       throw new Error('작업이 이미 실행 중입니다');
     }
+    return this.queryService.getTaskDetail(taskId);
+  }
+
+  async saveCodeExecutionPlanSelections(taskId: string, options: Record<string, unknown> = {}) {
+    const task = assertTask(taskId, this.repo.getTask(taskId));
+    if (task.domain !== 'code_execution') {
+      throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
+    }
+
+    const domain = this.domains.code_execution;
+    if (!domain?.savePlanSelections) {
+      throw new Error('코드 작업 도메인에서 플랜 확인 항목 저장을 지원하지 않습니다');
+    }
+
+    await domain.savePlanSelections(taskId, options);
     return this.queryService.getTaskDetail(taskId);
   }
 
@@ -166,6 +205,52 @@ export class TaskCommandService {
     }
     this.repo.logExecution(taskId, 'resume_code_execution', 'success');
     return this.queryService.getTaskDetail(taskId);
+  }
+
+  async updateCodeExecutionTaskStatus(taskId: string, options: Record<string, unknown> = {}) {
+    const task = assertTask(taskId, this.repo.getTask(taskId));
+    if (task.domain !== 'code_execution') {
+      throw new Error(`해당 작업은 코드 작업이 아닙니다: ${taskId}`);
+    }
+
+    const nextStatus = normalizeManualCodeTaskStatus(options.status);
+    if (!nextStatus) {
+      throw new Error(`지원하지 않는 상태입니다: ${String(options.status || '')}`);
+    }
+
+    const nextSummary = String(options.summary || '').trim() || MANUAL_STATUS_SUMMARY[nextStatus];
+    const requestedLastError = String(options.lastError || '').trim();
+    const nextApprovalState = nextStatus === 'done' ? 'approved' : 'pending';
+    const nextLastError = nextStatus === 'failed'
+      ? (requestedLastError || String(task.last_error || '').trim() || MANUAL_STATUS_SUMMARY.failed)
+      : null;
+
+    this.repo.updateTask(taskId, {
+      status: nextStatus,
+      approvalState: nextApprovalState,
+      summary: nextSummary,
+      lastError: nextLastError
+    });
+    this.repo.logExecution(taskId, 'update_code_execution_status', 'success', {
+      request: {
+        status: nextStatus,
+        summary: nextSummary,
+        lastError: nextLastError
+      }
+    });
+    return this.queryService.getTaskDetail(taskId);
+  }
+
+  deleteTask(taskId: string) {
+    const task = assertTask(taskId, this.repo.getTask(taskId));
+    if (String(task.status || '').toLowerCase() === 'running') {
+      throw new Error('실행 중인 작업은 삭제할 수 없습니다');
+    }
+
+    const deleted = this.repo.deleteTask(taskId);
+    if (!deleted) {
+      throw new Error(`작업 삭제에 실패했습니다: ${taskId}`);
+    }
   }
 
   async createCodeExecutionPullRequest(taskId: string, options: Record<string, unknown> = {}) {

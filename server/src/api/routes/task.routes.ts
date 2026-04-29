@@ -32,7 +32,9 @@ export async function handleTaskRoutes({
       projectId: readStringField(body, 'projectId'),
       baseBranch: readStringField(body, 'baseBranch'),
       branchName: readStringField(body, 'branchName'),
+      continueFromTaskId: readStringField(body, 'continueFromTaskId'),
       agentProvider: readStringField(body, 'agentProvider'),
+      executionMode: readStringField(body, 'executionMode'),
       needsPlanning: String(body.needsPlanning || '').toLowerCase() === 'true',
       needsDesign: String(body.needsDesign || '').toLowerCase() === 'true'
     });
@@ -50,11 +52,42 @@ export async function handleTaskRoutes({
     sendJson(response, 200, detail);
     return true;
   }
+  if (request.method === 'DELETE' && taskApiMatch) {
+    const taskId = decodeURIComponent(taskApiMatch[1]);
+    service.deleteTask(taskId);
+    sendJson(response, 200, {
+      ok: true,
+      taskId
+    });
+    return true;
+  }
 
   const runCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
   if (request.method === 'POST' && runCodeTaskMatch) {
     const taskId = decodeURIComponent(runCodeTaskMatch[1]);
-    const detail = await service.startCodeExecutionTask(taskId);
+    const body = await parseRequestBody(request);
+    const detail = await service.startCodeExecutionTask(taskId, {
+      startFromPlan: String(body.startFromPlan || '').toLowerCase() === 'true'
+    });
+    sendJson(response, 200, {
+      ok: true,
+      taskId,
+      status: detail.task.status
+    });
+    return true;
+  }
+
+  const savePlanConfirmationsMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/plan-confirmations$/);
+  if (request.method === 'POST' && savePlanConfirmationsMatch) {
+    const taskId = decodeURIComponent(savePlanConfirmationsMatch[1]);
+    const body = await parseRequestBody(request);
+    const selectionsRaw = body.selections;
+    const selections = selectionsRaw && typeof selectionsRaw === 'object' && !Array.isArray(selectionsRaw)
+      ? selectionsRaw as Record<string, unknown>
+      : {};
+    const detail = await service.saveCodeExecutionPlanSelections(taskId, {
+      selections
+    });
     sendJson(response, 200, {
       ok: true,
       taskId,
@@ -67,6 +100,23 @@ export async function handleTaskRoutes({
   if (request.method === 'POST' && resumeCodeTaskMatch) {
     const taskId = decodeURIComponent(resumeCodeTaskMatch[1]);
     const detail = await service.resumeCodeExecutionTask(taskId);
+    sendJson(response, 200, {
+      ok: true,
+      taskId,
+      status: detail.task.status
+    });
+    return true;
+  }
+
+  const codeTaskStatusMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/code-execution\/status$/);
+  if (request.method === 'POST' && codeTaskStatusMatch) {
+    const taskId = decodeURIComponent(codeTaskStatusMatch[1]);
+    const body = await parseRequestBody(request);
+    const detail = await service.updateCodeExecutionTaskStatus(taskId, {
+      status: readStringField(body, 'status'),
+      summary: readStringField(body, 'summary'),
+      lastError: readStringField(body, 'lastError')
+    });
     sendJson(response, 200, {
       ok: true,
       taskId,

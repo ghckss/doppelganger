@@ -59,6 +59,7 @@ export interface Repository {
   getTaskByExternalId: (domain: string, externalId: string) => TaskRecord | null;
   upsertTask: (taskInput: Record<string, unknown>) => TaskRecord;
   updateTask: (taskId: string, fields: Record<string, unknown>) => TaskRecord | null;
+  deleteTask: (taskId: string) => boolean;
   replaceArtifacts: (taskId: string, type: string, artifacts: Array<Record<string, unknown>>) => void;
   createArtifact: (taskId: string, type: string, artifact: Record<string, unknown>) => ArtifactRecord | null;
   listArtifacts: (taskId: string, type?: string) => ArtifactRecord[];
@@ -91,6 +92,7 @@ export interface TaskDomain extends DomainDescriptor {
   runCodeReview?: (...args: unknown[]) => Promise<Record<string, unknown>>;
   listProjects?: () => unknown[];
   createTask?: (input: Record<string, unknown>) => Promise<TaskRecord>;
+  savePlanSelections?: (taskId: string, options?: Record<string, unknown>) => TaskRecord | Promise<TaskRecord>;
   start?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
   createPullRequest?: (taskId: string, options?: Record<string, unknown>) => Promise<unknown>;
 }
