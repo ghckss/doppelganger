@@ -76,9 +76,6 @@ export function createCodeTask(input: {
   branchName: string;
   continueFromTaskId?: string;
   agentProvider: string;
-  executionMode: 'full' | 'plan';
-  needsPlanning: boolean;
-  needsDesign: boolean;
 }): Promise<TaskDetail> {
   return requestJson<TaskDetail>('/api/tasks/code-execution', {
     method: 'POST',
@@ -86,8 +83,21 @@ export function createCodeTask(input: {
   });
 }
 
-export function runTask(taskId: string, input: { startFromPlan?: boolean } = {}): Promise<{ ok: boolean }> {
+export function runTask(taskId: string): Promise<{ ok: boolean }> {
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/run`, {
+    method: 'POST'
+  });
+}
+
+export function approveCodeTaskGate(
+  taskId: string,
+  input: {
+    gate: 'spec' | 'plan' | 'risk' | 'plan_patch';
+    decision: 'approve' | 'regenerate' | 'reject';
+    feedback?: string;
+  }
+): Promise<{ ok: boolean }> {
+  return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/approve-gate`, {
     method: 'POST',
     body: input
   });
@@ -120,18 +130,6 @@ export function createPullRequest(taskId: string, input: { branchName?: string }
   return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/create-pr`, {
     method: 'POST',
     body: input
-  });
-}
-
-export function saveCodeTaskPlanSelections(
-  taskId: string,
-  selections: Record<string, string>
-): Promise<{ ok: boolean }> {
-  return requestJson<{ ok: boolean }>(`/api/tasks/${encodeURIComponent(taskId)}/plan-confirmations`, {
-    method: 'POST',
-    body: {
-      selections
-    }
   });
 }
 

@@ -33,10 +33,7 @@ export async function handleTaskRoutes({
       baseBranch: readStringField(body, 'baseBranch'),
       branchName: readStringField(body, 'branchName'),
       continueFromTaskId: readStringField(body, 'continueFromTaskId'),
-      agentProvider: readStringField(body, 'agentProvider'),
-      executionMode: readStringField(body, 'executionMode'),
-      needsPlanning: String(body.needsPlanning || '').toLowerCase() === 'true',
-      needsDesign: String(body.needsDesign || '').toLowerCase() === 'true'
+      agentProvider: readStringField(body, 'agentProvider')
     });
     sendJson(response, 201, detail);
     return true;
@@ -65,10 +62,7 @@ export async function handleTaskRoutes({
   const runCodeTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/run$/);
   if (request.method === 'POST' && runCodeTaskMatch) {
     const taskId = decodeURIComponent(runCodeTaskMatch[1]);
-    const body = await parseRequestBody(request);
-    const detail = await service.startCodeExecutionTask(taskId, {
-      startFromPlan: String(body.startFromPlan || '').toLowerCase() === 'true'
-    });
+    const detail = await service.startCodeExecutionTask(taskId, {});
     sendJson(response, 200, {
       ok: true,
       taskId,
@@ -77,16 +71,14 @@ export async function handleTaskRoutes({
     return true;
   }
 
-  const savePlanConfirmationsMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/plan-confirmations$/);
-  if (request.method === 'POST' && savePlanConfirmationsMatch) {
-    const taskId = decodeURIComponent(savePlanConfirmationsMatch[1]);
+  const approveGateMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/approve-gate$/);
+  if (request.method === 'POST' && approveGateMatch) {
+    const taskId = decodeURIComponent(approveGateMatch[1]);
     const body = await parseRequestBody(request);
-    const selectionsRaw = body.selections;
-    const selections = selectionsRaw && typeof selectionsRaw === 'object' && !Array.isArray(selectionsRaw)
-      ? selectionsRaw as Record<string, unknown>
-      : {};
-    const detail = await service.saveCodeExecutionPlanSelections(taskId, {
-      selections
+    const detail = await service.approveCodeExecutionGate(taskId, {
+      gate: readStringField(body, 'gate'),
+      decision: readStringField(body, 'decision'),
+      feedback: readStringField(body, 'feedback')
     });
     sendJson(response, 200, {
       ok: true,

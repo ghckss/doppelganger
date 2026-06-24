@@ -1,37 +1,56 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  buildCodingPrompt,
+  buildChunkExecutorPrompt,
+  buildFinalValidationPrompt,
+  buildMergeReviewPrompt,
   buildPatchPrompt,
   buildPullRequestDraft,
-  buildReviewPrompt,
+  buildRefinementInspectionPrompt,
+  buildReviewerPrompt,
+  buildSpecPrompt,
+  buildTechLeadPrompt,
   codingAgentSchema,
+  finalValidationSchema,
+  implementationPlanSchema,
+  mergeReviewSchema,
   patchAgentSchema,
+  refinementDecisionSchema,
   renderArtifactContent,
+  requirementContractSchema,
   reviewAgentSchema
 } from '../modules/code-execution/code-task-prompts.ts';
 import { normalizeWhitespace, safeArray, truncateText } from '../core/utils.ts';
 
-const CODE_REVIEW_ROUNDS = 1;
-const CODE_EXECUTION_TOTAL_STEPS = CODE_REVIEW_ROUNDS + 5;
-const PLAN_MODE_TOTAL_STEPS = 3;
+// runner 스킬 워크플로 고정 단계 수: 1 환경준비 · 2 요구사항계약(Gate1) · 3 구현계획(Gate2) · 4 chunk구현 · 5 최종검증 · 6 완료
+const CODE_EXECUTION_TOTAL_STEPS = 6;
+const MAX_REVIEW_ITERATIONS = 2;
+const MAX_SELF_REPAIR_ATTEMPTS = 2;
+// 완료 후 개선 루프(Refinement Loop) 최대 반복. 무한 polish 금지(runner 스킬 규칙).
+const MAX_REFINEMENT_ITERATIONS = 2;
 const CONTINUATION_ALLOWED_STATUSES = new Set(['done', 'awaiting_approval', 'failed']);
+
+// runner 리뷰 스웜: 도메인별 독립 리뷰어(diff 한정). 비용을 위해 핵심 4개 도메인으로 제한.
+const REVIEWER_DOMAINS: Array<{ key: string; label: string; guidance: string }> = [
+  { key: 'correctness', label: 'Correctness', guidance: 'requirement fit, edge cases, state mismatch, async/race issues, null/undefined flows' },
+  { key: 'security', label: 'Security', guidance: 'XSS, SSRF, injection, auth bypass, secret leakage, unsafe trust boundaries' },
+  { key: 'type_safety', label: 'Type Safety', guidance: 'type soundness, generic inference, unsafe casts, runtime type risks' },
+  { key: 'testing', label: 'Testing', guidance: 'missing tests, flaky tests, uncovered edge cases, weak assertions' }
+];
+
+type RunnerStage = 'workspace' | 'spec' | 'plan' | 'execution' | 'validation';
+// spec/plan = Gate 1/2(구현 전 승인). risk = Gate 3(autopilot 중 위험 변경 승인). plan_patch = 계획 불일치 재계획 승인.
+type RunnerGate = '' | 'spec' | 'plan' | 'risk' | 'plan_patch';
+const GATE_VALUES: RunnerGate[] = ['spec', 'plan', 'risk', 'plan_patch'];
 
 interface ExecutionProgressInput {
   phase?: string;
   label?: string;
   currentStep?: number;
   totalSteps?: number;
-  reviewRound?: number;
-  reviewTotalRounds?: number;
-}
-
-function parseBoolean(value) {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  const normalized = String(value || '').toLowerCase();
-  return normalized === '1' || normalized === 'true' || normalized === 'on' || normalized === 'yes';
+  gate?: RunnerGate;
+  chunkIndex?: number;
+  chunkTotal?: number;
 }
 
 function slugify(value) {
@@ -145,6 +164,38 @@ function compactStrings(values) {
   return safeArray(values).map((value) => normalizeWhitespace(value)).filter(Boolean);
 }
 
+// 스키마 강제(--json-schema)를 쓰지 않으므로 모델이 문자열 배열 자리에 객체를 줄 수 있다.
+// 객체가 오면 String() 결과 "[object Object]" 대신 의미 있는 텍스트 필드를 뽑아낸다.
+function coerceText(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return normalizeWhitespace(value);
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const candidate = record.text ?? record.description ?? record.risk ?? record.detail
+      ?? record.message ?? record.title ?? record.summary ?? record.criterion ?? record.note ?? record.item;
+    if (typeof candidate === 'string' && normalizeWhitespace(candidate)) {
+      return normalizeWhitespace(candidate);
+    }
+    try {
+      return normalizeWhitespace(JSON.stringify(value));
+    } catch {
+      return '';
+    }
+  }
+  return normalizeWhitespace(value);
+}
+
+function coerceTextList(value) {
+  return safeArray(value).map((entry) => coerceText(entry)).filter(Boolean);
+}
+
 function asRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {};
@@ -154,113 +205,6 @@ function asRecord(value) {
 
 function normalizeTaskStatus(value) {
   return normalizeWhitespace(value).toLowerCase();
-}
-
-function normalizeExecutionMode(value, fallback = 'full') {
-  const normalized = normalizeWhitespace(value).toLowerCase();
-  if (normalized === 'plan' || normalized === 'plan_only') {
-    return 'plan';
-  }
-  if (normalized === 'full') {
-    return 'full';
-  }
-  return fallback;
-}
-
-function normalizeIdentifier(value, fallback = '') {
-  const normalized = normalizeWhitespace(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return normalized || fallback;
-}
-
-function normalizeConfirmationRequestList(value) {
-  return safeArray(value).map((entry, index) => {
-    const source = asRecord(entry);
-    const requestId = normalizeIdentifier(source.id, `confirm_${index + 1}`);
-    const options = safeArray(source.options).map((option, optionIndex) => {
-      const optionSource = asRecord(option);
-      return {
-        id: normalizeIdentifier(optionSource.id, `${requestId}_option_${optionIndex + 1}`),
-        label: normalizeWhitespace(optionSource.label) || `옵션 ${optionIndex + 1}`,
-        description: normalizeWhitespace(optionSource.description),
-        recommended: Boolean(optionSource.recommended)
-      };
-    }).filter((option) => option.id);
-
-    if (options.length === 0) {
-      options.push({
-        id: `${requestId}_default`,
-        label: '기본안',
-        description: '기본 권장안으로 진행합니다.',
-        recommended: true
-      });
-    }
-    if (!options.some((option) => option.recommended)) {
-      options[0].recommended = true;
-    }
-
-    return {
-      id: requestId,
-      title: normalizeWhitespace(source.title) || `확인 항목 ${index + 1}`,
-      question: normalizeWhitespace(source.question) || '작업 진행 전에 선택이 필요합니다.',
-      options
-    };
-  }).filter((request) => request.id);
-}
-
-function parsePlanSelections(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-
-  return Object.entries(value).reduce((accumulator, [key, optionId]) => {
-    const requestId = normalizeIdentifier(key);
-    const normalizedOptionId = normalizeIdentifier(optionId);
-    if (!requestId || !normalizedOptionId) {
-      return accumulator;
-    }
-    accumulator[requestId] = normalizedOptionId;
-    return accumulator;
-  }, {} as Record<string, string>);
-}
-
-function normalizePlanSelectionsForRequests(selections, requests) {
-  const safeSelections = parsePlanSelections(selections);
-  return safeArray(requests).reduce((accumulator, request) => {
-    const requestId = normalizeIdentifier(request?.id);
-    if (!requestId) {
-      return accumulator;
-    }
-
-    const selectedOptionId = normalizeIdentifier(safeSelections[requestId]);
-    const hasOption = safeArray(request?.options).some((option) => normalizeIdentifier(option?.id) === selectedOptionId);
-    if (!selectedOptionId || !hasOption) {
-      return accumulator;
-    }
-
-    accumulator[requestId] = selectedOptionId;
-    return accumulator;
-  }, {} as Record<string, string>);
-}
-
-function unresolvedPlanRequestIds(requests, selections) {
-  return safeArray(requests).map((request) => normalizeIdentifier(request?.id)).filter((requestId) => {
-    if (!requestId) {
-      return false;
-    }
-    return !normalizeIdentifier(selections[requestId]);
-  });
-}
-
-function resolvePromptPlanConfirmationRequests(promptPlan, fallback = []) {
-  const promptPlanRecord = asRecord(promptPlan);
-  const fromPrompt = normalizeConfirmationRequestList(promptPlanRecord.confirmationRequests);
-  if (fromPrompt.length > 0) {
-    return fromPrompt;
-  }
-  return normalizeConfirmationRequestList(fallback);
 }
 
 function compactCommitSummaries(commits) {
@@ -416,40 +360,47 @@ function buildExecutionProgress({
   label,
   currentStep = 0,
   totalSteps = CODE_EXECUTION_TOTAL_STEPS,
-  reviewRound = 0,
-  reviewTotalRounds = CODE_REVIEW_ROUNDS
+  gate = '',
+  chunkIndex = 0,
+  chunkTotal = 0
 }: ExecutionProgressInput = {}) {
   const normalizedTotalSteps = Math.max(1, toInteger(totalSteps, CODE_EXECUTION_TOTAL_STEPS));
   const normalizedCurrentStep = Math.max(0, Math.min(normalizedTotalSteps, toInteger(currentStep, 0)));
-  const normalizedReviewTotalRounds = Math.max(1, toInteger(reviewTotalRounds, CODE_REVIEW_ROUNDS));
-  const normalizedReviewRound = Math.max(0, Math.min(normalizedReviewTotalRounds, toInteger(reviewRound, 0)));
+  const normalizedChunkTotal = Math.max(0, toInteger(chunkTotal, 0));
+  const normalizedChunkIndex = Math.max(0, Math.min(normalizedChunkTotal, toInteger(chunkIndex, 0)));
   return {
     phase: normalizeWhitespace(phase) || 'unknown',
     label: normalizeWhitespace(label),
     currentStep: normalizedCurrentStep,
     totalSteps: normalizedTotalSteps,
     percent: Math.round((normalizedCurrentStep / normalizedTotalSteps) * 100),
-    reviewRound: normalizedReviewRound,
-    reviewTotalRounds: normalizedReviewTotalRounds
+    gate: GATE_VALUES.includes(gate as RunnerGate) ? gate : '',
+    chunkIndex: normalizedChunkIndex,
+    chunkTotal: normalizedChunkTotal
   };
 }
 
-function reviewArtifactData(round, review) {
+function reviewFindingData(finding) {
   return {
-    round,
-    summary: review.summary,
-    approval: review.approval,
-    residualRisks: compactStrings(review.residualRisks),
-    findings: safeArray(review.findings).map((finding) => ({
-      id: normalizeWhitespace(finding.id),
-      severity: normalizeWhitespace(finding.severity),
-      category: normalizeWhitespace(finding.category),
-      title: normalizeWhitespace(finding.title),
-      description: normalizeWhitespace(finding.description),
-      fileRefs: compactStrings(finding.fileRefs),
-      suggestedFix: normalizeWhitespace(finding.suggestedFix),
-      mustFix: Boolean(finding.mustFix)
-    }))
+    id: coerceText(finding.id),
+    severity: normalizeWhitespace(finding.severity),
+    category: normalizeWhitespace(finding.category),
+    title: coerceText(finding.title),
+    description: coerceText(finding.description),
+    fileRefs: coerceTextList(finding.fileRefs),
+    suggestedFix: coerceText(finding.suggestedFix),
+    mustFix: Boolean(finding.mustFix)
+  };
+}
+
+function mergeFindingData(finding) {
+  return {
+    id: coerceText(finding.id),
+    severity: normalizeWhitespace(finding.severity),
+    title: coerceText(finding.title),
+    description: coerceText(finding.description),
+    fileRefs: coerceTextList(finding.fileRefs),
+    action: coerceText(finding.action)
   };
 }
 
@@ -1114,64 +1065,61 @@ export function createCodeExecutionDomain({
     return metadata;
   }
 
-  function loadStoredPlans(taskId, task) {
+  // runner State Store: 요구사항 계약/구현 계획/chunk 진행 상태를 task.result.runner에 저장한다.
+  function loadRunnerState(taskId, task) {
+    const result = asRecord(task?.result);
+    const runner = asRecord(result.runner);
+    const contract = asRecord(runner.requirementContract).summary !== undefined || Object.keys(asRecord(runner.requirementContract)).length > 0
+      ? asRecord(runner.requirementContract)
+      : latestArtifactMetadata(taskId, 'requirement_contract');
+    const plan = Object.keys(asRecord(runner.implementationPlan)).length > 0
+      ? asRecord(runner.implementationPlan)
+      : latestArtifactMetadata(taskId, 'implementation_plan');
     return {
-      promptPlan: task?.result?.promptPlan || latestArtifactMetadata(taskId, 'prompt_plan'),
-      productPlan: latestArtifactMetadata(taskId, 'product_plan'),
-      designSpec: latestArtifactMetadata(taskId, 'design_spec')
+      requirementContract: contract && Object.keys(asRecord(contract)).length > 0 ? asRecord(contract) : null,
+      implementationPlan: plan && Object.keys(asRecord(plan)).length > 0 ? asRecord(plan) : null,
+      chunks: safeArray(runner.chunks).map((entry) => asRecord(entry)),
+      remainingKnownIssues: safeArray(runner.remainingKnownIssues),
+      finalValidation: asRecord(runner.finalValidation)
     };
   }
 
-  function buildPlanModeState({
-    promptPlan,
-    requestedSelections,
-    fallbackRequests = []
-  }: {
-    promptPlan: Record<string, unknown>;
-    requestedSelections: Record<string, string>;
-    fallbackRequests?: Array<Record<string, unknown>>;
-  }) {
-    const confirmationRequests = resolvePromptPlanConfirmationRequests(promptPlan, fallbackRequests);
-    const selections = normalizePlanSelectionsForRequests(requestedSelections, confirmationRequests);
-    const unresolvedRequestIds = unresolvedPlanRequestIds(confirmationRequests, selections);
-    return {
-      confirmationRequests,
-      selections,
-      unresolvedRequestIds,
-      status: unresolvedRequestIds.length === 0 ? 'ready_for_execution' : 'awaiting_confirmation'
-    };
+  function patchRunnerState(taskId, partial) {
+    const task = repo.getTask(taskId);
+    const result = asRecord(task?.result);
+    const runner = asRecord(result.runner);
+    repo.updateTask(taskId, {
+      result: {
+        ...result,
+        runner: {
+          ...runner,
+          ...partial
+        }
+      }
+    });
   }
 
-  function resolveResumeStartStep(task, plans, resumeFromCheckpoint) {
-    if (!resumeFromCheckpoint) {
-      return 1;
-    }
-
-    const result = task?.result && typeof task.result === 'object' ? task.result : {};
-    const progress = result.executionProgress && typeof result.executionProgress === 'object'
-      ? result.executionProgress
-      : {};
+  // 재개 시 다시 진입할 stage 결정. 승인 게이트(spec/plan) 통과 여부 + 진행 단계 기준.
+  function resolveResumeStage(task): RunnerStage {
+    const result = asRecord(task?.result);
+    const runner = loadRunnerState(task?.id, task);
+    const progress = asRecord(result.executionProgress);
     const phase = normalizeWhitespace(progress.phase).toLowerCase();
     const currentStep = Math.max(0, toInteger(progress.currentStep, 0));
-    const reviewRoundsCount = safeArray(result.reviewRounds).length;
-    const hasPromptPlan = Boolean(plans.promptPlan);
-    const reviewStartStep = 4;
-    const prDraftStep = CODE_EXECUTION_TOTAL_STEPS - 1;
 
-    if (phase === 'pr_draft' || currentStep >= prDraftStep) {
-      return prDraftStep;
+    if (phase === 'validation' || phase === 'completed' || currentStep >= 5) {
+      return 'validation';
     }
-    if (phase === 'review' || (currentStep >= reviewStartStep && currentStep < prDraftStep) || reviewRoundsCount > 0) {
-      return reviewStartStep;
+    if (phase === 'execution' || currentStep >= 4) {
+      return runner.implementationPlan ? 'execution' : 'plan';
     }
-    if ((phase === 'coding' || currentStep >= 3) && hasPromptPlan) {
-      return 3;
+    if (phase === 'plan' || currentStep >= 3) {
+      return runner.requirementContract ? 'plan' : 'spec';
     }
-    if (phase === 'planning' || currentStep >= 2) {
-      return 2;
+    if (phase === 'spec' || currentStep >= 2) {
+      return 'spec';
     }
-
-    return 1;
+    return 'workspace';
   }
 
   function resolveServicePrefix(task, workspace) {
@@ -1434,13 +1382,6 @@ export function createCodeExecutionDomain({
         requestedBaseBranch = '';
       }
     }
-    const executionMode = normalizeExecutionMode(
-      input.executionMode || continuationSource?.previousPayload?.executionMode,
-      'full'
-    );
-    const requestedPlanSelections = parsePlanSelections(
-      input.planSelections || continuationSource?.previousPayload?.planSelections
-    );
     const workspace = await inspectWorkspace(project.path, requestedBaseBranch);
     const selectedAgent = await getAvailableAgentRunner(
       input.agentProvider || continuationSource?.previousPayload?.agentProvider,
@@ -1466,10 +1407,6 @@ export function createCodeExecutionDomain({
         githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
         remoteUrl: workspace.git.remoteUrl,
         agentProvider: selectedAgent.provider,
-        executionMode,
-        planSelections: requestedPlanSelections,
-        needsPlanning: parseBoolean(input.needsPlanning),
-        needsDesign: parseBoolean(input.needsDesign),
         requestedBranchName,
         branchName: '',
         restoreBranch: workspace.git.currentBranch || workspace.git.baseBranch,
@@ -1488,7 +1425,7 @@ export function createCodeExecutionDomain({
           phase: 'queued',
           label: '작업 시작 대기',
           currentStep: 0,
-          totalSteps: executionMode === 'plan' ? PLAN_MODE_TOTAL_STEPS : CODE_EXECUTION_TOTAL_STEPS
+          totalSteps: CODE_EXECUTION_TOTAL_STEPS
         })
       },
       sourceUrl: workspace.git.remoteUrl || null,
@@ -1513,7 +1450,6 @@ export function createCodeExecutionDomain({
       repoSlug: workspace.git.repoSlug,
       baseBranch: workspace.git.baseBranch,
       currentBranch: workspace.git.currentBranch,
-      executionMode,
       remoteUrl: workspace.git.remoteUrl,
       githubRepositoryAllowed: workspace.git.githubRepositoryAllowed,
       recommendedChecks: workspace.recommendedChecks,
@@ -1529,7 +1465,6 @@ export function createCodeExecutionDomain({
         projectId: project.id,
         workdir: workspace.git.root,
         branchName: requestedBranchName,
-        executionMode,
         continueFromTaskId: continuationContext?.continueFromTaskId || ''
       },
       response: {
@@ -1545,542 +1480,905 @@ export function createCodeExecutionDomain({
     return task;
   }
 
-  async function runPromptPlanning(task, workspace) {
-    const promptPlan = await codeTaskPlanner.createPromptPlan({ task, workspace });
-    storeArtifact(task.id, 'prompt_plan', '프롬프트 계획', promptPlan);
-    repo.logExecution(task.id, 'generate_prompt', 'success', {
-      response: promptPlan
-    });
+  function normalizeRequirementContract(parsed) {
+    const source = asRecord(parsed);
+    return {
+      summary: normalizeWhitespace(source.summary),
+      goals: coerceTextList(source.goals),
+      nonGoals: coerceTextList(source.nonGoals),
+      constraints: coerceTextList(source.constraints),
+      acceptanceCriteria: coerceTextList(source.acceptanceCriteria),
+      edgeCases: coerceTextList(source.edgeCases),
+      openQuestions: coerceTextList(source.openQuestions)
+    };
+  }
 
-    let productPlan = null;
-    if (task.payload?.needsPlanning) {
-      productPlan = await codeTaskPlanner.createProductPlan({ task, promptPlan, workspace });
-      storeArtifact(task.id, 'product_plan', '기획안', productPlan);
-      repo.logExecution(task.id, 'run_planning_agent', 'success', {
-        response: productPlan
+  function normalizeChunk(entry, index) {
+    const source = asRecord(entry);
+    const title = normalizeWhitespace(source.title) || `구현 단위 ${index + 1}`;
+    const id = normalizeWhitespace(source.id) || `chunk_${index + 1}`;
+    return {
+      id,
+      title,
+      acceptanceCriteria: coerceTextList(source.acceptanceCriteria)
+    };
+  }
+
+  function normalizeImplementationPlan(parsed, fallbackTitle = '') {
+    const source = asRecord(parsed);
+    const taskBreakdown = safeArray(source.taskBreakdown).map((entry, index) => normalizeChunk(entry, index));
+    if (taskBreakdown.length === 0) {
+      taskBreakdown.push({
+        id: 'chunk_1',
+        title: normalizeWhitespace(fallbackTitle) || '요청 구현',
+        acceptanceCriteria: []
       });
     }
+    return {
+      summary: normalizeWhitespace(source.summary),
+      implementationSteps: coerceTextList(source.implementationSteps),
+      filesLikelyToChange: coerceTextList(source.filesLikelyToChange),
+      architectureImpact: coerceTextList(source.architectureImpact),
+      risks: coerceTextList(source.risks),
+      rolloutConcerns: coerceTextList(source.rolloutConcerns),
+      validationStrategy: coerceTextList(source.validationStrategy),
+      chunkCommitBoundaries: coerceTextList(source.chunkCommitBoundaries),
+      taskBreakdown
+    };
+  }
 
-    let designSpec = null;
-    if (task.payload?.needsDesign) {
-      designSpec = await codeTaskPlanner.createDesignSpec({ task, promptPlan, workspace });
-      storeArtifact(task.id, 'design_spec', '디자인 명세', designSpec);
-      repo.logExecution(task.id, 'run_design_agent', 'success', {
-        response: designSpec
+  function normalizeMergeReview(parsed) {
+    const source = asRecord(parsed);
+    return {
+      mustFix: safeArray(source.mustFix).map(mergeFindingData).filter((finding) => finding.title),
+      shouldFix: safeArray(source.shouldFix).map(mergeFindingData).filter((finding) => finding.title),
+      advisory: safeArray(source.advisory).map(mergeFindingData).filter((finding) => finding.title),
+      duplicates: compactStrings(source.duplicates),
+      discarded: compactStrings(source.discarded)
+    };
+  }
+
+  function normalizeFinalValidation(parsed) {
+    const source = asRecord(parsed);
+    return {
+      contractMet: Boolean(source.contractMet),
+      regression: coerceText(source.regression),
+      summary: coerceText(source.summary),
+      residualRisks: coerceTextList(source.residualRisks),
+      acceptanceResults: safeArray(source.acceptanceResults).map((entry) => {
+        const record = asRecord(entry);
+        return {
+          criterion: coerceText(record.criterion),
+          status: normalizeWhitespace(record.status) || 'partial',
+          evidence: coerceText(record.evidence)
+        };
+      })
+    };
+  }
+
+  function mergeFindingToReviewFinding(finding) {
+    return {
+      id: normalizeWhitespace(finding.id),
+      severity: normalizeWhitespace(finding.severity),
+      category: 'bug',
+      title: normalizeWhitespace(finding.title),
+      description: normalizeWhitespace(finding.description),
+      fileRefs: compactStrings(finding.fileRefs),
+      suggestedFix: normalizeWhitespace(finding.action),
+      mustFix: true
+    };
+  }
+
+  function applyGate(taskId, gate) {
+    const task = repo.getTask(taskId);
+    const result = asRecord(task?.result);
+    const isSpec = gate === 'spec';
+    repo.updateTask(taskId, {
+      status: 'awaiting_approval',
+      approvalState: 'pending',
+      summary: isSpec
+        ? '요구사항 계약을 검토하고 승인해 주세요. 승인하면 구현 계획을 수립합니다.'
+        : '구현 계획을 검토하고 승인해 주세요. 승인하면 chunk 단위 구현을 시작합니다.',
+      result: {
+        ...result,
+        executionProgress: buildExecutionProgress({
+          phase: gate,
+          label: isSpec ? '요구사항 계약 승인 대기 (Gate 1)' : '구현 계획 승인 대기 (Gate 2)',
+          currentStep: isSpec ? 2 : 3,
+          gate
+        })
+      },
+      lastError: null
+    });
+    repo.logExecution(taskId, isSpec ? 'await_requirement_contract' : 'await_implementation_plan', 'success');
+  }
+
+  // Gate 3: autopilot 중 위험 가능성이 있는 변경(파일 삭제, 의존성/lockfile 변경, .env 등)을 감지하기 위한 휴리스틱.
+  async function detectRiskSignals(workspace) {
+    const base = normalizeWhitespace(workspace.git.baseBranch);
+    const empty = { deletions: [], dependencyChanges: [], envChanges: [], risky: false };
+    if (!base || !(await branchRefExists(workspace.git.root, base))) {
+      return empty;
+    }
+    let output = '';
+    try {
+      output = await runGit(workspace.git.root, ['diff', '--name-status', `${base}...HEAD`]);
+    } catch {
+      return empty;
+    }
+    const deletions = [];
+    const dependencyChanges = [];
+    const envChanges = [];
+    const dependencyPattern = /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements\.txt|Pipfile(\.lock)?|Gemfile(\.lock)?|go\.(mod|sum)|Cargo\.(toml|lock)|composer\.(json|lock))$/;
+    const envPattern = /(^|\/)\.env(\.[A-Za-z0-9_.-]+)?$/;
+    for (const line of output.split(/\r?\n/).filter(Boolean)) {
+      const parts = line.split(/\t/);
+      const status = normalizeWhitespace(parts[0]);
+      const file = normalizeWhitespace(parts[parts.length - 1]);
+      if (!file) {
+        continue;
+      }
+      if (status.startsWith('D')) {
+        deletions.push(file);
+      }
+      if (dependencyPattern.test(file)) {
+        dependencyChanges.push(file);
+      }
+      if (envPattern.test(file)) {
+        envChanges.push(file);
+      }
+    }
+    return {
+      deletions,
+      dependencyChanges,
+      envChanges,
+      risky: deletions.length > 0 || dependencyChanges.length > 0 || envChanges.length > 0
+    };
+  }
+
+  function pauseForRiskGate(taskId, riskReview) {
+    patchRunnerState(taskId, { riskReview });
+    const result = asRecord(repo.getTask(taskId)?.result);
+    repo.updateTask(taskId, {
+      status: 'awaiting_approval',
+      approvalState: 'pending',
+      summary: '위험 가능성이 있는 변경이 감지되었습니다(Gate 3). 검토 후 계속 진행할지 승인해 주세요.',
+      result: {
+        ...result,
+        executionProgress: buildExecutionProgress({
+          phase: 'execution',
+          label: '위험 변경 승인 대기 (Gate 3)',
+          currentStep: 4,
+          gate: 'risk'
+        })
+      },
+      lastError: null
+    });
+    repo.logExecution(taskId, 'await_risk_approval', 'success', { response: riskReview });
+  }
+
+  function pauseForPlanPatchGate(taskId, planPatchRequest) {
+    patchRunnerState(taskId, { planPatchRequest });
+    const result = asRecord(repo.getTask(taskId)?.result);
+    repo.updateTask(taskId, {
+      status: 'awaiting_approval',
+      approvalState: 'pending',
+      summary: '실행 중 계획 불일치가 보고되었습니다. 계획을 갱신할지 승인해 주세요.',
+      result: {
+        ...result,
+        executionProgress: buildExecutionProgress({
+          phase: 'execution',
+          label: '계획 패치 승인 대기',
+          currentStep: 4,
+          gate: 'plan_patch'
+        })
+      },
+      lastError: null
+    });
+    repo.logExecution(taskId, 'await_plan_patch_approval', 'success', { response: planPatchRequest });
+  }
+
+  async function prepareWorkspaceStage(taskId) {
+    updateExecutionProgress(taskId, '작업 환경을 점검하는 중입니다', {
+      phase: 'workspace',
+      label: '작업 환경 점검 및 브랜치 준비',
+      currentStep: 1
+    });
+    const task = repo.getTask(taskId);
+    const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
+    updateTaskProgress(taskId, '작업 환경 점검을 완료했습니다', {
+      baseBranch: workspace.git.baseBranch
+    });
+  }
+
+  async function runSpecStage(taskId) {
+    updateExecutionProgress(taskId, '요구사항 계약(Requirement Contract)을 작성하는 중입니다', {
+      phase: 'spec',
+      label: '요구사항 계약 작성',
+      currentStep: 2
+    });
+    const task = repo.getTask(taskId);
+    const runner = loadRunnerState(taskId, task);
+    const revisionFeedback = normalizeWhitespace(asRecord(task.payload?.gateFeedback).spec);
+    const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
+    const agent = getAgentRunner(task.payload?.agentProvider);
+    const prompt = buildSpecPrompt({
+      task,
+      workspace,
+      revisionFeedback,
+      previousContract: revisionFeedback ? runner.requirementContract : null
+    });
+    const response = await agent.runner.runExec({
+      workdir: workspace.git.root,
+      prompt,
+      sandboxMode: 'read-only',
+      schema: requirementContractSchema
+    });
+    const contract = normalizeRequirementContract(response.parsed);
+    storeArtifact(taskId, 'requirement_contract', '요구사항 계약', contract);
+    patchRunnerState(taskId, { requirementContract: contract });
+    repo.logExecution(taskId, 'run_spec_agent', 'success', {
+      response: {
+        ...contract,
+        agentProvider: agent.provider,
+        stdout: response.stdout,
+        stderr: response.stderr,
+        durationMs: response.durationMs
+      }
+    });
+    return contract;
+  }
+
+  async function runPlanStage(taskId) {
+    updateExecutionProgress(taskId, '구현 계획(Implementation Plan)을 수립하는 중입니다', {
+      phase: 'plan',
+      label: '구현 계획 수립',
+      currentStep: 3
+    });
+    const task = repo.getTask(taskId);
+    const runner = loadRunnerState(taskId, task);
+    if (!runner.requirementContract) {
+      throw new Error('요구사항 계약이 없어 구현 계획을 수립할 수 없습니다');
+    }
+    const revisionFeedback = normalizeWhitespace(asRecord(task.payload?.gateFeedback).plan);
+    const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
+    const agent = getAgentRunner(task.payload?.agentProvider);
+    const prompt = buildTechLeadPrompt({
+      task,
+      workspace,
+      contract: runner.requirementContract,
+      revisionFeedback,
+      previousPlan: revisionFeedback ? runner.implementationPlan : null
+    });
+    const response = await agent.runner.runExec({
+      workdir: workspace.git.root,
+      prompt,
+      sandboxMode: 'read-only',
+      schema: implementationPlanSchema
+    });
+    const plan = normalizeImplementationPlan(response.parsed, task.payload?.command || task.title);
+    storeArtifact(taskId, 'implementation_plan', '구현 계획', plan);
+    patchRunnerState(taskId, { implementationPlan: plan });
+    repo.logExecution(taskId, 'run_tech_lead_agent', 'success', {
+      response: {
+        ...plan,
+        agentProvider: agent.provider,
+        stdout: response.stdout,
+        stderr: response.stderr,
+        durationMs: response.durationMs
+      }
+    });
+    return plan;
+  }
+
+  async function runReviewLoopForChunk(taskId, workspace, contract, chunk, chunkIndex) {
+    let mergedReview = { mustFix: [], shouldFix: [], advisory: [], duplicates: [], discarded: [] };
+    const commitSubjects = [];
+    const remaining = [];
+
+    for (let iteration = 1; iteration <= MAX_REVIEW_ITERATIONS; iteration += 1) {
+      const reviewerResults = await Promise.all(REVIEWER_DOMAINS.map(async (domain) => {
+        const reviewerAgent = getAgentRunner(repo.getTask(taskId)?.payload?.agentProvider);
+        const reviewerPrompt = buildReviewerPrompt({
+          task: repo.getTask(taskId),
+          workspace,
+          contract,
+          domain: domain.label,
+          domainGuidance: domain.guidance,
+          chunk
+        });
+        const reviewerResponse = await reviewerAgent.runner.runExec({
+          workdir: workspace.git.root,
+          prompt: reviewerPrompt,
+          sandboxMode: 'read-only',
+          schema: reviewAgentSchema
+        });
+        return {
+          domain: domain.label,
+          findings: safeArray(reviewerResponse.parsed?.findings).map(reviewFindingData)
+        };
+      }));
+
+      storeArtifact(taskId, 'review_round', `chunk ${chunkIndex + 1} 리뷰 스웜 ${iteration}`, {
+        chunkId: chunk.id,
+        iteration,
+        reviewers: reviewerResults
       });
+      repo.logExecution(taskId, 'run_reviewer_swarm', 'success', {
+        response: {
+          chunkId: chunk.id,
+          iteration,
+          findingsCount: reviewerResults.reduce((total, entry) => total + entry.findings.length, 0)
+        }
+      });
+
+      const totalFindings = reviewerResults.reduce((total, entry) => total + entry.findings.length, 0);
+      if (totalFindings === 0) {
+        mergedReview = { mustFix: [], shouldFix: [], advisory: [], duplicates: [], discarded: [] };
+        storeArtifact(taskId, 'merge_review', `chunk ${chunkIndex + 1} 병합 리뷰 ${iteration}`, {
+          chunkId: chunk.id,
+          iteration,
+          ...mergedReview
+        });
+        break;
+      }
+
+      const mergeAgent = getAgentRunner(repo.getTask(taskId)?.payload?.agentProvider);
+      const mergePrompt = buildMergeReviewPrompt({
+        task: repo.getTask(taskId),
+        contract,
+        reviewerFindings: reviewerResults
+      });
+      const mergeResponse = await mergeAgent.runner.runExec({
+        workdir: workspace.git.root,
+        prompt: mergePrompt,
+        sandboxMode: 'read-only',
+        schema: mergeReviewSchema
+      });
+      mergedReview = normalizeMergeReview(mergeResponse.parsed);
+      storeArtifact(taskId, 'merge_review', `chunk ${chunkIndex + 1} 병합 리뷰 ${iteration}`, {
+        chunkId: chunk.id,
+        iteration,
+        ...mergedReview
+      });
+      repo.logExecution(taskId, 'run_merge_reviewer', 'success', {
+        response: {
+          chunkId: chunk.id,
+          iteration,
+          mustFix: mergedReview.mustFix.length,
+          shouldFix: mergedReview.shouldFix.length,
+          advisory: mergedReview.advisory.length
+        }
+      });
+
+      if (mergedReview.mustFix.length === 0) {
+        remaining.push(...mergedReview.shouldFix, ...mergedReview.advisory);
+        break;
+      }
+
+      const baseBranch = workspace.git.baseBranch;
+      const previousCommitCount = (await listCommitsSince(workspace.git.root, baseBranch)).length;
+      const patchAgent = getAgentRunner(repo.getTask(taskId)?.payload?.agentProvider);
+      const patchPrompt = buildPatchPrompt({
+        task: repo.getTask(taskId),
+        workspace,
+        mustFix: mergedReview.mustFix.map(mergeFindingToReviewFinding),
+        chunk
+      });
+      // 패치도 무거운 workspace-write 단계이므로 구조화 출력을 강제하지 않고 텍스트로 받는다.
+      const patchResponse = await patchAgent.runner.runExec({
+        workdir: workspace.git.root,
+        prompt: patchPrompt,
+        sandboxMode: 'workspace-write'
+      });
+      const autoCommitResult = await autoCommitWorktreeIfDirty(taskId, workspace.git.root, {
+        action: 'auto_commit_patch_changes',
+        phase: 'patch',
+        commitMessage: `runner chunk ${chunkIndex + 1} fix: resolve review findings (iteration ${iteration})`,
+        dirtyErrorMessage: `chunk ${chunkIndex + 1} 수정 라운드 ${iteration}에서 커밋되지 않은 변경이 남았습니다`
+      });
+      await assertCleanWorktree(workspace.git.root, `chunk ${chunkIndex + 1} 수정 라운드 ${iteration}에서 커밋되지 않은 변경이 남았습니다`);
+      const newCommits = await listCommitSubjects(workspace.git.root, baseBranch, previousCommitCount);
+      const patchParsed = asRecord(patchResponse.parsed);
+      if (!normalizeWhitespace(patchParsed.summary)) {
+        patchParsed.summary = normalizeWhitespace(patchResponse.lastMessage || patchResponse.stdout) || '리뷰 지적사항을 수정했습니다.';
+      }
+      const patchData = patchArtifactData(iteration, patchParsed, newCommits);
+      storeArtifact(taskId, 'patch_round', `chunk ${chunkIndex + 1} 수정 ${iteration}`, patchData);
+      repo.logExecution(taskId, 'apply_review_fixes', 'success', {
+        response: {
+          ...patchData,
+          agentProvider: patchAgent.provider,
+          autoCommit: autoCommitResult,
+          stdout: patchResponse.stdout,
+          stderr: patchResponse.stderr,
+          durationMs: patchResponse.durationMs
+        }
+      });
+      commitSubjects.push(...newCommits);
+
+      if (iteration >= MAX_REVIEW_ITERATIONS && mergedReview.mustFix.length > 0) {
+        remaining.push(...mergedReview.mustFix.map((finding) => ({
+          ...finding,
+          action: `${finding.action} (max review iterations reached)`
+        })));
+      }
     }
 
     return {
-      promptPlan,
-      productPlan,
-      designSpec
+      merged: mergedReview,
+      commitSubjects,
+      remaining
     };
   }
 
-  async function runCodingRound(task, workspace, plans) {
-    const agent = getAgentRunner(task.payload?.agentProvider);
-    const prompt = buildCodingPrompt({
-      task,
+  async function runChunk(taskId, workspace, contract, plan, chunk, chunkIndex, chunkTotal) {
+    const agent = getAgentRunner(repo.getTask(taskId)?.payload?.agentProvider);
+    const codebaseSnapshot = [
+      `Base branch: ${workspace.git.baseBranch}`,
+      `Work branch: ${repo.getTask(taskId)?.payload?.branchName || ''}`,
+      `Files sampled: ${workspace.fileSample.slice(0, 16).join(', ') || 'none'}`
+    ].join('\n');
+    const prompt = buildChunkExecutorPrompt({
+      task: repo.getTask(taskId),
       workspace,
-      promptPlan: plans.promptPlan,
-      productPlan: plans.productPlan,
-      designSpec: plans.designSpec
+      contract,
+      plan,
+      chunk,
+      chunkIndex,
+      chunkTotal,
+      codebaseSnapshot
     });
-    storeArtifact(task.id, 'coding_prompt', '코딩 프롬프트', {
-      branchName: task.payload?.branchName,
+    storeArtifact(taskId, 'coding_prompt', `chunk ${chunkIndex + 1} 코딩 프롬프트`, {
+      chunkId: chunk.id,
+      branchName: repo.getTask(taskId)?.payload?.branchName,
       prompt
     });
 
-    const responseWithProvider = await agent.runner.runExec({
+    // 무거운 코딩 단계는 강제 JSON 구조화 출력이 긴 도구 사용 세션에서 자주 실패하므로 스키마 없이 텍스트로 받는다.
+    const response = await agent.runner.runExec({
       workdir: workspace.git.root,
       prompt,
-      sandboxMode: 'workspace-write',
-      schema: codingAgentSchema
+      sandboxMode: 'workspace-write'
     });
-    const autoCommitResult = await autoCommitWorktreeIfDirty(task.id, workspace.git.root, {
+    const responseText = normalizeWhitespace(response.lastMessage || response.stdout);
+
+    // 계획 불일치 감지: 구조화 필드(테스트 fake) 또는 텍스트 마커(실제 실행) 둘 다 지원.
+    const planPatchSource = asRecord(asRecord(response.parsed).planPatchRequest);
+    let planPatchReason = normalizeWhitespace(planPatchSource.reason);
+    let planPatchProposed = normalizeWhitespace(planPatchSource.proposedChange);
+    if (!planPatchReason) {
+      const marker = responseText.match(/PLAN_PATCH_REQUEST:\s*([\s\S]+)/i);
+      if (marker) {
+        const [reasonPart, proposedPart] = marker[1].split('|||');
+        planPatchReason = normalizeWhitespace(reasonPart);
+        planPatchProposed = normalizeWhitespace(proposedPart) || planPatchReason;
+      }
+    }
+    if (planPatchReason && planPatchProposed) {
+      await autoCommitWorktreeIfDirty(taskId, workspace.git.root, {
+        action: 'auto_commit_coding_changes',
+        phase: 'coding',
+        commitMessage: `chore: snapshot before plan patch (chunk ${chunkIndex + 1})`,
+        dirtyErrorMessage: `chunk ${chunkIndex + 1} 계획 패치 전 변경 정리에 실패했습니다`
+      });
+      await assertCleanWorktree(workspace.git.root, `chunk ${chunkIndex + 1} 계획 패치 전 작업 트리가 깨끗해야 합니다`);
+      repo.logExecution(taskId, 'plan_patch_requested', 'success', {
+        response: { chunkId: chunk.id, reason: planPatchReason, proposedChange: planPatchProposed }
+      });
+      return {
+        id: chunk.id,
+        title: chunk.title,
+        acceptanceCriteria: chunk.acceptanceCriteria,
+        status: 'plan_patch_requested',
+        planPatchRequest: { reason: planPatchReason, proposedChange: planPatchProposed }
+      };
+    }
+
+    const autoCommitResult = await autoCommitWorktreeIfDirty(taskId, workspace.git.root, {
       action: 'auto_commit_coding_changes',
       phase: 'coding',
-      commitMessage: 'chore: auto-commit coding agent workspace changes',
-      dirtyErrorMessage: '코딩 에이전트가 작업 트리에 커밋되지 않은 변경을 남겼습니다'
+      commitMessage: `runner chunk ${chunkIndex + 1}: ${slugify(chunk.title)}`,
+      dirtyErrorMessage: `chunk ${chunkIndex + 1} 구현에서 커밋되지 않은 변경이 남았습니다`
     });
-    await assertCleanWorktree(workspace.git.root, '코딩 에이전트가 작업 트리에 커밋되지 않은 변경을 남겼습니다');
+    await assertCleanWorktree(workspace.git.root, `chunk ${chunkIndex + 1} 구현에서 커밋되지 않은 변경이 남았습니다`);
 
-    repo.logExecution(task.id, 'run_coding_agent', 'success', {
+    const executorSummary = normalizeWhitespace(asRecord(response.parsed).summary) || responseText || '코딩 단계를 완료했습니다.';
+    const testsRun = compactStrings(asRecord(response.parsed).testsRun);
+    const notes = compactStrings(asRecord(response.parsed).notes);
+    storeArtifact(taskId, 'validation_log', `chunk ${chunkIndex + 1} 자체검증`, {
+      chunkId: chunk.id,
+      testsRun,
+      notes,
+      note: '검증 명령은 실행자 에이전트가 샌드박스에서 실행하고 testsRun에 기록합니다.'
+    });
+    repo.logExecution(taskId, 'run_executor_agent', 'success', {
       response: {
-        ...responseWithProvider.parsed,
+        chunkId: chunk.id,
+        summary: executorSummary,
+        testsRun,
+        notes,
         agentProvider: agent.provider,
         autoCommit: autoCommitResult,
-        stdout: responseWithProvider.stdout,
-        stderr: responseWithProvider.stderr,
-        durationMs: responseWithProvider.durationMs
+        stdout: response.stdout,
+        stderr: response.stderr,
+        durationMs: response.durationMs
       }
     });
 
-    return responseWithProvider.parsed;
-  }
+    const reviewOutcome = await runReviewLoopForChunk(taskId, workspace, contract, chunk, chunkIndex);
 
-  async function runReviewLoop(taskId, workspace, plans, { existingReviewRounds = [] } = {}) {
-    const reviewRounds = safeArray(existingReviewRounds).map((round) => ({ ...round }));
-    let previousCommitCount = (await listCommitsSince(workspace.git.root, workspace.git.baseBranch)).length;
-
-    for (let round = reviewRounds.length + 1; round <= CODE_REVIEW_ROUNDS; round += 1) {
-      const currentTask = repo.getTask(taskId);
-      updateExecutionProgress(taskId, `리뷰 라운드 ${round}/${CODE_REVIEW_ROUNDS} 실행 중`, {
-        phase: 'review',
-        label: `리뷰/수정 라운드 ${round}/${CODE_REVIEW_ROUNDS}`,
-        currentStep: 3 + round,
-        reviewRound: round
-      }, {
-        reviewRounds
-      });
-
-      const reviewPrompt = buildReviewPrompt({
-        task: currentTask,
-        workspace,
-        promptPlan: plans.promptPlan,
-        productPlan: plans.productPlan,
-        designSpec: plans.designSpec,
-        round
-      });
-
-      const agent = getAgentRunner(currentTask.payload?.agentProvider);
-      const reviewResponse = await agent.runner.runExec({
-        workdir: workspace.git.root,
-        prompt: reviewPrompt,
-        sandboxMode: 'read-only',
-        schema: reviewAgentSchema
-      });
-
-      const reviewData = reviewArtifactData(round, reviewResponse.parsed);
-      storeArtifact(taskId, 'review_round', `리뷰 라운드 ${round}`, reviewData);
-      repo.logExecution(taskId, 'run_review_agent', 'success', {
-        response: {
-          ...reviewData,
-          agentProvider: agent.provider,
-          stdout: reviewResponse.stdout,
-          stderr: reviewResponse.stderr,
-          durationMs: reviewResponse.durationMs
-        }
-      });
-
-      let patchData = {
-        round,
-        summary: '이번 라운드에서는 수정이 필요하지 않았습니다.',
-        resolvedFindings: [],
-        declinedFindings: [],
-        testsRun: [],
-        notes: [],
-        newCommits: []
-      };
-
-      if (reviewData.findings.length > 0) {
-        const patchPrompt = buildPatchPrompt({
-          task: currentTask,
-          workspace,
-          reviewRound: reviewData,
-          round
-        });
-
-        const patchResponse = await agent.runner.runExec({
-          workdir: workspace.git.root,
-          prompt: patchPrompt,
-          sandboxMode: 'workspace-write',
-          schema: patchAgentSchema
-        });
-        const autoCommitResult = await autoCommitWorktreeIfDirty(taskId, workspace.git.root, {
-          action: 'auto_commit_patch_changes',
-          phase: 'patch',
-          commitMessage: `fix: auto-commit patch round ${round} changes`,
-          dirtyErrorMessage: `패치 라운드 ${round}에서 커밋되지 않은 변경이 남았습니다`
-        });
-        await assertCleanWorktree(workspace.git.root, `패치 라운드 ${round}에서 커밋되지 않은 변경이 남았습니다`);
-        const newCommits = await listCommitSubjects(workspace.git.root, workspace.git.baseBranch, previousCommitCount);
-        patchData = patchArtifactData(round, patchResponse.parsed, newCommits);
-        storeArtifact(taskId, 'patch_round', `패치 라운드 ${round}`, patchData);
-        repo.logExecution(taskId, 'apply_review_fixes', 'success', {
-          response: {
-            ...patchData,
-            agentProvider: agent.provider,
-            autoCommit: autoCommitResult,
-            stdout: patchResponse.stdout,
-            stderr: patchResponse.stderr,
-            durationMs: patchResponse.durationMs
-          }
-        });
-      } else {
-        storeArtifact(taskId, 'patch_round', `패치 라운드 ${round}`, patchData);
-        repo.logExecution(taskId, 'apply_review_fixes', 'success', {
-          response: patchData
-        });
-      }
-
-      previousCommitCount = (await listCommitsSince(workspace.git.root, workspace.git.baseBranch)).length;
-      reviewRounds.push({
-        round,
-        review: reviewData,
-        patch: patchData
-      });
-    }
-
-    return reviewRounds;
-  }
-
-  function savePlanSelections(taskId, options: { selections?: Record<string, unknown> } = {}) {
-    const task = repo.getTask(taskId);
-    if (!task || task.domain !== 'code_execution') {
-      throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
-    }
-
-    const executionMode = normalizeExecutionMode(task.payload?.executionMode, 'full');
-    if (executionMode !== 'plan') {
-      throw new Error('플랜 모드 작업에서만 확인 항목을 저장할 수 있습니다');
-    }
-
-    const plans = loadStoredPlans(taskId, task);
-    const promptPlan = asRecord(plans.promptPlan);
-    if (Object.keys(promptPlan).length === 0) {
-      throw new Error('플랜이 아직 생성되지 않았습니다. 잠시 후 다시 시도해 주세요.');
-    }
-
-    const existingResult = asRecord(task.result);
-    const existingPlanMode = asRecord(existingResult.planMode);
-    const requestedSelections = {
-      ...parsePlanSelections(task.payload?.planSelections),
-      ...parsePlanSelections(options.selections)
+    return {
+      id: chunk.id,
+      title: chunk.title,
+      acceptanceCriteria: chunk.acceptanceCriteria,
+      status: 'committed',
+      executorSummary,
+      testsRun,
+      mergedReview: reviewOutcome.merged,
+      patchCommits: reviewOutcome.commitSubjects,
+      remainingKnownIssues: reviewOutcome.remaining
     };
-    const planModeState = buildPlanModeState({
-      promptPlan,
-      requestedSelections,
-      fallbackRequests: safeArray(existingPlanMode.confirmationRequests).map((entry) => asRecord(entry))
+  }
+
+  async function runExecutionStage(taskId, workspace) {
+    const task = repo.getTask(taskId);
+    const runner = loadRunnerState(taskId, task);
+    if (!runner.requirementContract) {
+      throw new Error('요구사항 계약이 없어 구현을 시작할 수 없습니다');
+    }
+    if (!runner.implementationPlan) {
+      throw new Error('구현 계획이 없어 구현을 시작할 수 없습니다');
+    }
+
+    const branchState = await ensureBranch(repo.getTask(taskId), workspace);
+    const branchName = branchState.branchName;
+    updateTaskProgress(taskId, '구현 브랜치를 준비했습니다', {
+      branch: branchName,
+      baseBranch: workspace.git.baseBranch,
+      restoreBranch: branchState.restoreBranch
     });
 
-    const updated = repo.updateTask(taskId, {
-      payload: {
-        ...asRecord(task.payload),
-        executionMode: 'plan',
-        planSelections: planModeState.selections
-      },
-      result: {
-        ...existingResult,
-        planMode: {
-          enabled: true,
-          ...planModeState
+    const chunks = runner.implementationPlan.taskBreakdown.map((entry, index) => normalizeChunk(entry, index));
+    const chunkTotal = chunks.length;
+    // 이미 완료(committed)된 chunk는 id로 매칭해 보존한다(계획 패치로 chunk 수가 바뀌어도 재구현하지 않도록).
+    const chunkStates = chunks.map((chunk) => {
+      const prior = runner.chunks.find((entry) => normalizeWhitespace(asRecord(entry).id) === chunk.id);
+      if (prior && normalizeWhitespace(asRecord(prior).status) === 'committed') {
+        return prior;
+      }
+      return { id: chunk.id, title: chunk.title, status: 'pending' };
+    });
+
+    for (let index = 0; index < chunkTotal; index += 1) {
+      if (normalizeWhitespace(chunkStates[index]?.status) === 'committed') {
+        continue;
+      }
+      const chunk = chunks[index];
+      updateExecutionProgress(taskId, `chunk ${index + 1}/${chunkTotal}을 구현하는 중입니다`, {
+        phase: 'execution',
+        label: `구현 chunk ${index + 1}/${chunkTotal}: ${chunk.title}`,
+        currentStep: 4,
+        chunkIndex: index + 1,
+        chunkTotal
+      }, {
+        branch: branchName
+      });
+      const chunkResult = await runChunk(taskId, workspace, runner.requirementContract, runner.implementationPlan, chunk, index, chunkTotal);
+      chunkStates[index] = chunkResult;
+      patchRunnerState(taskId, { chunks: chunkStates });
+
+      // Plan Patch Loop: 실행자가 계획 불일치를 보고하면 계획 패치 게이트에서 멈춘다.
+      if (normalizeWhitespace(chunkResult.status) === 'plan_patch_requested') {
+        pauseForPlanPatchGate(taskId, chunkResult.planPatchRequest);
+        return { paused: true };
+      }
+
+      // Gate 3: 위험 변경이 감지되고 아직 승인되지 않았다면 멈춘다.
+      if (repo.getTask(taskId)?.payload?.riskApproved !== true) {
+        const risk = await detectRiskSignals(workspace);
+        if (risk.risky) {
+          pauseForRiskGate(taskId, risk);
+          return { paused: true };
         }
+      }
+    }
+
+    const remainingKnownIssues = chunkStates.flatMap((state) => safeArray(state?.remainingKnownIssues));
+    patchRunnerState(taskId, {
+      chunks: chunkStates,
+      remainingKnownIssues
+    });
+    return { paused: false };
+  }
+
+  async function runFinalValidation(taskId, workspace) {
+    const task = repo.getTask(taskId);
+    const runner = loadRunnerState(taskId, task);
+    const commits = await listCommitsSince(workspace.git.root, workspace.git.baseBranch);
+    const commitSummary = commits.map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`);
+
+    updateExecutionProgress(taskId, '최종 검증을 진행하는 중입니다', {
+      phase: 'validation',
+      label: '최종 검증',
+      currentStep: 5
+    }, {
+      commits
+    });
+
+    const agent = getAgentRunner(task.payload?.agentProvider);
+    const validationPrompt = buildFinalValidationPrompt({
+      task,
+      workspace,
+      contract: runner.requirementContract,
+      commitSummary
+    });
+    const validationResponse = await agent.runner.runExec({
+      workdir: workspace.git.root,
+      prompt: validationPrompt,
+      sandboxMode: 'read-only',
+      schema: finalValidationSchema
+    });
+    const finalValidation = normalizeFinalValidation(validationResponse.parsed);
+    storeArtifact(taskId, 'final_validation', '최종 검증', finalValidation);
+    patchRunnerState(taskId, { finalValidation });
+    repo.logExecution(taskId, 'run_final_validation', 'success', {
+      response: {
+        ...finalValidation,
+        agentProvider: agent.provider,
+        durationMs: validationResponse.durationMs
+      }
+    });
+    return finalValidation;
+  }
+
+  function knownIssuesToStrings(issues) {
+    return compactStrings(safeArray(issues).map((issue) => {
+      if (typeof issue === 'string') {
+        return issue;
+      }
+      const record = asRecord(issue);
+      return normalizeWhitespace(record.title || record.action || record.description);
+    }));
+  }
+
+  // 완료 후 개선 루프(Refinement Loop): 승인된 계약/계획 프레임 안의 개선점을 최대 MAX_REFINEMENT_ITERATIONS회 자동 반영.
+  // 승인 게이트 없이(autopilot) 진행하되, 프레임 초과/진행 없음/개선 없음에서 즉시 종료한다.
+  async function runRefinementLoop(taskId, workspace, initialValidation) {
+    let finalValidation = initialValidation;
+    let previousUnresolved = Number.POSITIVE_INFINITY;
+    const refinements = [];
+
+    for (let iteration = 1; iteration <= MAX_REFINEMENT_ITERATIONS; iteration += 1) {
+      const task = repo.getTask(taskId);
+      const runner = loadRunnerState(taskId, task);
+      if (!runner.requirementContract || !runner.implementationPlan) {
+        break;
+      }
+
+      updateExecutionProgress(taskId, `완료 후 개선 루프 ${iteration}/${MAX_REFINEMENT_ITERATIONS} 결과를 점검하는 중입니다`, {
+        phase: 'refinement',
+        label: `개선 루프 ${iteration}/${MAX_REFINEMENT_ITERATIONS}: 결과 점검`,
+        currentStep: 5
+      });
+
+      const inspectAgent = getAgentRunner(task.payload?.agentProvider);
+      const inspectPrompt = buildRefinementInspectionPrompt({
+        task,
+        workspace,
+        contract: runner.requirementContract,
+        plan: runner.implementationPlan,
+        finalValidation,
+        remainingKnownIssues: knownIssuesToStrings(runner.remainingKnownIssues),
+        iteration,
+        maxIterations: MAX_REFINEMENT_ITERATIONS
+      });
+      const inspectResponse = await inspectAgent.runner.runExec({
+        workdir: workspace.git.root,
+        prompt: inspectPrompt,
+        sandboxMode: 'read-only',
+        schema: refinementDecisionSchema
+      });
+      const decision = asRecord(inspectResponse.parsed);
+      const improvementFound = Boolean(decision.improvementFound);
+      const inFrame = Boolean(decision.inFrame);
+      const unresolvedCount = toInteger(decision.unresolvedCount, 0);
+      const rationale = normalizeWhitespace(decision.rationale);
+      const chunkSource = asRecord(decision.chunk);
+
+      storeArtifact(taskId, 'refinement_round', `개선 루프 ${iteration} 점검`, {
+        iteration,
+        improvementFound,
+        inFrame,
+        unresolvedCount,
+        rationale
+      });
+      repo.logExecution(taskId, 'run_refinement_inspection', 'success', {
+        response: { iteration, improvementFound, inFrame, unresolvedCount }
+      });
+
+      if (!improvementFound) {
+        refinements.push({ iteration, status: 'no_improvement', rationale });
+        break;
+      }
+      if (!inFrame) {
+        // 프레임 초과 개선은 자율 루프 대상이 아니다 → 남은 이슈로 기록하고 종료(escalation_exit).
+        refinements.push({ iteration, status: 'frame_exceeding', rationale });
+        const known = safeArray(loadRunnerState(taskId, repo.getTask(taskId)).remainingKnownIssues);
+        patchRunnerState(taskId, {
+          remainingKnownIssues: [...known, {
+            severity: 'P2',
+            title: '프레임 초과 개선 제안',
+            description: rationale,
+            fileRefs: [],
+            action: '사용자 승인 후 별도 작업으로 진행 권장'
+          }]
+        });
+        break;
+      }
+      if (unresolvedCount >= previousUnresolved) {
+        // no_progress_exit: 미해결 개선 수가 줄지 않으면 한도 전이라도 종료.
+        refinements.push({ iteration, status: 'no_progress', rationale });
+        break;
+      }
+      previousUnresolved = unresolvedCount;
+
+      const chunk = normalizeChunk({
+        id: normalizeWhitespace(chunkSource.id) || `refine_${iteration}`,
+        title: `[개선] ${normalizeWhitespace(chunkSource.title) || rationale || '추가 개선'}`,
+        acceptanceCriteria: chunkSource.acceptanceCriteria
+      }, iteration - 1);
+
+      const existingChunks = loadRunnerState(taskId, repo.getTask(taskId)).chunks.slice();
+      updateExecutionProgress(taskId, `개선 루프 ${iteration}/${MAX_REFINEMENT_ITERATIONS}를 구현하는 중입니다`, {
+        phase: 'refinement',
+        label: `개선 루프 ${iteration}/${MAX_REFINEMENT_ITERATIONS}: ${chunk.title}`,
+        currentStep: 5,
+        chunkIndex: existingChunks.length + 1,
+        chunkTotal: existingChunks.length + 1
+      });
+
+      const chunkResult = await runChunk(
+        taskId,
+        workspace,
+        runner.requirementContract,
+        runner.implementationPlan,
+        chunk,
+        existingChunks.length,
+        existingChunks.length + 1
+      );
+      patchRunnerState(taskId, { chunks: [...existingChunks, chunkResult] });
+      refinements.push({ iteration, status: 'applied', rationale, chunkId: chunk.id, title: chunk.title });
+
+      // 개선 반영 후 최종 검증을 재실행하고 다시 점검(loop).
+      finalValidation = await runFinalValidation(taskId, workspace);
+    }
+
+    patchRunnerState(taskId, { refinements });
+    return finalValidation;
+  }
+
+  async function completeTask(taskId, workspace, finalValidation) {
+    const task = repo.getTask(taskId);
+    const runner = loadRunnerState(taskId, task);
+    const result = asRecord(task.result);
+    const branchName = normalizeWhitespace(result.branch || task.payload?.branchName);
+    const commits = await listCommitsSince(workspace.git.root, workspace.git.baseBranch);
+    const commitSummary = commits.map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`);
+
+    const pullRequest = await codeTaskPlanner.createPullRequestDraft({
+      task: repo.getTask(taskId),
+      workspace,
+      commitSummary,
+      contract: runner.requirementContract
+    });
+    storeArtifact(taskId, 'pr_summary', 'PR 초안', pullRequest);
+    repo.logExecution(taskId, 'prepare_pr', 'success', {
+      response: pullRequest
+    });
+
+    const sourceCommit = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
+    const hasRemote = Boolean(normalizeWhitespace(workspace.git.remoteUrl));
+    const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
+      workBranch: branchName,
+      preferredRestoreBranch: normalizeWhitespace(result.restoreBranch) || workspace.git.baseBranch,
+      deleteWorkBranch: false
+    });
+    const completionSummary = hasRemote
+      ? `${branchName} 브랜치에서 runner 워크플로가 완료되었습니다. 작업 브랜치는 유지되며 PR 생성을 진행할 수 있습니다.`
+      : `${branchName} 브랜치에서 runner 워크플로가 완료되었습니다. 원격 저장소(origin)가 없어 PR 생성 단계 없이 종료합니다.`;
+
+    repo.updateTask(taskId, {
+      status: hasRemote ? 'awaiting_approval' : 'done',
+      approvalState: hasRemote ? 'pending' : 'approved',
+      summary: completionSummary,
+      result: {
+        ...asRecord(repo.getTask(taskId)?.result),
+        branch: branchName,
+        baseBranch: workspace.git.baseBranch,
+        sourceCommit,
+        restoreBranch: workspaceCleanup.restoreBranch || normalizeWhitespace(result.restoreBranch) || workspace.git.baseBranch,
+        branchCleanup: workspaceCleanup,
+        repoSlug: workspace.git.repoSlug,
+        remoteUrl: workspace.git.remoteUrl,
+        hasRemote,
+        canCreatePullRequest: hasRemote,
+        commits,
+        pullRequest,
+        finalValidation,
+        executionProgress: buildExecutionProgress({
+          phase: 'completed',
+          label: 'runner 워크플로 완료',
+          currentStep: CODE_EXECUTION_TOTAL_STEPS
+        })
       },
-      summary: planModeState.unresolvedRequestIds.length === 0
-        ? '플랜 확인 항목이 모두 선택되었습니다. 코드 실행을 시작할 수 있습니다.'
-        : '플랜 확인 항목 선택 대기 중입니다.',
       lastError: null
     });
-
-    repo.logExecution(taskId, 'save_plan_selections', 'success', {
-      request: {
-        selections: options.selections || {}
-      },
-      response: {
-        selections: planModeState.selections,
-        unresolvedRequestIds: planModeState.unresolvedRequestIds
-      }
-    });
-
-    return updated || repo.getTask(taskId);
   }
 
-  async function runTask(taskId, options: { resumeFromCheckpoint?: boolean; startFromPlan?: boolean } = {}) {
-    const resumeFromCheckpoint = Boolean(options.resumeFromCheckpoint);
-    const startFromPlan = Boolean(options.startFromPlan);
+  async function runFromStage(taskId, fromStage: RunnerStage) {
+    let stage: RunnerStage = fromStage;
+
+    if (stage === 'workspace') {
+      await prepareWorkspaceStage(taskId);
+      stage = 'spec';
+    }
+
+    if (stage === 'spec') {
+      await runSpecStage(taskId);
+      applyGate(taskId, 'spec');
+      return;
+    }
+
+    if (stage === 'plan') {
+      await runPlanStage(taskId);
+      applyGate(taskId, 'plan');
+      return;
+    }
+
+    if (stage === 'execution' || stage === 'validation') {
+      // 작업공간은 이 구간에서 한 번만 점검한다. chunk 커밋 이후 재점검하면 미커밋 base 브랜치에서 resolveBaseBranch가 실패할 수 있다.
+      const task = repo.getTask(taskId);
+      const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
+      if (stage === 'execution') {
+        const outcome = await runExecutionStage(taskId, workspace);
+        if (outcome?.paused) {
+          // 위험/계획패치 게이트에서 승인 대기 중 → 검증/완료로 진행하지 않는다.
+          return;
+        }
+      }
+      let finalValidation = await runFinalValidation(taskId, workspace);
+      finalValidation = await runRefinementLoop(taskId, workspace, finalValidation);
+      await completeTask(taskId, workspace, finalValidation);
+    }
+  }
+
+  function launchRun(taskId, fromStage: RunnerStage) {
     if (activeRuns.has(taskId)) {
       return { started: false };
     }
-
     activeRuns.add(taskId);
 
-    const runPromise = (async () => {
-      const task = repo.getTask(taskId);
-      if (!task || task.domain !== 'code_execution') {
-        throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
-      }
-
-      const initialExecutionMode = normalizeExecutionMode(task.payload?.executionMode, 'full');
-      const initialPlans = loadStoredPlans(taskId, task);
-
-      if (initialExecutionMode === 'plan' && !startFromPlan) {
-        updateExecutionProgress(taskId, '플랜 모드 실행을 위해 작업 환경을 점검하는 중입니다', {
-          phase: 'plan_workspace',
-          label: '플랜 모드: 작업 환경 점검',
-          currentStep: 1,
-          totalSteps: PLAN_MODE_TOTAL_STEPS
-        });
-
-        const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
-        updateExecutionProgress(taskId, '플랜을 생성하고 확인 요청 항목을 정리하는 중입니다', {
-          phase: 'plan_generation',
-          label: '플랜 모드: 계획 생성',
-          currentStep: 2,
-          totalSteps: PLAN_MODE_TOTAL_STEPS
-        }, {
-          baseBranch: workspace.git.baseBranch
-        });
-
-        const latestTask = repo.getTask(taskId);
-        const plans = await runPromptPlanning(latestTask, workspace);
-        const currentTask = repo.getTask(taskId);
-        const currentResult = asRecord(currentTask?.result);
-        const existingPlanMode = asRecord(currentResult.planMode);
-        const requestedSelections = parsePlanSelections(currentTask?.payload?.planSelections);
-        const planModeState = buildPlanModeState({
-          promptPlan: asRecord(plans.promptPlan),
-          requestedSelections,
-          fallbackRequests: safeArray(existingPlanMode.confirmationRequests).map((entry) => asRecord(entry))
-        });
-
-        storeArtifact(taskId, 'plan_confirmation_requests', '플랜 확인 요청', {
-          ...planModeState,
-          generatedAt: new Date().toISOString()
-        });
-        repo.logExecution(taskId, 'complete_plan_mode', 'success', {
-          response: {
-            selections: planModeState.selections,
-            unresolvedRequestIds: planModeState.unresolvedRequestIds
-          }
-        });
-
-        repo.updateTask(taskId, {
-          status: 'awaiting_approval',
-          approvalState: 'pending',
-          summary: planModeState.unresolvedRequestIds.length === 0
-            ? '플랜 모드가 완료되었습니다. 코드 실행을 시작할 수 있습니다.'
-            : '플랜 모드가 완료되었습니다. 확인 항목을 선택한 뒤 코드 실행을 시작해 주세요.',
-          payload: {
-            ...asRecord(currentTask?.payload),
-            executionMode: 'plan',
-            planSelections: planModeState.selections
-          },
-          result: {
-            ...currentResult,
-            promptPlan: plans.promptPlan,
-            planMode: {
-              enabled: true,
-              ...planModeState
-            },
-            executionProgress: buildExecutionProgress({
-              phase: 'plan_completed',
-              label: '플랜 모드 완료',
-              currentStep: PLAN_MODE_TOTAL_STEPS,
-              totalSteps: PLAN_MODE_TOTAL_STEPS
-            })
-          },
-          lastError: null
-        });
-        return;
-      }
-
-      if (initialExecutionMode === 'plan' && startFromPlan) {
-        const promptPlan = asRecord(initialPlans.promptPlan);
-        if (Object.keys(promptPlan).length === 0) {
-          throw new Error('플랜 정보가 없어 코드 실행을 시작할 수 없습니다. 플랜 모드를 먼저 완료해 주세요.');
-        }
-
-        const existingPlanMode = asRecord(asRecord(task.result).planMode);
-        const planModeState = buildPlanModeState({
-          promptPlan,
-          requestedSelections: parsePlanSelections(task.payload?.planSelections),
-          fallbackRequests: safeArray(existingPlanMode.confirmationRequests).map((entry) => asRecord(entry))
-        });
-        if (planModeState.unresolvedRequestIds.length > 0) {
-          throw new Error(
-            `플랜 확인 항목 선택이 필요합니다: ${planModeState.unresolvedRequestIds.join(', ')}`
-          );
-        }
-
-        repo.updateTask(taskId, {
-          payload: {
-            ...asRecord(task.payload),
-            executionMode: 'full',
-            planSelections: planModeState.selections
-          },
-          result: {
-            ...asRecord(task.result),
-            planMode: {
-              enabled: true,
-              ...planModeState,
-              status: 'confirmed'
-            }
-          },
-          summary: '플랜 선택을 반영해 코드 작업 실행을 시작합니다.',
-          lastError: null
-        });
-        repo.logExecution(taskId, 'start_from_plan_mode', 'success', {
-          response: {
-            selections: planModeState.selections
-          }
-        });
-      }
-
-      let plans = loadStoredPlans(taskId, repo.getTask(taskId));
-      let resumeStartStep = resolveResumeStartStep(repo.getTask(taskId), plans, resumeFromCheckpoint);
-      if (startFromPlan && initialExecutionMode === 'plan') {
-        resumeStartStep = 3;
-      }
-
-      const resumeApplied = (resumeFromCheckpoint && resumeStartStep > 1)
-        || (startFromPlan && initialExecutionMode === 'plan');
-      if (resumeApplied) {
-        const resumeLabel = startFromPlan && initialExecutionMode === 'plan'
-          ? '플랜 확정 후 코드 실행 재개'
-          : `${resumeStartStep}단계부터 재개`;
-        updateExecutionProgress(taskId, `${resumeLabel}를 준비하는 중입니다`, {
-          phase: 'resume',
-          label: resumeLabel,
-          currentStep: Math.max(1, resumeStartStep - 1)
-        });
-        repo.logExecution(taskId, 'resume_from_checkpoint', 'success', {
-          response: {
-            resumeStartStep
-          }
-        });
-      } else {
-        updateExecutionProgress(taskId, '작업 환경을 점검하고 브랜치를 준비하는 중입니다', {
-          phase: 'workspace',
-          label: '작업 환경 점검 및 브랜치 준비',
-          currentStep: 1
-        });
-      }
-
-      const workspace = await inspectWorkspace(task.payload?.workdir, task.payload?.baseBranch);
-      const branchState = await ensureBranch(repo.getTask(taskId), workspace);
-      const branchName = branchState.branchName;
-
-      plans = loadStoredPlans(taskId, repo.getTask(taskId));
-      if (resumeStartStep <= 2 || !plans.promptPlan) {
-        updateExecutionProgress(taskId, '프롬프트 계획을 만들고 코딩 워크플로를 준비하는 중입니다', {
-          phase: 'planning',
-          label: '프롬프트/기획/디자인 계획 생성',
-          currentStep: 2
-        }, {
-          branch: branchName,
-          baseBranch: workspace.git.baseBranch
-        });
-
-        const latestTask = repo.getTask(taskId);
-        plans = await runPromptPlanning(latestTask, workspace);
-      } else {
-        updateTaskProgress(taskId, `${resumeStartStep}단계 재개 준비가 완료되었습니다`, {
-          branch: branchName,
-          baseBranch: workspace.git.baseBranch,
-          promptPlan: plans.promptPlan
-        });
-      }
-
-      let codingSummary = normalizeWhitespace(repo.getTask(taskId)?.result?.codingSummary);
-      if (resumeStartStep <= 3) {
-        updateExecutionProgress(taskId, '코딩 에이전트를 실행하는 중입니다', {
-          phase: 'coding',
-          label: '코딩 에이전트 실행',
-          currentStep: 3
-        }, {
-          promptPlan: plans.promptPlan
-        });
-
-        const codingResult = await runCodingRound(repo.getTask(taskId), workspace, plans);
-        codingSummary = normalizeWhitespace(codingResult.summary);
-        updateTaskProgress(taskId, '코딩 결과를 정리하는 중입니다', {
-          codingSummary: codingSummary || null
-        });
-      }
-
-      const existingReviewRounds = resumeStartStep >= 4
-        ? safeArray(repo.getTask(taskId)?.result?.reviewRounds)
-        : [];
-      const reviewRounds = existingReviewRounds.length >= CODE_REVIEW_ROUNDS
-        ? existingReviewRounds
-        : await runReviewLoop(taskId, workspace, plans, {
-            existingReviewRounds
-          });
-      const commits = await listCommitsSince(workspace.git.root, workspace.git.baseBranch);
-      const commitSummary = commits.map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`);
-      updateExecutionProgress(taskId, 'PR 초안을 준비하는 중입니다', {
-        phase: 'pr_draft',
-        label: 'PR 초안 정리',
-        currentStep: CODE_EXECUTION_TOTAL_STEPS - 1
-      }, {
-        codingSummary: codingSummary || '이전 실행의 코딩 결과를 재사용했습니다.',
-        commits,
-        reviewRounds
-      });
-      const pullRequest = await codeTaskPlanner.createPullRequestDraft({
-        task: repo.getTask(taskId),
-        workspace,
-        reviewRounds,
-        commitSummary
-      });
-      storeArtifact(taskId, 'pr_summary', 'PR 초안', pullRequest);
-      repo.logExecution(taskId, 'prepare_pr', 'success', {
-        response: pullRequest
-      });
-      const sourceCommit = normalizeWhitespace(await runGit(workspace.git.root, ['rev-parse', 'HEAD']));
-      const hasRemote = Boolean(normalizeWhitespace(workspace.git.remoteUrl));
-      const workspaceCleanup = await cleanupTaskWorkspaceBranch(taskId, workspace, {
-        workBranch: branchName,
-        preferredRestoreBranch: workspace.git.baseBranch,
-        deleteWorkBranch: false
-      });
-      const completionSummary = hasRemote
-        ? `${branchName} 브랜치에서 코드 작업이 완료되었습니다. 작업 브랜치는 유지되며 PR 생성을 진행할 수 있습니다.`
-        : `${branchName} 브랜치에서 코드 작업이 완료되었습니다. 원격 저장소(origin)가 없어 PR 생성 단계 없이 종료합니다.`;
-
-      repo.updateTask(taskId, {
-        status: hasRemote ? 'awaiting_approval' : 'done',
-        approvalState: hasRemote ? 'pending' : 'approved',
-        summary: completionSummary,
-        result: {
-          ...asRecord(repo.getTask(taskId)?.result),
-          branch: branchName,
-          baseBranch: workspace.git.baseBranch,
-          sourceCommit,
-          restoreBranch: workspaceCleanup.restoreBranch || branchState.restoreBranch || workspace.git.baseBranch,
-          branchCleanup: workspaceCleanup,
-          repoSlug: workspace.git.repoSlug,
-          remoteUrl: workspace.git.remoteUrl,
-          hasRemote,
-          canCreatePullRequest: hasRemote,
-          promptPlan: plans.promptPlan,
-          codingSummary: codingSummary || '이전 실행의 코딩 결과를 재사용했습니다.',
-          commits,
-          reviewRounds,
-          pullRequest,
-          executionProgress: buildExecutionProgress({
-            phase: 'completed',
-            label: '코드 작업 완료',
-            currentStep: CODE_EXECUTION_TOTAL_STEPS,
-            reviewRound: CODE_REVIEW_ROUNDS
-          })
-        },
-        lastError: null
-      });
-    })();
+    const runPromise = runFromStage(taskId, fromStage);
 
     runPromise.catch((error) => {
       const formattedError = formatExecutionError(error);
       const currentTask = repo.getTask(taskId);
-      const currentResult = currentTask?.result && typeof currentTask.result === 'object'
-        ? currentTask.result
-        : {};
-      const previousProgress = currentResult.executionProgress && typeof currentResult.executionProgress === 'object'
-        ? currentResult.executionProgress
-        : {};
+      const currentResult = asRecord(currentTask?.result);
+      const previousProgress = asRecord(currentResult.executionProgress);
       repo.updateTask(taskId, {
         status: 'failed',
-        summary: '코드 작업 실행 중 오류가 발생했습니다. 오류를 확인한 뒤 다시 실행해 주세요.',
+        summary: 'runner 워크플로 실행 중 오류가 발생했습니다. 오류를 확인한 뒤 다시 실행해 주세요.',
         result: {
           ...currentResult,
           executionProgress: buildExecutionProgress({
             phase: 'failed',
-            label: '코드 작업 실행 중 오류가 발생했습니다.',
-            currentStep: previousProgress.currentStep,
-            totalSteps: previousProgress.totalSteps,
-            reviewRound: previousProgress.reviewRound,
-            reviewTotalRounds: previousProgress.reviewTotalRounds
+            label: 'runner 워크플로 실행 중 오류가 발생했습니다.',
+            currentStep: toInteger(previousProgress.currentStep, 0),
+            totalSteps: toInteger(previousProgress.totalSteps, CODE_EXECUTION_TOTAL_STEPS),
+            gate: GATE_VALUES.includes(previousProgress.gate as RunnerGate) ? previousProgress.gate : '',
+            chunkIndex: toInteger(previousProgress.chunkIndex, 0),
+            chunkTotal: toInteger(previousProgress.chunkTotal, 0)
           })
         },
         lastError: formattedError
@@ -2093,6 +2391,113 @@ export function createCodeExecutionDomain({
     });
 
     return { started: true };
+  }
+
+  async function runTask(taskId, options: { resumeFromCheckpoint?: boolean } = {}) {
+    const task = repo.getTask(taskId);
+    if (!task || task.domain !== 'code_execution') {
+      throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
+    }
+    const fromStage: RunnerStage = options.resumeFromCheckpoint ? resolveResumeStage(task) : 'workspace';
+    return launchRun(taskId, fromStage);
+  }
+
+  async function approveGate(taskId, options: { gate?: string; decision?: string; feedback?: string } = {}) {
+    const task = repo.getTask(taskId);
+    if (!task || task.domain !== 'code_execution') {
+      throw new Error(`작업을 찾을 수 없습니다: ${taskId}`);
+    }
+    const currentGate = normalizeWhitespace(asRecord(asRecord(task.result).executionProgress).gate);
+    const requestedGate = normalizeWhitespace(options.gate) || currentGate;
+    if (normalizeTaskStatus(task.status) !== 'awaiting_approval' || !GATE_VALUES.includes(currentGate as RunnerGate)) {
+      throw new Error('현재 승인 가능한 게이트가 없습니다');
+    }
+    if (requestedGate !== currentGate) {
+      throw new Error(`현재 대기 중인 게이트가 아닙니다: ${requestedGate}`);
+    }
+
+    const decision = normalizeWhitespace(options.decision).toLowerCase() || 'approve';
+
+    // Gate 3(위험 변경 승인): 승인 시 위험 승인 플래그를 세우고 실행 재개, 거부 시 중단.
+    if (currentGate === 'risk') {
+      if (decision === 'reject') {
+        repo.updateTask(taskId, {
+          status: 'failed',
+          summary: '위험 변경이 거부되어 작업을 중단했습니다. 작업 브랜치를 확인한 뒤 다시 진행해 주세요.',
+          lastError: '위험 변경 거부로 중단됨'
+        });
+        repo.logExecution(taskId, 'reject_risk_gate', 'success');
+        return { started: false };
+      }
+      repo.updateTask(taskId, {
+        payload: { ...asRecord(task.payload), riskApproved: true }
+      });
+      repo.logExecution(taskId, 'approve_risk_gate', 'success');
+      return launchRun(taskId, 'execution');
+    }
+
+    // 계획 패치 승인: 승인 시 패치 요청을 계획 재생성 피드백으로 넣고 계획 게이트(Gate 2)로 되돌린다.
+    if (currentGate === 'plan_patch') {
+      if (decision === 'reject') {
+        repo.updateTask(taskId, {
+          status: 'failed',
+          summary: '계획 패치가 거부되어 작업을 중단했습니다.',
+          lastError: '계획 패치 거부로 중단됨'
+        });
+        repo.logExecution(taskId, 'reject_plan_patch', 'success');
+        return { started: false };
+      }
+      const runnerRaw = asRecord(asRecord(task.result).runner);
+      const patch = asRecord(runnerRaw.planPatchRequest);
+      const committedChunks = safeArray(runnerRaw.chunks)
+        .filter((entry) => normalizeWhitespace(asRecord(entry).status) === 'committed')
+        .map((entry) => `${normalizeWhitespace(asRecord(entry).id)}: ${normalizeWhitespace(asRecord(entry).title)}`);
+      const feedback = [
+        '실행 중 계획 불일치가 보고되어 구현 계획을 갱신합니다. 아래 패치 요청을 반영해 계획을 다시 작성하세요.',
+        `불일치 사유: ${normalizeWhitespace(patch.reason)}`,
+        `제안된 변경: ${normalizeWhitespace(patch.proposedChange)}`,
+        committedChunks.length > 0
+          ? `이미 완료(committed)된 chunk는 동일한 id와 title을 그대로 유지하고, 미완료 부분만 조정하세요: ${committedChunks.join(' | ')}`
+          : ''
+      ].filter(Boolean).join('\n');
+      repo.updateTask(taskId, {
+        payload: {
+          ...asRecord(task.payload),
+          gateFeedback: {
+            ...asRecord(asRecord(task.payload).gateFeedback),
+            plan: feedback
+          }
+        }
+      });
+      storeArtifact(taskId, 'plan_patch_history', '계획 패치 요청', {
+        ...patch,
+        committedChunks
+      });
+      repo.logExecution(taskId, 'approve_plan_patch', 'success', { request: { patch } });
+      return launchRun(taskId, 'plan');
+    }
+
+    if (decision === 'regenerate') {
+      // 사용자가 입력한 수정 요청을 payload에 저장해 다음 재생성 프롬프트에 반영한다.
+      const feedback = normalizeWhitespace(options.feedback);
+      repo.updateTask(taskId, {
+        payload: {
+          ...asRecord(task.payload),
+          gateFeedback: {
+            ...asRecord(asRecord(task.payload).gateFeedback),
+            [currentGate]: feedback
+          }
+        }
+      });
+      repo.logExecution(taskId, 'regenerate_gate', 'success', { request: { gate: currentGate, feedback } });
+      return launchRun(taskId, currentGate as RunnerStage);
+    }
+
+    repo.logExecution(taskId, 'approve_gate', 'success', { request: { gate: currentGate } });
+    if (currentGate === 'spec') {
+      return launchRun(taskId, 'plan');
+    }
+    return launchRun(taskId, 'execution');
   }
 
   async function createPullRequest(taskId, options: { branchName?: string } = {}) {
@@ -2152,8 +2557,8 @@ export function createCodeExecutionDomain({
       const pullRequestDraft = task.result?.pullRequest || buildPullRequestDraft({
         task,
         workspace,
-        reviewRounds: task.result?.reviewRounds || [],
-        commitSummary: safeArray(task.result?.commits).map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`)
+        commitSummary: safeArray(task.result?.commits).map((commit) => `${commit.subject} (${commit.sha.slice(0, 7)})`),
+        contract: asRecord(asRecord(task.result).runner).requirementContract || null
       });
       const servicePrefix = resolveServicePrefix(task, workspace);
       const branchTitleToken = toBranchTitleToken(remoteBranch);
@@ -2277,7 +2682,7 @@ export function createCodeExecutionDomain({
     },
     listProjects,
     createTask,
-    savePlanSelections,
+    approveGate,
     start: runTask,
     createPullRequest
   };

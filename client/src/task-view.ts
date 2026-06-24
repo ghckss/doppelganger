@@ -32,14 +32,17 @@ export type CodeReviewStatus = {
   progressLabel: string;
 };
 
+export type RunnerGate = '' | 'spec' | 'plan' | 'risk' | 'plan_patch';
+
 export type ExecutionProgress = {
   phase: string;
   label: string;
   currentStep: number;
   totalSteps: number;
   percent: number;
-  reviewRound: number;
-  reviewTotalRounds: number;
+  gate: RunnerGate;
+  chunkIndex: number;
+  chunkTotal: number;
 };
 
 export type DraftEditorState = {
@@ -127,26 +130,27 @@ export function getExecutionProgress(task: Task): ExecutionProgress | null {
     return null;
   }
 
+  const gateValue = asText(progress.gate);
   return {
     phase: asText(progress.phase),
     label: asText(progress.label),
     currentStep: asNumber(progress.currentStep),
     totalSteps: asNumber(progress.totalSteps),
     percent: asNumber(progress.percent),
-    reviewRound: asNumber(progress.reviewRound),
-    reviewTotalRounds: asNumber(progress.reviewTotalRounds)
+    gate: gateValue === 'spec' || gateValue === 'plan' ? gateValue : '',
+    chunkIndex: asNumber(progress.chunkIndex),
+    chunkTotal: asNumber(progress.chunkTotal)
   };
 }
 
 export function summarizeExecutionStep(progress: ExecutionProgress): string {
   const currentStep = Math.max(0, Number(progress.currentStep || 0));
-  const reviewRound = Math.max(0, Number(progress.reviewRound || 0));
-  const reviewTotalRounds = Math.max(0, Number(progress.reviewTotalRounds || 0));
-  const effectiveReviewRounds = Math.max(1, reviewTotalRounds || 1);
-  const reviewStartStep = 4;
-  const reviewEndStep = reviewStartStep + effectiveReviewRounds - 1;
-  const prDraftStep = reviewEndStep + 1;
-  const completedStep = prDraftStep + 1;
+  const chunkIndex = Math.max(0, Number(progress.chunkIndex || 0));
+  const chunkTotal = Math.max(0, Number(progress.chunkTotal || 0));
+
+  if (progress.phase === 'refinement') {
+    return '완료 후 개선 루프: 승인된 계약/계획 프레임 안의 개선점을 점검하고 추가로 반영합니다(최대 2회).';
+  }
 
   if (currentStep <= 0) {
     return '작업 대기 상태입니다. 실행이 시작되면 저장소 점검부터 순차적으로 진행됩니다.';
@@ -155,23 +159,20 @@ export function summarizeExecutionStep(progress: ExecutionProgress): string {
     return '저장소 접근 가능 여부, 기준 브랜치, 작업 브랜치 상태를 점검하고 실행 환경을 준비합니다.';
   }
   if (currentStep === 2) {
-    return '요청을 구현 가능한 작업 단위로 정리하고, 필요 시 기획/디자인 산출물을 생성합니다.';
+    return '요청을 요구사항 계약(Requirement Contract)으로 정리합니다. 승인하면 구현 계획 단계로 진행합니다.';
   }
   if (currentStep === 3) {
-    return '코딩 에이전트가 실제 코드를 수정하고 커밋 단위로 구현을 진행합니다.';
+    return '저장소를 점검해 구현 계획(Implementation Plan)과 chunk 분해를 수립합니다. 승인하면 구현을 시작합니다.';
   }
-  if (currentStep >= reviewStartStep && currentStep <= reviewEndStep) {
-    const fallbackRound = currentStep - reviewStartStep + 1;
-    const roundLabel = reviewRound > 0 && reviewTotalRounds > 0
-      ? `${reviewRound}/${reviewTotalRounds}`
-      : `${fallbackRound}/${effectiveReviewRounds}`;
-    return `리뷰 라운드 ${roundLabel} 진행 중입니다. 검토 결과에 따라 수정·재검토를 반복합니다.`;
+  if (currentStep === 4) {
+    const chunkLabel = chunkTotal > 0 ? ` (chunk ${chunkIndex}/${chunkTotal})` : '';
+    return `승인된 계획을 chunk 단위로 구현하고, 각 chunk마다 리뷰 스웜·머지 리뷰·수정을 거쳐 커밋합니다${chunkLabel}.`;
   }
-  if (currentStep === prDraftStep) {
-    return '커밋/리뷰 결과를 정리해 PR 설명(초안 제목·본문)과 제출 정보를 준비합니다.';
+  if (currentStep === 5) {
+    return '최종 검증으로 요구사항 계약·수용 기준·회귀 여부를 점검하고 PR 초안을 준비합니다.';
   }
-  if (currentStep >= completedStep) {
-    return '코드 작업이 완료되어 PR 생성 또는 후속 승인/전송 단계를 진행할 수 있습니다.';
+  if (currentStep >= 6) {
+    return 'runner 워크플로가 완료되어 PR 생성 또는 후속 승인/전송 단계를 진행할 수 있습니다.';
   }
 
   return '작업 진행 정보를 집계 중입니다.';
