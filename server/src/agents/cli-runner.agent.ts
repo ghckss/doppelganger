@@ -226,6 +226,24 @@ function createTempDir(provider = 'agent') {
   return fs.mkdtempSync(path.join(os.tmpdir(), `doppelganger-${provider}-`));
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+// API 일시 오류(인증 블립/과부하/레이트리밋/5xx/타임아웃)는 재시도로 해소되는 경우가 많다.
+function isTransientCliFailure(result: RunExecResult): boolean {
+  if (!result || result.code === 0) {
+    return false;
+  }
+  if (result.timedOut) {
+    return true;
+  }
+  const blob = `${result.stdout || ''}\n${result.stderr || ''}`.toLowerCase();
+  return /(\b(401|408|409|425|429|500|502|503|504|529)\b)|invalid authentication credentials|failed to authenticate|overloaded|rate.?limit|too many requests|temporarily unavailable|service unavailable|timed? ?out|econnreset|etimedout|enotfound|fetch failed|socket hang up|api error/.test(blob);
+}
+
 class AgentCliRunner {
   config: RunnerConfig;
   workspaceRunner: {
@@ -267,6 +285,10 @@ class AgentCliRunner {
       if (schemaFile) {
         args.push('--output-schema', schemaFile);
       }
+      // 설치된 'runner' 스킬이 자동 트리거되어 단일 단계 호출을 다단계 워크플로로 하이재킹하면
+      // (StructuredOutput 툴로 JSON을 보내고 마지막 메시지는 산문) --output-schema가 무시되고 파싱이 깨진다.
+      // 각 호출은 워크플로의 한 단계이므로 codex skills.config로 runner 스킬을 비활성화한다.
+      args.push('-c', 'skills.config=[{name="runner", enabled=false}]');
 
       if (sandboxMode === 'workspace-write') {
         args.push('--full-auto');
@@ -276,24 +298,32 @@ class AgentCliRunner {
       args.push('-');
     } else {
       args.push('-p');
-      if (schema) {
-        args.push('--json-schema', JSON.stringify(schema));
-      }
+      // 주의: Claude의 --json-schema(StructuredOutput 채널)는 긴 도구 사용 세션 후
+      // error_max_structured_output_retries로 자주 실패한다. 대신 프롬프트에서 "JSON만 출력"을 지시하고
+      // 일반 텍스트 응답에서 JSON을 파싱한다(extractJsonObject). 스킬 자동 실행은 비활성화한다.
+      args.push('--disable-slash-commands');
       // Claude CLI has no codex-style sandbox flags. Use non-interactive permission mode
       // so automation can proceed without blocking prompts.
       args.push('--permission-mode', 'bypassPermissions');
       args.push('-');
     }
 
-    const startedAt = Date.now();
-    logCommandStart({
-      source: `agent:${this.provider}`,
-      command: this.command,
-      args,
-      cwd
-    });
+    // API 일시 오류(인증 블립/과부하/레이트리밋/5xx/타임아웃)는 백오프 후 재시도한다.
+    const maxAttempts = 3;
+    let result: RunExecResult | null = null;
+    let startedAt = Date.now();
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      startedAt = Date.now();
+      logCommandStart({
+        source: `agent:${this.provider}`,
+        command: this.command,
+        args,
+        cwd
+      });
 
-    const result: RunExecResult = await new Promise((resolve, reject) => {
+      let attemptResult: RunExecResult;
+      try {
+        attemptResult = await new Promise<RunExecResult>((resolve, reject) => {
       const child = spawn(this.command, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe']
@@ -384,7 +414,35 @@ class AgentCliRunner {
       });
 
       child.stdin.end(prompt);
-    });
+        });
+      } catch (spawnError) {
+        // spawn 단계 실패(EPIPE 제외)도 일시적일 수 있으므로 재시도.
+        if (attempt < maxAttempts) {
+          await sleep(attempt * 2000);
+          continue;
+        }
+        throw spawnError;
+      }
+
+      result = attemptResult;
+      if (!isTransientCliFailure(attemptResult) || attempt >= maxAttempts) {
+        break;
+      }
+      logCommandEnd({
+        source: `agent:${this.provider}`,
+        command: this.command,
+        args,
+        cwd,
+        code: attemptResult.code,
+        durationMs: Date.now() - startedAt,
+        error: `transient failure, retrying (attempt ${attempt}/${maxAttempts})`
+      });
+      await sleep(attempt * 2000);
+    }
+
+    if (!result) {
+      throw new Error('CLI 실행 결과를 얻지 못했습니다');
+    }
 
     const rawStdout = String(result.stdout || '');
     const stdout = truncateOutput(result.stdout);
@@ -432,7 +490,9 @@ class AgentCliRunner {
       throw error;
     }
 
-    let parsed = null;
+    // 모든 provider 동일: 스키마가 있으면 마지막 메시지/텍스트에서 JSON을 추출·검증한다.
+    // (Claude도 --json-schema 대신 프롬프트의 "JSON only" 지시 + 텍스트 파싱을 사용한다.)
+    let parsed: Record<string, unknown> | null = null;
     if (schema) {
       try {
         parsed = extractJsonObject(parseSource, schema);

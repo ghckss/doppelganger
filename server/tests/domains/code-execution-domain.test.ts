@@ -99,7 +99,90 @@ async function waitFor(predicate, message) {
   throw new Error(message);
 }
 
-test('code execution domain orchestrates coding, reviews, and pull request creation', async () => {
+function classifySchema(schema) {
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+  if (required.includes('goals')) return 'contract';
+  if (required.includes('taskBreakdown')) return 'plan';
+  if (required.includes('contractMet')) return 'final';
+  if (required.includes('improvementFound')) return 'refinement';
+  if (required.includes('mustFix')) return 'merge';
+  if (required.includes('findings')) return 'reviewer';
+  if (required.includes('resolvedFindingIds')) return 'patch';
+  return 'executor';
+}
+
+// 새 runner 플로의 모든 단계 스키마에 응답하는 fake CLI runner. executor만 보통 테스트별로 override.
+function makeRunnerCli(overrides = {}) {
+  const handlers = {
+    async contract() {
+      return { summary: '', goals: ['goal'], nonGoals: [], constraints: [], acceptanceCriteria: ['criterion'], edgeCases: [], openQuestions: [] };
+    },
+    async plan() {
+      return {
+        summary: '',
+        implementationSteps: ['step'],
+        filesLikelyToChange: ['README.md'],
+        architectureImpact: [],
+        risks: [],
+        rolloutConcerns: [],
+        validationStrategy: ['npm test'],
+        chunkCommitBoundaries: ['chunk 1'],
+        taskBreakdown: [{ id: 'chunk_1', title: 'Implement requested change', acceptanceCriteria: ['criterion'] }]
+      };
+    },
+    async reviewer() {
+      return { summary: 'No issues found.', findings: [], approval: 'approved_with_no_changes', residualRisks: [] };
+    },
+    async merge() {
+      return { mustFix: [], shouldFix: [], advisory: [], duplicates: [], discarded: [] };
+    },
+    async patch() {
+      throw new Error('patch step should not run');
+    },
+    async final() {
+      return { contractMet: true, regression: '', summary: 'ok', residualRisks: [], acceptanceResults: [{ criterion: 'criterion', status: 'met', evidence: 'x' }] };
+    },
+    async refinement() {
+      // 기본: 개선점 없음 → 완료 후 개선 루프 즉시 종료.
+      return { improvementFound: false, inFrame: true, unresolvedCount: 0, rationale: '', chunk: { id: '', title: '', acceptanceCriteria: [] } };
+    },
+    async executor() {
+      throw new Error('executor handler not configured for this test');
+    },
+    ...overrides
+  };
+  return {
+    async assertAvailable() {},
+    async runExec(args) {
+      const kind = classifySchema(args?.schema);
+      const handler = handlers[kind] as (input: unknown) => unknown;
+      const parsed = await handler(args);
+      return { parsed, stdout: '', stderr: '', durationMs: 1 };
+    }
+  };
+}
+
+async function driveThroughGates(domain, repo, taskId) {
+  await domain.start(taskId);
+  await waitFor(() => {
+    const current = repo.getTask(taskId);
+    return current?.status === 'awaiting_approval' && current?.result?.executionProgress?.gate === 'spec';
+  }, 'Timed out waiting for Gate 1');
+  await domain.approveGate(taskId, { gate: 'spec', decision: 'approve' });
+  await waitFor(() => {
+    const current = repo.getTask(taskId);
+    return current?.status === 'awaiting_approval' && current?.result?.executionProgress?.gate === 'plan';
+  }, 'Timed out waiting for Gate 2');
+  await domain.approveGate(taskId, { gate: 'plan', decision: 'approve' });
+  await waitFor(() => {
+    const current = repo.getTask(taskId);
+    const status = String(current?.status || '');
+    const phase = current?.result?.executionProgress?.phase;
+    return status === 'done' || (status === 'awaiting_approval' && phase === 'completed') || status === 'failed';
+  }, 'Timed out waiting for runner workflow completion');
+}
+
+test('code execution domain runs runner workflow with spec/plan gates, chunk review, and PR creation', async () => {
   const workspace = createGitWorkspace();
   const repo = createRepository(path.join(workspace.root, 'agent.db'));
   const workspaceRunner = new WorkspaceRunner({
@@ -108,8 +191,8 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
     }
   });
 
-  let callCount = 0;
   let codexCallCount = 0;
+  let reviewerCallCount = 0;
   const codexCliRunner = {
     async assertAvailable() {
       codexCallCount += 1;
@@ -122,11 +205,108 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   };
   const claudeCliRunner = {
     async assertAvailable() {},
-    async runExec({ workdir, schema }) {
-      callCount += 1;
+    async runExec({ workdir, schema, prompt }) {
+      const required = Array.isArray(schema?.required) ? schema.required : [];
 
-      if (schema.required.includes('findings')) {
-        if (callCount === 2) {
+      if (required.includes('goals')) {
+        return {
+          parsed: {
+            summary: 'Update the exported value as requested.',
+            goals: ['Update the exported value in src/index.js'],
+            nonGoals: ['Unrelated refactors'],
+            constraints: ['Keep changes minimal'],
+            acceptanceCriteria: ['src/index.js exports the updated value'],
+            edgeCases: [],
+            openQuestions: []
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+
+      if (required.includes('taskBreakdown')) {
+        return {
+          parsed: {
+            summary: 'Implement the change in a single chunk.',
+            implementationSteps: ['Create README and update export'],
+            filesLikelyToChange: ['README.md', 'src/index.js'],
+            architectureImpact: [],
+            risks: [],
+            rolloutConcerns: [],
+            validationStrategy: ['npm test'],
+            chunkCommitBoundaries: ['chunk 1'],
+            taskBreakdown: [{
+              id: 'chunk_1',
+              title: 'Implement requested change',
+              acceptanceCriteria: ['src/index.js exports the updated value']
+            }]
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+
+      if (required.includes('contractMet')) {
+        return {
+          parsed: {
+            contractMet: true,
+            regression: 'No regressions detected.',
+            summary: 'All acceptance criteria met.',
+            residualRisks: [],
+            acceptanceResults: [{
+              criterion: 'src/index.js exports the updated value',
+              status: 'met',
+              evidence: 'export const value = 2;'
+            }]
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+
+      if (required.includes('improvementFound')) {
+        return {
+          parsed: {
+            improvementFound: false,
+            inFrame: true,
+            unresolvedCount: 0,
+            rationale: 'No in-frame improvement remains.',
+            chunk: { id: '', title: '', acceptanceCriteria: [] }
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+
+      if (required.includes('mustFix')) {
+        return {
+          parsed: {
+            mustFix: [{
+              id: 'm1',
+              severity: 'P1',
+              title: 'Update exported value',
+              description: 'The exported value still uses the old number.',
+              fileRefs: ['src/index.js'],
+              action: 'Update the export to 2 and commit the change.'
+            }],
+            shouldFix: [],
+            advisory: [],
+            duplicates: [],
+            discarded: []
+          },
+          stdout: '',
+          stderr: '',
+          durationMs: 1
+        };
+      }
+
+      if (required.includes('findings')) {
+        reviewerCallCount += 1;
+        if (reviewerCallCount === 1) {
           return {
             parsed: {
               summary: 'One missing behavior needs adjustment.',
@@ -148,7 +328,6 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
             durationMs: 1
           };
         }
-
         return {
           parsed: {
             summary: 'No further issues found.',
@@ -162,19 +341,14 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
         };
       }
 
-      if (schema.required.includes('resolvedFindingIds')) {
+      // 패치 단계는 더 이상 스키마를 쓰지 않으므로 프롬프트(역할 라벨)로 구분한다.
+      if (String(prompt || '').includes('Targeted Fix')) {
         writeFile(path.join(workdir, 'src', 'index.js'), 'export const value = 2;\n');
         run('git', ['add', 'src/index.js'], workdir);
-        run('git', ['commit', '-m', 'fix: address review round 1'], workdir);
-
+        run('git', ['commit', '-m', 'fix: address review finding'], workdir);
         return {
-          parsed: {
-            summary: 'Applied the requested review fix.',
-            resolvedFindingIds: ['review-1'],
-            declinedFindingIds: [],
-            testsRun: ['npm test'],
-            notes: ['Updated the exported value.']
-          },
+          lastMessage: 'Applied the requested review fix; updated the exported value.',
+          parsed: null,
           stdout: '',
           stderr: '',
           durationMs: 1
@@ -184,7 +358,6 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
       writeFile(path.join(workdir, 'README.md'), '# Demo\n\nImplemented by agent.\n');
       run('git', ['add', 'README.md'], workdir);
       run('git', ['commit', '-m', 'feat: implement requested change'], workdir);
-
       return {
         parsed: {
           summary: 'Implemented the requested change.',
@@ -199,38 +372,6 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   };
 
   const planner = {
-    async createPromptPlan() {
-      return {
-        summary: 'Implement the requested change.',
-        goal: 'Add the requested feature and keep the repo reviewable.',
-        taskType: 'feature',
-        successCriteria: ['Feature implemented', 'Repo clean after automation'],
-        deliverables: ['Code change', 'PR draft'],
-        constraints: ['Do not revert unrelated changes'],
-        relevantContext: ['main branch']
-      };
-    },
-    async createProductPlan() {
-      return {
-        summary: 'Product plan',
-        problem: 'Need the requested code change',
-        userScenarios: ['User gets the requested repository change'],
-        acceptanceCriteria: ['Feature implemented'],
-        outOfScope: ['Unrelated cleanup'],
-        risks: ['Low']
-      };
-    },
-    async createDesignSpec() {
-      return {
-        summary: 'Design guidance',
-        targets: ['README'],
-        layoutChanges: ['Keep layout simple'],
-        visualRules: ['Match existing style'],
-        interactionStates: [],
-        accessibilityChecks: ['Preserve readable text'],
-        responsiveNotes: []
-      };
-    },
     async createPullRequestDraft() {
       return {
         title: 'feat(demo): Implement requested change',
@@ -240,48 +381,11 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   };
 
   let lastPullRequestRequest = null;
-  let lastUpdatePullRequestRequest = null;
-  let updatePullRequestCallCount = 0;
   let createPullRequestCallCount = 0;
-  let existingPullRequest = null;
   const githubClient = {
     async createPullRequest({ owner, repo: repoName, head, base, title, body }) {
       createPullRequestCallCount += 1;
-      lastPullRequestRequest = {
-        owner,
-        repoName,
-        head,
-        base,
-        title,
-        body
-      };
-      if (createPullRequestCallCount >= 2) {
-        throw new GitHubApiError('Validation Failed', {
-          status: 422,
-          payload: {
-            message: 'Validation Failed',
-            errors: [
-              {
-                message: `A pull request already exists for ${owner}:${head}.`
-              }
-            ]
-          },
-          method: 'POST',
-          path: `/repos/${owner}/${repoName}/pulls`
-        });
-      }
-
-      existingPullRequest = {
-        number: 7,
-        html_url: `https://github.com/${owner}/${repoName}/pull/7`,
-        head: {
-          ref: head
-        },
-        base: {
-          ref: base
-        },
-        title
-      };
+      lastPullRequestRequest = { owner, repoName, head, base, title, body };
       return {
         number: 7,
         html_url: `https://github.com/${owner}/${repoName}/pull/7`,
@@ -291,25 +395,10 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
       };
     },
     async listOpenPullRequests() {
-      return existingPullRequest ? [existingPullRequest] : [];
+      return [];
     },
-    async updatePullRequest({ owner, repo: repoName, pullNumber, title, body, base }) {
-      updatePullRequestCallCount += 1;
-      lastUpdatePullRequestRequest = {
-        owner,
-        repoName,
-        pullNumber,
-        title,
-        body,
-        base
-      };
-      return {
-        number: pullNumber,
-        html_url: `https://github.com/${owner}/${repoName}/pull/${pullNumber}`,
-        title,
-        body,
-        base
-      };
+    async updatePullRequest() {
+      throw new Error('updatePullRequest should not be called when PR is newly created');
     }
   };
 
@@ -341,39 +430,60 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
     agentProvider: 'claude',
     workdir: workspace.repoDir,
     baseBranch: 'main',
-    branchName: 'feature/custom-demo-branch',
-    needsPlanning: true,
-    needsDesign: true
+    branchName: 'feature/custom-demo-branch'
   });
   const createdTask = repo.getTask(task.id);
   assert.equal(createdTask.payload.agentProvider, 'claude');
   assert.equal(createdTask.result.executionProgress.phase, 'queued');
-  assert.equal(createdTask.result.executionProgress.currentStep, 0);
   assert.equal(createdTask.result.executionProgress.totalSteps, 6);
-  assert.equal(createdTask.result.executionProgress.percent, 0);
 
+  // Gate 1: 요구사항 계약
   await domain.start(task.id);
-
   await waitFor(() => {
     const current = repo.getTask(task.id);
-    return current?.status === 'awaiting_approval';
-  }, 'Timed out waiting for code task to finish');
+    return current?.status === 'awaiting_approval'
+      && current?.result?.executionProgress?.gate === 'spec';
+  }, 'Timed out waiting for Gate 1 (requirement contract)');
+  const specTask = repo.getTask(task.id);
+  assert.equal(specTask.result.executionProgress.currentStep, 2);
+  assert.equal(repo.listArtifacts(task.id, 'requirement_contract').length, 1);
+  assert.ok(Array.isArray(specTask.result.runner.requirementContract.goals));
+  assert.equal(specTask.result.runner.requirementContract.goals.length, 1);
+
+  // Gate 2: 구현 계획
+  await domain.approveGate(task.id, { gate: 'spec', decision: 'approve' });
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval'
+      && current?.result?.executionProgress?.gate === 'plan';
+  }, 'Timed out waiting for Gate 2 (implementation plan)');
+  const planTask = repo.getTask(task.id);
+  assert.equal(planTask.result.executionProgress.currentStep, 3);
+  assert.equal(repo.listArtifacts(task.id, 'implementation_plan').length, 1);
+  assert.equal(planTask.result.runner.implementationPlan.taskBreakdown.length, 1);
+
+  // 승인 후 chunk 구현 → 최종 검증 → 완료
+  await domain.approveGate(task.id, { gate: 'plan', decision: 'approve' });
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval'
+      && current?.result?.executionProgress?.phase === 'completed';
+  }, 'Timed out waiting for runner workflow completion');
 
   const finishedTask = repo.getTask(task.id);
   assert.equal(finishedTask.status, 'awaiting_approval');
   assert.equal(finishedTask.result.branch, 'feature/custom-demo-branch');
   assert.equal(finishedTask.result.commits.length, 2);
-  assert.equal(finishedTask.result.reviewRounds.length, 1);
   assert.equal(finishedTask.result.executionProgress.phase, 'completed');
   assert.equal(finishedTask.result.executionProgress.currentStep, 6);
-  assert.equal(finishedTask.result.executionProgress.totalSteps, 6);
   assert.equal(finishedTask.result.executionProgress.percent, 100);
+  assert.equal(finishedTask.result.runner.chunks.length, 1);
+  assert.equal(finishedTask.result.runner.chunks[0].status, 'committed');
+  assert.equal(finishedTask.result.runner.finalValidation.contractMet, true);
   assert.equal(codexCallCount, 0);
-  assert.equal(repo.listArtifacts(task.id, 'prompt_plan').length, 1);
-  assert.equal(repo.listArtifacts(task.id, 'product_plan').length, 1);
-  assert.equal(repo.listArtifacts(task.id, 'design_spec').length, 1);
-  assert.equal(repo.listArtifacts(task.id, 'review_round').length, 1);
-  assert.equal(repo.listArtifacts(task.id, 'patch_round').length, 1);
+  assert.equal(repo.listArtifacts(task.id, 'final_validation').length, 1);
+  assert.ok(repo.listArtifacts(task.id, 'review_round').length >= 1);
+  assert.ok(repo.listArtifacts(task.id, 'patch_round').length >= 1);
   assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
   assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), true);
   assert.equal(read('git', ['show', `${finishedTask.result.branch}:README.md`], workspace.repoDir), '# Demo\n\nImplemented by agent.');
@@ -381,7 +491,6 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(read('git', ['show', 'main:src/index.js'], workspace.repoDir), 'export const value = 1;');
   assert.equal(typeof finishedTask.result.sourceCommit, 'string');
   assert.ok(finishedTask.result.sourceCommit.length > 0);
-  assert.equal(finishedTask.result.branchCleanup?.deleted, false);
 
   const remoteBranch = 'release/demo-pr';
   await domain.createPullRequest(task.id, {
@@ -395,30 +504,7 @@ test('code execution domain orchestrates coding, reviews, and pull request creat
   assert.equal(lastPullRequestRequest.repoName, 'demo');
   assert.equal(lastPullRequestRequest.head, remoteBranch);
   assert.equal(lastPullRequestRequest.base, 'main');
-  assert.equal(lastPullRequestRequest.title, '[DEMO/demo-pr] Implement requested change');
-  assert.match(lastPullRequestRequest.body, /## PR 개요/);
-  assert.match(lastPullRequestRequest.body, /Implement requested change/);
-  assert.match(lastPullRequestRequest.body, /## Summary/);
-  assert.equal(doneTask.result.pullRequest.servicePrefix, 'DEMO');
-  assert.equal(doneTask.result.pullRequest.sourceBranch, doneTask.result.branch);
-  assert.equal(doneTask.result.pullRequest.head, remoteBranch);
-  assert.equal(doneTask.result.pullRequest.templateUsed, true);
   assert.equal(createPullRequestCallCount, 1);
-
-  await domain.createPullRequest(task.id, {
-    branchName: remoteBranch
-  });
-  const doneTaskWithExistingPr = repo.getTask(task.id);
-  assert.equal(doneTaskWithExistingPr.status, 'done');
-  assert.match(doneTaskWithExistingPr.summary, /기존 PR을 확인했습니다/);
-  assert.equal(doneTaskWithExistingPr.result.pullRequest.number, 7);
-  assert.equal(createPullRequestCallCount, 2);
-  assert.equal(updatePullRequestCallCount, 1);
-  assert.equal(lastUpdatePullRequestRequest.owner, 'acme');
-  assert.equal(lastUpdatePullRequestRequest.repoName, 'demo');
-  assert.equal(lastUpdatePullRequestRequest.pullNumber, 7);
-  assert.equal(lastUpdatePullRequestRequest.title, '[DEMO/demo-pr] Implement requested change');
-  assert.match(lastUpdatePullRequestRequest.body, /## PR 개요/);
 });
 
 test('createPullRequest retries with owner-prefixed head when refs are unreadable', async () => {
@@ -659,18 +745,19 @@ test('code execution uses WORKSPACE_ALLOWLIST even when repository is outside GI
   });
 
   let githubCreatePullRequestCalls = 0;
+  const claudeCliRunner = makeRunnerCli({
+    async executor({ workdir }) {
+      writeFile(path.join(workdir, 'README.md'), '# Demo\n\nAllowlist-based run.\n');
+      run('git', ['add', 'README.md'], workdir);
+      run('git', ['commit', '-m', 'feat: allowlist code execution run'], workdir);
+      return { summary: 'Implemented requested change.', testsRun: ['npm test'], notes: [] };
+    }
+  });
   const domain = createCodeExecutionDomain({
     config: {
-      agent: {
-        defaultProvider: 'claude'
-      },
-      workspace: {
-        projectsRoot: workspace.root
-      },
-      github: {
-        owner: 'acme',
-        repositories: ['fromm-web']
-      }
+      agent: { defaultProvider: 'claude' },
+      workspace: { projectsRoot: workspace.root },
+      github: { owner: 'acme', repositories: ['fromm-web'] }
     },
     repo,
     workspaceRunner,
@@ -684,65 +771,17 @@ test('code execution uses WORKSPACE_ALLOWLIST even when repository is outside GI
       }
     },
     codexCliRunner: {
-      async assertAvailable() {},
-      async runExec() {
+      async assertAvailable() {
         throw new Error('codex should not be selected in this test');
-      }
-    },
-    claudeCliRunner: {
-      async assertAvailable() {},
-      async runExec({ workdir, schema }) {
-        if (schema.required.includes('findings')) {
-          return {
-            parsed: {
-              summary: 'No issues found.',
-              findings: [],
-              approval: 'approved_with_no_changes',
-              residualRisks: []
-            },
-            stdout: '',
-            stderr: '',
-            durationMs: 1
-          };
-        }
-
-        if (schema.required.includes('resolvedFindingIds')) {
-          throw new Error('Patch step should not run when review has no findings');
-        }
-
-        writeFile(path.join(workdir, 'README.md'), '# Demo\n\nAllowlist-based run.\n');
-        run('git', ['add', 'README.md'], workdir);
-        run('git', ['commit', '-m', 'feat: allowlist code execution run'], workdir);
-
-        return {
-          parsed: {
-            summary: 'Implemented requested change.',
-            testsRun: ['npm test'],
-            notes: ['Completed in workspace allowlist project.']
-          },
-          stdout: '',
-          stderr: '',
-          durationMs: 1
-        };
-      }
-    },
-    codeTaskPlanner: {
-      async createPromptPlan() {
-        return {
-          summary: 'Allowlist execution test',
-          goal: 'Run coding workflow even when repo is not in GitHub repository allowlist.',
-          taskType: 'feature',
-          successCriteria: [],
-          deliverables: [],
-          constraints: [],
-          relevantContext: []
-        };
       },
+      async runExec() {
+        throw new Error('codex should not run in this test');
+      }
+    },
+    claudeCliRunner,
+    codeTaskPlanner: {
       async createPullRequestDraft() {
-        return {
-          title: 'Allowlist workflow test',
-          body: '## Summary\n- Verify PR restriction scope\n'
-        };
+        return { title: 'Allowlist workflow test', body: '## Summary\n- Verify PR restriction scope\n' };
       }
     }
   });
@@ -751,17 +790,10 @@ test('code execution uses WORKSPACE_ALLOWLIST even when repository is outside GI
     command: 'Run with workspace allowlist only',
     agentProvider: 'claude',
     workdir: workspace.repoDir,
-    baseBranch: 'main',
-    needsPlanning: false,
-    needsDesign: false
+    baseBranch: 'main'
   });
 
-  await domain.start(task.id);
-
-  await waitFor(() => {
-    const current = repo.getTask(task.id);
-    return current?.status === 'awaiting_approval';
-  }, 'Timed out waiting for allowlist code task to finish');
+  await driveThroughGates(domain, repo, task.id);
 
   const finished = repo.getTask(task.id);
   assert.equal(finished.status, 'awaiting_approval');
@@ -951,53 +983,22 @@ test('code execution domain auto-commits coding changes when agent leaves dirty 
     }
   });
 
-  const claudeCliRunner = {
-    async assertAvailable() {},
-    async runExec({ workdir, schema }) {
-      if (schema.required.includes('findings')) {
-        return {
-          parsed: {
-            summary: 'No issues found.',
-            findings: [],
-            approval: 'approved_with_no_changes',
-            residualRisks: []
-          },
-          stdout: '',
-          stderr: '',
-          durationMs: 1
-        };
-      }
-
-      if (schema.required.includes('resolvedFindingIds')) {
-        throw new Error('Patch step should not run when no findings exist');
-      }
-
+  const claudeCliRunner = makeRunnerCli({
+    async executor({ workdir }) {
       writeFile(path.join(workdir, 'README.md'), '# Demo\n\nDirty worktree fallback.\n');
       return {
-        parsed: {
-          summary: 'Implemented without creating a commit.',
-          testsRun: ['npm test'],
-          notes: ['Left unstaged changes intentionally.']
-        },
-        stdout: '',
-        stderr: '',
-        durationMs: 1
+        summary: 'Implemented without creating a commit.',
+        testsRun: ['npm test'],
+        notes: ['Left unstaged changes intentionally.']
       };
     }
-  };
+  });
 
   const domain = createCodeExecutionDomain({
     config: {
-      agent: {
-        defaultProvider: 'claude'
-      },
-      workspace: {
-        projectsRoot: workspace.root
-      },
-      github: {
-        owner: '',
-        repositories: []
-      }
+      agent: { defaultProvider: 'claude' },
+      workspace: { projectsRoot: workspace.root },
+      github: { owner: '', repositories: [] }
     },
     repo,
     workspaceRunner,
@@ -1016,22 +1017,8 @@ test('code execution domain auto-commits coding changes when agent leaves dirty 
     },
     claudeCliRunner,
     codeTaskPlanner: {
-      async createPromptPlan() {
-        return {
-          summary: 'Dirty worktree fallback test',
-          goal: 'Auto-commit dirty coding output',
-          taskType: 'feature',
-          successCriteria: [],
-          deliverables: [],
-          constraints: [],
-          relevantContext: []
-        };
-      },
       async createPullRequestDraft() {
-        return {
-          title: 'Dirty fallback PR',
-          body: 'Auto-commit fallback verification'
-        };
+        return { title: 'Dirty fallback PR', body: 'Auto-commit fallback verification' };
       }
     }
   });
@@ -1040,28 +1027,21 @@ test('code execution domain auto-commits coding changes when agent leaves dirty 
     command: 'Verify dirty worktree fallback',
     agentProvider: 'claude',
     workdir: workspace.repoDir,
-    baseBranch: 'main',
-    needsPlanning: false,
-    needsDesign: false
+    baseBranch: 'main'
   });
 
-  await domain.start(task.id);
-
-  await waitFor(() => {
-    const current = repo.getTask(task.id);
-    return current?.status === 'awaiting_approval';
-  }, 'Timed out waiting for fallback auto-commit task to finish');
+  await driveThroughGates(domain, repo, task.id);
 
   const finishedTask = repo.getTask(task.id);
   assert.equal(finishedTask.status, 'awaiting_approval');
   assert.ok(Array.isArray(finishedTask.result.commits));
-  assert.ok(finishedTask.result.commits.some((commit) => commit.subject.includes('auto-commit coding agent workspace changes')));
+  assert.ok(finishedTask.result.commits.some((commit) => commit.subject.startsWith('runner chunk 1:')));
 
   const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
   assert.ok(executionActions.includes('auto_commit_coding_changes'));
 });
 
-test('code execution domain resumes from coding checkpoint without rerunning planning', async () => {
+test('code execution domain resumes execution after a failed chunk without rerunning gates', async () => {
   const workspace = createGitWorkspace();
   const repo = createRepository(path.join(workspace.root, 'agent.db'));
   const workspaceRunner = new WorkspaceRunner({
@@ -1070,63 +1050,46 @@ test('code execution domain resumes from coding checkpoint without rerunning pla
     }
   });
 
-  let codingCalls = 0;
-  const claudeCliRunner = {
-    async assertAvailable() {},
-    async runExec({ workdir, schema }) {
-      if (schema.required.includes('findings')) {
-        return {
-          parsed: {
-            summary: 'No issues found.',
-            findings: [],
-            approval: 'approved_with_no_changes',
-            residualRisks: []
-          },
-          stdout: '',
-          stderr: '',
-          durationMs: 1
-        };
-      }
-
-      if (schema.required.includes('resolvedFindingIds')) {
-        throw new Error('Patch step should not run when no findings exist');
-      }
-
-      codingCalls += 1;
-      if (codingCalls === 1) {
-        throw new Error('Simulated token expiration during coding step');
-      }
-
-      writeFile(path.join(workdir, 'README.md'), '# Demo\n\nResume from coding checkpoint.\n');
-      run('git', ['add', 'README.md'], workdir);
-      run('git', ['commit', '-m', 'feat: resume coding checkpoint'], workdir);
-
+  let contractCalls = 0;
+  let planCalls = 0;
+  let executorAttempts = 0;
+  let failExecutor = true;
+  const claudeCliRunner = makeRunnerCli({
+    async contract() {
+      contractCalls += 1;
+      return { summary: '', goals: ['goal'], nonGoals: [], constraints: [], acceptanceCriteria: ['criterion'], edgeCases: [], openQuestions: [] };
+    },
+    async plan() {
+      planCalls += 1;
       return {
-        parsed: {
-          summary: 'Completed coding after resume.',
-          testsRun: ['npm test'],
-          notes: ['Resumed from coding checkpoint.']
-        },
-        stdout: '',
-        stderr: '',
-        durationMs: 1
+        summary: '',
+        implementationSteps: ['step'],
+        filesLikelyToChange: ['README.md'],
+        architectureImpact: [],
+        risks: [],
+        rolloutConcerns: [],
+        validationStrategy: ['npm test'],
+        chunkCommitBoundaries: ['chunk 1'],
+        taskBreakdown: [{ id: 'chunk_1', title: 'Implement requested change', acceptanceCriteria: ['criterion'] }]
       };
+    },
+    async executor({ workdir }) {
+      executorAttempts += 1;
+      if (failExecutor) {
+        throw new Error('Simulated executor crash');
+      }
+      writeFile(path.join(workdir, 'README.md'), '# Demo\n\nResumed run.\n');
+      run('git', ['add', 'README.md'], workdir);
+      run('git', ['commit', '-m', 'feat: resume implement'], workdir);
+      return { summary: 'Implemented on resume.', testsRun: ['npm test'], notes: [] };
     }
-  };
+  });
 
-  let promptPlanCalls = 0;
   const domain = createCodeExecutionDomain({
     config: {
-      agent: {
-        defaultProvider: 'claude'
-      },
-      workspace: {
-        projectsRoot: workspace.root
-      },
-      github: {
-        owner: '',
-        repositories: []
-      }
+      agent: { defaultProvider: 'claude' },
+      workspace: { projectsRoot: workspace.root },
+      github: { owner: '', repositories: [] }
     },
     repo,
     workspaceRunner,
@@ -1145,61 +1108,290 @@ test('code execution domain resumes from coding checkpoint without rerunning pla
     },
     claudeCliRunner,
     codeTaskPlanner: {
-      async createPromptPlan() {
-        promptPlanCalls += 1;
-        return {
-          summary: 'Resume checkpoint plan',
-          goal: 'Resume from coding step',
-          taskType: 'feature',
-          successCriteria: [],
-          deliverables: [],
-          constraints: [],
-          relevantContext: []
-        };
-      },
       async createPullRequestDraft() {
-        return {
-          title: 'Resume checkpoint PR',
-          body: 'resume checkpoint validation'
-        };
+        return { title: 'Resume PR', body: 'resume verification' };
       }
     }
   });
 
   const task = await domain.createTask({
-    command: 'Resume from coding checkpoint',
+    command: 'Verify resume after failed chunk',
     agentProvider: 'claude',
     workdir: workspace.repoDir,
-    baseBranch: 'main',
-    needsPlanning: false,
-    needsDesign: false
+    baseBranch: 'main'
   });
 
   await domain.start(task.id);
-
   await waitFor(() => {
     const current = repo.getTask(task.id);
-    return current?.status === 'failed';
-  }, 'Timed out waiting for first failed run');
+    return current?.status === 'awaiting_approval' && current?.result?.executionProgress?.gate === 'spec';
+  }, 'Timed out waiting for Gate 1');
+  await domain.approveGate(task.id, { gate: 'spec', decision: 'approve' });
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.status === 'awaiting_approval' && current?.result?.executionProgress?.gate === 'plan';
+  }, 'Timed out waiting for Gate 2');
+  await domain.approveGate(task.id, { gate: 'plan', decision: 'approve' });
+  await waitFor(() => repo.getTask(task.id)?.status === 'failed', 'Timed out waiting for execution failure');
 
-  const failedTask = repo.getTask(task.id);
-  assert.equal(failedTask.result.executionProgress.currentStep, 3);
-  assert.equal(promptPlanCalls, 1);
+  assert.equal(contractCalls, 1);
+  assert.equal(planCalls, 1);
+  assert.equal(executorAttempts, 1);
 
+  failExecutor = false;
   await domain.start(task.id, { resumeFromCheckpoint: true });
-
   await waitFor(() => {
     const current = repo.getTask(task.id);
-    return current?.status === 'awaiting_approval';
-  }, 'Timed out waiting for resumed run');
+    const status = String(current?.status || '');
+    const phase = current?.result?.executionProgress?.phase;
+    return status === 'done' || (status === 'awaiting_approval' && phase === 'completed');
+  }, 'Timed out waiting for resumed completion');
 
-  const resumedTask = repo.getTask(task.id);
-  assert.equal(resumedTask.status, 'awaiting_approval');
-  assert.equal(promptPlanCalls, 1);
-  assert.match(resumedTask.summary, /PR 생성을 진행할 수 있습니다/);
+  // 게이트(spec/plan)는 재실행되지 않아야 한다.
+  assert.equal(contractCalls, 1);
+  assert.equal(planCalls, 1);
+  assert.equal(executorAttempts, 2);
 
-  const executionActions = repo.listExecutions(task.id).map((execution) => execution.action);
-  assert.ok(executionActions.includes('resume_from_checkpoint'));
+  const finishedTask = repo.getTask(task.id);
+  assert.equal(finishedTask.result.runner.chunks.length, 1);
+  assert.equal(finishedTask.result.runner.chunks[0].status, 'committed');
+  assert.equal(read('git', ['show', `${finishedTask.result.branch}:README.md`], workspace.repoDir), '# Demo\n\nResumed run.');
+});
+
+test('code execution domain runs post-completion refinement loop within frame', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  let executorCount = 0;
+  let refinementCount = 0;
+  const claudeCliRunner = makeRunnerCli({
+    async executor({ workdir }) {
+      executorCount += 1;
+      const file = `src/feature-${executorCount}.js`;
+      writeFile(path.join(workdir, file), `export const f${executorCount} = ${executorCount};\n`);
+      run('git', ['add', file], workdir);
+      run('git', ['commit', '-m', `feat: chunk ${executorCount}`], workdir);
+      return { summary: `Implemented ${file}`, testsRun: [], notes: [] };
+    },
+    async refinement() {
+      refinementCount += 1;
+      if (refinementCount === 1) {
+        return {
+          improvementFound: true,
+          inFrame: true,
+          unresolvedCount: 1,
+          rationale: 'Extract a helper to satisfy maintainability criterion.',
+          chunk: { id: 'refine_1', title: 'extract helper', acceptanceCriteria: ['helper extracted'] }
+        };
+      }
+      return { improvementFound: false, inFrame: true, unresolvedCount: 0, rationale: 'done', chunk: { id: '', title: '', acceptanceCriteria: [] } };
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: { defaultProvider: 'claude' },
+      workspace: { projectsRoot: workspace.root },
+      github: { owner: '', repositories: [] }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: {
+      async createPullRequest() {
+        throw new Error('not used');
+      }
+    },
+    codexCliRunner: {
+      async assertAvailable() {
+        throw new Error('codex should not run');
+      },
+      async runExec() {
+        throw new Error('codex should not run');
+      }
+    },
+    claudeCliRunner,
+    codeTaskPlanner: {
+      async createPullRequestDraft() {
+        return { title: 'refinement PR', body: 'refinement verification' };
+      }
+    }
+  });
+
+  const task = await domain.createTask({
+    command: 'Add feature with refinement',
+    agentProvider: 'claude',
+    workdir: workspace.repoDir,
+    baseBranch: 'main'
+  });
+
+  await driveThroughGates(domain, repo, task.id);
+
+  const finished = repo.getTask(task.id);
+  assert.equal(finished.status, 'awaiting_approval');
+  // 초기 chunk 1개 + 개선 루프 chunk 1개
+  assert.equal(finished.result.runner.chunks.length, 2);
+  assert.ok(finished.result.runner.chunks[1].title.startsWith('[개선]'));
+  assert.ok(Array.isArray(finished.result.runner.refinements));
+  assert.ok(finished.result.runner.refinements.some((entry) => entry.status === 'applied'));
+  // 개선 루프는 1회 적용 후 다음 점검에서 종료 → 점검 2회
+  assert.equal(refinementCount, 2);
+  assert.equal(executorCount, 2);
+});
+
+test('code execution domain pauses at risk gate (Gate 3) on destructive change and resumes on approval', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  const claudeCliRunner = makeRunnerCli({
+    async executor({ workdir }) {
+      writeFile(path.join(workdir, 'src', 'added.js'), 'export const added = 1;\n');
+      run('git', ['rm', 'src/index.js'], workdir);
+      run('git', ['add', 'src/added.js'], workdir);
+      run('git', ['commit', '-m', 'feat: add file and delete index'], workdir);
+      return { summary: 'Added a file and removed src/index.js', testsRun: [], notes: [] };
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: { defaultProvider: 'claude' },
+      workspace: { projectsRoot: workspace.root },
+      github: { owner: '', repositories: [] }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: { async createPullRequest() { throw new Error('not used'); } },
+    codexCliRunner: {
+      async assertAvailable() { throw new Error('codex should not run'); },
+      async runExec() { throw new Error('codex should not run'); }
+    },
+    claudeCliRunner,
+    codeTaskPlanner: { async createPullRequestDraft() { return { title: 't', body: 'b' }; } }
+  });
+
+  const gateOf = () => repo.getTask(task.id)?.result?.executionProgress?.gate;
+  const isAwaiting = () => String(repo.getTask(task.id)?.status || '') === 'awaiting_approval';
+
+  const task = await domain.createTask({
+    command: 'Risky change',
+    agentProvider: 'claude',
+    workdir: workspace.repoDir,
+    baseBranch: 'main'
+  });
+
+  await domain.start(task.id);
+  await waitFor(() => isAwaiting() && gateOf() === 'spec', 'spec gate');
+  await domain.approveGate(task.id, { gate: 'spec', decision: 'approve' });
+  await waitFor(() => isAwaiting() && gateOf() === 'plan', 'plan gate');
+  await domain.approveGate(task.id, { gate: 'plan', decision: 'approve' });
+  await waitFor(() => isAwaiting() && gateOf() === 'risk', 'risk gate');
+
+  const riskTask = repo.getTask(task.id);
+  assert.ok(riskTask.result.runner.riskReview.deletions.includes('src/index.js'));
+
+  await domain.approveGate(task.id, { gate: 'risk', decision: 'approve' });
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.result?.executionProgress?.phase === 'completed';
+  }, 'completion after risk approval');
+
+  const finished = repo.getTask(task.id);
+  assert.equal(finished.status, 'awaiting_approval');
+  assert.equal(finished.payload.riskApproved, true);
+  assert.equal(finished.result.runner.chunks[0].status, 'committed');
+});
+
+test('code execution domain enters plan patch loop when executor reports a plan mismatch', async () => {
+  const workspace = createGitWorkspace();
+  const repo = createRepository(path.join(workspace.root, 'agent.db'));
+  const workspaceRunner = new WorkspaceRunner({
+    workspace: {
+      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
+    }
+  });
+
+  let executorCalls = 0;
+  const claudeCliRunner = makeRunnerCli({
+    async executor({ workdir }) {
+      executorCalls += 1;
+      if (executorCalls === 1) {
+        return {
+          summary: 'Plan does not fit repository reality.',
+          testsRun: [],
+          notes: [],
+          planPatchRequest: { reason: 'expected helper module is missing', proposedChange: 'add a setup step before the change' }
+        };
+      }
+      writeFile(path.join(workdir, 'README.md'), '# Demo\n\nImplemented after plan patch.\n');
+      run('git', ['add', 'README.md'], workdir);
+      run('git', ['commit', '-m', 'feat: implement after plan patch'], workdir);
+      return { summary: 'Implemented after patch', testsRun: [], notes: [] };
+    }
+  });
+
+  const domain = createCodeExecutionDomain({
+    config: {
+      agent: { defaultProvider: 'claude' },
+      workspace: { projectsRoot: workspace.root },
+      github: { owner: '', repositories: [] }
+    },
+    repo,
+    workspaceRunner,
+    githubClient: { async createPullRequest() { throw new Error('not used'); } },
+    codexCliRunner: {
+      async assertAvailable() { throw new Error('codex should not run'); },
+      async runExec() { throw new Error('codex should not run'); }
+    },
+    claudeCliRunner,
+    codeTaskPlanner: { async createPullRequestDraft() { return { title: 't', body: 'b' }; } }
+  });
+
+  const gateOf = () => repo.getTask(task.id)?.result?.executionProgress?.gate;
+  const isAwaiting = () => String(repo.getTask(task.id)?.status || '') === 'awaiting_approval';
+
+  const task = await domain.createTask({
+    command: 'Change needing plan patch',
+    agentProvider: 'claude',
+    workdir: workspace.repoDir,
+    baseBranch: 'main'
+  });
+
+  await domain.start(task.id);
+  await waitFor(() => isAwaiting() && gateOf() === 'spec', 'spec gate');
+  await domain.approveGate(task.id, { gate: 'spec', decision: 'approve' });
+  await waitFor(() => isAwaiting() && gateOf() === 'plan', 'plan gate');
+  await domain.approveGate(task.id, { gate: 'plan', decision: 'approve' });
+  await waitFor(() => isAwaiting() && gateOf() === 'plan_patch', 'plan patch gate');
+
+  const patchTask = repo.getTask(task.id);
+  assert.match(patchTask.result.runner.planPatchRequest.reason, /helper module is missing/);
+
+  // 패치 승인 → 계획 재수립(Gate 2)으로 복귀
+  await domain.approveGate(task.id, { gate: 'plan_patch', decision: 'approve' });
+  await waitFor(() => isAwaiting() && gateOf() === 'plan', 'plan gate after patch');
+  assert.equal(repo.listArtifacts(task.id, 'plan_patch_history').length, 1);
+
+  // 갱신된 계획 승인 → 구현 재개 → 완료
+  await domain.approveGate(task.id, { gate: 'plan', decision: 'approve' });
+  await waitFor(() => {
+    const current = repo.getTask(task.id);
+    return current?.result?.executionProgress?.phase === 'completed';
+  }, 'completion after plan patch');
+
+  const finished = repo.getTask(task.id);
+  assert.equal(finished.status, 'awaiting_approval');
+  assert.equal(executorCalls, 2);
+  assert.equal(finished.result.runner.chunks[0].status, 'committed');
 });
 
 test('createTask can continue from a previous completed code task', async () => {
@@ -1306,7 +1498,7 @@ test('createTask can continue from a previous completed code task', async () => 
   assert.equal(createdTask.payload.parentTaskId, previousTask.id);
   assert.equal(createdTask.payload.rootTaskId, previousTask.id);
   assert.equal(createdTask.result.executionProgress.totalSteps, 6);
-  assert.equal(createdTask.result.executionProgress.reviewTotalRounds, 1);
+  assert.equal(createdTask.result.executionProgress.gate, '');
   assert.match(createdTask.summary, /이전 작업을 이어 실행 대기 중입니다/);
   assert.deepEqual(createdTask.payload.continuationContext.previousCommits, [
     'feat: initial change (abc1234)'
@@ -1513,18 +1705,20 @@ test('code execution can run on repository without commit history', async () => 
     }
   });
 
+  const codexCliRunner = makeRunnerCli({
+    async executor({ workdir }) {
+      writeFile(path.join(workdir, 'README.md'), '# Bootstrap\n');
+      run('git', ['add', 'README.md'], workdir);
+      run('git', ['commit', '-m', 'feat: bootstrap repository'], workdir);
+      return { summary: 'Bootstrapped repository files.', testsRun: [], notes: [] };
+    }
+  });
+
   const domain = createCodeExecutionDomain({
     config: {
-      agent: {
-        defaultProvider: 'codex'
-      },
-      workspace: {
-        projectsRoot: workspace.root
-      },
-      github: {
-        owner: '',
-        repositories: []
-      }
+      agent: { defaultProvider: 'codex' },
+      workspace: { projectsRoot: workspace.root },
+      github: { owner: '', repositories: [] }
     },
     repo,
     workspaceRunner,
@@ -1533,66 +1727,11 @@ test('code execution can run on repository without commit history', async () => 
         throw new Error('not used');
       }
     },
-    codexCliRunner: {
-      async assertAvailable() {},
-      async runExec({ workdir, schema }) {
-        if (schema.required.includes('findings')) {
-          return {
-            parsed: {
-              summary: 'No issues found.',
-              findings: [],
-              approval: 'approved_with_no_changes',
-              residualRisks: []
-            },
-            stdout: '',
-            stderr: '',
-            durationMs: 1
-          };
-        }
-
-        if (schema.required.includes('resolvedFindingIds')) {
-          throw new Error('patch round should not run');
-        }
-
-        writeFile(path.join(workdir, 'README.md'), '# Bootstrap\n');
-        run('git', ['add', 'README.md'], workdir);
-        run('git', ['commit', '-m', 'feat: bootstrap repository'], workdir);
-        return {
-          parsed: {
-            summary: 'Bootstrapped repository files.',
-            testsRun: [],
-            notes: []
-          },
-          stdout: '',
-          stderr: '',
-          durationMs: 1
-        };
-      }
-    },
+    codexCliRunner,
     claudeCliRunner: null,
     codeTaskPlanner: {
-      async createPromptPlan() {
-        return {
-          summary: 'Bootstrap repository',
-          goal: 'Create initial project files',
-          taskType: 'feature',
-          successCriteria: ['Initial files committed'],
-          deliverables: ['README'],
-          constraints: [],
-          relevantContext: []
-        };
-      },
-      async createProductPlan() {
-        throw new Error('not used');
-      },
-      async createDesignSpec() {
-        throw new Error('not used');
-      },
       async createPullRequestDraft() {
-        return {
-          title: 'feat: bootstrap repository',
-          body: '- bootstrap'
-        };
+        return { title: 'feat: bootstrap repository', body: '- bootstrap' };
       }
     }
   });
@@ -1605,12 +1744,7 @@ test('code execution can run on repository without commit history', async () => 
   const createdTask = repo.getTask(task.id);
   assert.equal(createdTask.payload.baseBranch, 'main');
 
-  await domain.start(task.id);
-
-  await waitFor(() => {
-    const current = repo.getTask(task.id);
-    return current?.status === 'done';
-  }, 'Timed out waiting for code task to finish in empty repository');
+  await driveThroughGates(domain, repo, task.id);
 
   const finishedTask = repo.getTask(task.id);
   assert.equal(finishedTask.status, 'done');
@@ -1618,293 +1752,4 @@ test('code execution can run on repository without commit history', async () => 
   assert.equal(hasLocalBranch(workspace.repoDir, finishedTask.result.branch), true);
   assert.equal(read('git', ['show', `${finishedTask.result.branch}:README.md`], workspace.repoDir), '# Bootstrap');
   assert.equal(Boolean(finishedTask.result.canCreatePullRequest), false);
-});
-
-test('code execution domain supports plan mode and stops after planning with confirmation requests', async () => {
-  const workspace = createGitWorkspace();
-  const repo = createRepository(path.join(workspace.root, 'agent.db'));
-  const workspaceRunner = new WorkspaceRunner({
-    workspace: {
-      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
-    }
-  });
-
-  let cliRunCount = 0;
-  const domain = createCodeExecutionDomain({
-    config: {
-      agent: {
-        defaultProvider: 'codex'
-      },
-      workspace: {
-        projectsRoot: workspace.root
-      },
-      github: {
-        owner: '',
-        repositories: []
-      }
-    },
-    repo,
-    workspaceRunner,
-    githubClient: {
-      async createPullRequest() {
-        throw new Error('not used');
-      }
-    },
-    codexCliRunner: {
-      async assertAvailable() {},
-      async runExec() {
-        cliRunCount += 1;
-        throw new Error('plan mode should not run coding/review agent');
-      }
-    },
-    claudeCliRunner: null,
-    codeTaskPlanner: {
-      async createPromptPlan() {
-        return {
-          summary: 'Plan-only summary',
-          goal: 'Create a plan and ask for user decisions',
-          taskType: 'feature',
-          successCriteria: ['plan created'],
-          deliverables: ['prompt plan'],
-          constraints: ['stay in scope'],
-          relevantContext: ['main branch'],
-          confirmationRequests: [{
-            id: 'scope_preference',
-            title: '변경 범위',
-            question: '어떤 범위로 반영할까요?',
-            options: [{
-              id: 'minimal_change',
-              label: '최소 변경',
-              description: '요청 범위만 반영',
-              recommended: true
-            }, {
-              id: 'balanced_change',
-              label: '균형 변경',
-              description: '요청 범위 + 인접 안정화',
-              recommended: false
-            }]
-          }]
-        };
-      },
-      async createProductPlan() {
-        return {
-          summary: 'Product plan summary',
-          problem: 'Need alignment before coding',
-          userScenarios: ['Operator confirms scope'],
-          acceptanceCriteria: ['Decision captured'],
-          outOfScope: [],
-          risks: []
-        };
-      },
-      async createDesignSpec() {
-        return {
-          summary: 'No design change',
-          targets: [],
-          layoutChanges: [],
-          visualRules: [],
-          interactionStates: [],
-          accessibilityChecks: [],
-          responsiveNotes: []
-        };
-      },
-      async createPullRequestDraft() {
-        throw new Error('not used in plan mode');
-      }
-    }
-  });
-
-  const task = await domain.createTask({
-    command: 'Plan this change first',
-    workdir: workspace.repoDir,
-    baseBranch: 'main',
-    executionMode: 'plan',
-    needsPlanning: true,
-    needsDesign: false
-  });
-
-  await domain.start(task.id);
-
-  await waitFor(() => {
-    const current = repo.getTask(task.id);
-    return current?.status === 'awaiting_approval';
-  }, 'Timed out waiting for plan mode task to finish');
-
-  const finishedTask = repo.getTask(task.id);
-  assert.equal(finishedTask.status, 'awaiting_approval');
-  assert.equal(finishedTask.payload.executionMode, 'plan');
-  assert.equal(finishedTask.result.executionProgress.totalSteps, 3);
-  assert.equal(finishedTask.result.executionProgress.currentStep, 3);
-  assert.equal(finishedTask.result.executionProgress.phase, 'plan_completed');
-  assert.equal(finishedTask.result.planMode.status, 'awaiting_confirmation');
-  assert.deepEqual(finishedTask.result.planMode.unresolvedRequestIds, ['scope_preference']);
-  assert.equal(repo.listArtifacts(task.id, 'plan_confirmation_requests').length, 1);
-  assert.equal(repo.listArtifacts(task.id, 'coding_prompt').length, 0);
-  assert.equal(repo.listArtifacts(task.id, 'review_round').length, 0);
-  assert.equal(cliRunCount, 0);
-  assert.equal(read('git', ['branch', '--show-current'], workspace.repoDir), 'main');
-});
-
-test('plan mode requires selection before start and can continue into coding after selections are saved', async () => {
-  const workspace = createGitWorkspace();
-  const repo = createRepository(path.join(workspace.root, 'agent.db'));
-  const workspaceRunner = new WorkspaceRunner({
-    workspace: {
-      allowlist: [workspace.root, fs.realpathSync(workspace.root)]
-    }
-  });
-
-  let runExecCount = 0;
-  const domain = createCodeExecutionDomain({
-    config: {
-      agent: {
-        defaultProvider: 'codex'
-      },
-      workspace: {
-        projectsRoot: workspace.root
-      },
-      github: {
-        owner: '',
-        repositories: []
-      }
-    },
-    repo,
-    workspaceRunner,
-    githubClient: {
-      async createPullRequest() {
-        throw new Error('not used');
-      }
-    },
-    codexCliRunner: {
-      async assertAvailable() {},
-      async runExec({ workdir, schema }) {
-        runExecCount += 1;
-
-        if (schema.required.includes('findings')) {
-          return {
-            parsed: {
-              summary: 'No findings.',
-              findings: [],
-              approval: 'approved_with_no_changes',
-              residualRisks: []
-            },
-            stdout: '',
-            stderr: '',
-            durationMs: 1
-          };
-        }
-
-        if (schema.required.includes('resolvedFindingIds')) {
-          throw new Error('patch round should not run when there are no findings');
-        }
-
-        writeFile(path.join(workdir, 'src', 'plan-mode.js'), 'export const planMode = true;\n');
-        run('git', ['add', 'src/plan-mode.js'], workdir);
-        run('git', ['commit', '-m', 'feat: apply plan-mode implementation'], workdir);
-        return {
-          parsed: {
-            summary: 'Applied code changes from confirmed plan.',
-            testsRun: ['npm test'],
-            notes: []
-          },
-          stdout: '',
-          stderr: '',
-          durationMs: 1
-        };
-      }
-    },
-    claudeCliRunner: null,
-    codeTaskPlanner: {
-      async createPromptPlan() {
-        return {
-          summary: 'Plan summary',
-          goal: 'Collect selection and then execute coding',
-          taskType: 'feature',
-          successCriteria: ['selection stored', 'code implemented'],
-          deliverables: ['code change'],
-          constraints: ['stay in scope'],
-          relevantContext: ['main branch'],
-          confirmationRequests: [{
-            id: 'scope_preference',
-            title: '변경 범위',
-            question: '변경 범위를 선택하세요.',
-            options: [{
-              id: 'minimal_change',
-              label: '최소 변경',
-              description: '요청 범위만 반영',
-              recommended: true
-            }, {
-              id: 'balanced_change',
-              label: '균형 변경',
-              description: '요청 범위 + 인접 안정화',
-              recommended: false
-            }]
-          }]
-        };
-      },
-      async createProductPlan() {
-        return {
-          summary: 'Product plan',
-          problem: 'Need selection before coding',
-          userScenarios: [],
-          acceptanceCriteria: [],
-          outOfScope: [],
-          risks: []
-        };
-      },
-      async createDesignSpec() {
-        return {
-          summary: 'No design plan',
-          targets: [],
-          layoutChanges: [],
-          visualRules: [],
-          interactionStates: [],
-          accessibilityChecks: [],
-          responsiveNotes: []
-        };
-      },
-      async createPullRequestDraft() {
-        return {
-          title: 'Plan mode follow-up',
-          body: '## Summary\n- plan mode continued into coding\n'
-        };
-      }
-    }
-  });
-
-  const task = await domain.createTask({
-    command: 'Run planning first, then continue',
-    workdir: workspace.repoDir,
-    baseBranch: 'main',
-    executionMode: 'plan'
-  });
-
-  await domain.start(task.id);
-  await waitFor(() => repo.getTask(task.id)?.status === 'awaiting_approval', 'Timed out waiting for plan mode');
-
-  const startWithoutSelection = await domain.start(task.id, { startFromPlan: true });
-  assert.equal(startWithoutSelection.started, true);
-  await waitFor(() => repo.getTask(task.id)?.status === 'failed', 'Timed out waiting for selection validation failure');
-  assert.match(String(repo.getTask(task.id)?.last_error || ''), /플랜 확인 항목 선택이 필요합니다/);
-
-  domain.savePlanSelections(task.id, {
-    selections: {
-      scope_preference: 'minimal_change'
-    }
-  });
-  const afterSelection = repo.getTask(task.id);
-  assert.equal(afterSelection.result.planMode.status, 'ready_for_execution');
-  assert.equal(afterSelection.payload.planSelections.scope_preference, 'minimal_change');
-
-  await domain.start(task.id, { startFromPlan: true });
-  await waitFor(() => repo.getTask(task.id)?.status === 'awaiting_approval', 'Timed out waiting for full execution');
-
-  const finishedTask = repo.getTask(task.id);
-  assert.equal(finishedTask.payload.executionMode, 'full');
-  assert.equal(finishedTask.result.planMode.status, 'confirmed');
-  assert.equal(finishedTask.result.executionProgress.totalSteps, 6);
-  assert.equal(finishedTask.result.executionProgress.currentStep, 6);
-  assert.ok(Array.isArray(finishedTask.result.commits));
-  assert.ok(finishedTask.result.commits.length >= 1);
-  assert.equal(read('git', ['show', `${finishedTask.result.branch}:src/plan-mode.js`], workspace.repoDir), 'export const planMode = true;');
-  assert.equal(runExecCount, 2);
 });

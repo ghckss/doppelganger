@@ -1051,6 +1051,7 @@ function createCodeAnalysisArtifactPayload(analysis) {
 export function createSlackMentionDomain({
   config,
   repo,
+  serverStartedAtUnixSeconds,
   slackClient,
   llmService,
   workspaceRunner,
@@ -1059,6 +1060,7 @@ export function createSlackMentionDomain({
 }: {
   config: any;
   repo: any;
+  serverStartedAtUnixSeconds?: number;
   slackClient: any;
   llmService: any;
   workspaceRunner?: any;
@@ -1067,6 +1069,10 @@ export function createSlackMentionDomain({
 }) {
   const stateKey = 'slack_mentions.last_success_at';
   const overlapSeconds = 120;
+  // 서버가 열린 시점. 이 시각 이전(서버가 닫혀 있던 동안)의 메시지는 수집 대상에서 제외한다.
+  const collectionFloorUnixSeconds = Number.isFinite(serverStartedAtUnixSeconds)
+    ? Number(serverStartedAtUnixSeconds)
+    : 0;
   const resolvedStatuses = new Set(['done', 'ignored']);
   const draftProviderBackoff = {
     [SLACK_DRAFT_AGENT_PROVIDER]: {
@@ -1111,9 +1117,11 @@ export function createSlackMentionDomain({
 
     const lastSuccessAt = repo.getState(stateKey, null);
     const fallbackCutoff = Math.floor(Date.now() / 1000) - config.slack.initialLookbackMinutes * 60;
-    const cutoffUnixSeconds = lastSuccessAt
+    const computedCutoff = lastSuccessAt
       ? Math.max(0, Math.floor(new Date(lastSuccessAt).valueOf() / 1000) - overlapSeconds)
       : fallbackCutoff;
+    // 서버가 닫혀 있던 동안의 데이터는 무시: 수집 기준 시각이 서버 시작 시각보다 앞설 수 없도록 floor 처리한다.
+    const cutoffUnixSeconds = Math.max(computedCutoff, collectionFloorUnixSeconds);
 
     const matches = await slackClient.searchMentionsSince({ cutoffUnixSeconds });
     const ignoredChannels = buildIgnoredChannelSet(config);

@@ -48,9 +48,6 @@ export default function App() {
   const [baseBranch, setBaseBranch] = useState('master');
   const [branchName, setBranchName] = useState('');
   const [agentProvider, setAgentProvider] = useState('codex');
-  const [executionMode, setExecutionMode] = useState<'full' | 'plan'>('full');
-  const [needsPlanning, setNeedsPlanning] = useState(false);
-  const [needsDesign, setNeedsDesign] = useState(false);
   const [metaInitialized, setMetaInitialized] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<CollapsibleState>({
     panel_meeting: false,
@@ -101,12 +98,11 @@ export default function App() {
       .map((task) => task.id),
     [codeExecutionTasks]
   );
-  const planSelectionTaskIds = useMemo(
+  const awaitingGateTaskIds = useMemo(
     () => codeExecutionTasks
       .filter((task) => {
-        const executionModeValue = String(task.payload?.executionMode || '').toLowerCase();
         const status = String(task.status || '').toLowerCase();
-        return executionModeValue === 'plan' && (status === 'awaiting_approval' || status === 'running');
+        return status === 'awaiting_approval' || status === 'failed';
       })
       .map((task) => task.id),
     [codeExecutionTasks]
@@ -119,9 +115,9 @@ export default function App() {
       selectedSlackTaskId,
       selectedGitHubTaskId,
       ...runningCodeTaskIds,
-      ...planSelectionTaskIds
+      ...awaitingGateTaskIds
     ].filter(Boolean))),
-    [planSelectionTaskIds, runningCodeTaskIds, selectedGitHubTaskId, selectedSlackTaskId]
+    [awaitingGateTaskIds, runningCodeTaskIds, selectedGitHubTaskId, selectedSlackTaskId]
   );
 
   const detailQueries = useQueries({
@@ -147,10 +143,10 @@ export default function App() {
   const slackDetail = selectedSlackTaskId ? detailMap[selectedSlackTaskId] || null : null;
   const githubDetail = selectedGitHubTaskId ? detailMap[selectedGitHubTaskId] || null : null;
   const codeTaskDetails = useMemo(
-    () => Array.from(new Set([...runningCodeTaskIds, ...planSelectionTaskIds]))
+    () => Array.from(new Set([...runningCodeTaskIds, ...awaitingGateTaskIds]))
       .map((taskId) => detailMap[taskId])
       .filter((detail): detail is TaskDetail => Boolean(detail)),
-    [detailMap, planSelectionTaskIds, runningCodeTaskIds]
+    [awaitingGateTaskIds, detailMap, runningCodeTaskIds]
   );
 
   const slackEditor = slackDetail ? draftEditorsByTaskId[slackDetail.task.id] : null;
@@ -498,18 +494,12 @@ export default function App() {
             baseBranch={baseBranch}
             branchName={branchName}
             agentProvider={agentProvider}
-            executionMode={executionMode}
-            needsPlanning={needsPlanning}
-            needsDesign={needsDesign}
             onToggleSection={toggleSection}
             onSetCommand={setCommand}
             onSetProjectId={setProjectId}
             onSetBaseBranch={setBaseBranch}
             onSetBranchName={setBranchName}
             onSetAgentProvider={setAgentProvider}
-            onSetExecutionMode={setExecutionMode}
-            onSetNeedsPlanning={setNeedsPlanning}
-            onSetNeedsDesign={setNeedsDesign}
             onRunAction={(label, action) => {
               void runAction(label, action);
             }}

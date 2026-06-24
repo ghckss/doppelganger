@@ -405,6 +405,45 @@ test('slack mention domain applies overlap to avoid missing near-boundary messag
   assert.equal(receivedCutoff, 1775618282);
 });
 
+test('slack mention domain ignores data accumulated while the server was closed', async () => {
+  const repo = createRepo();
+  // 서버가 닫혀 있던 동안 기록된 오래된 성공 시각(서버 시작 시각보다 한참 이전)
+  repo.setState('slack_mentions.last_success_at', '2026-04-08T03:20:02.086Z');
+
+  // 서버가 2026-06-16에 다시 열렸다고 가정
+  const serverStartedAtUnixSeconds = Math.floor(new Date('2026-06-16T00:00:00.000Z').valueOf() / 1000);
+
+  let receivedCutoff = null;
+  const slackClient = {
+    isConfigured: () => true,
+    searchMentionsSince: async ({ cutoffUnixSeconds }) => {
+      receivedCutoff = cutoffUnixSeconds;
+      return [];
+    }
+  };
+
+  const domain = createSlackMentionDomain({
+    config: {
+      slack: {
+        initialLookbackMinutes: 10
+      }
+    },
+    repo,
+    serverStartedAtUnixSeconds,
+    slackClient,
+    llmService: {
+      generateSlackDraft: async () => {
+        throw new Error('not used');
+      }
+    }
+  });
+
+  await domain.poll();
+
+  // 오래된 last_success_at 대신 서버 시작 시각으로 floor 되어야 한다.
+  assert.equal(receivedCutoff, serverStartedAtUnixSeconds);
+});
+
 test('slack mention domain keeps default no-repo-lookup and runs auto repository analysis from detail action', async () => {
   const repo = createRepo();
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-slack-workspace-'));

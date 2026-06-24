@@ -115,8 +115,8 @@ export class TaskService {
     return this.commandService.createCodeExecutionPullRequest(taskId, options);
   }
 
-  async saveCodeExecutionPlanSelections(taskId: string, options: Record<string, unknown> = {}) {
-    return this.commandService.saveCodeExecutionPlanSelections(taskId, options);
+  async approveCodeExecutionGate(taskId: string, options: Record<string, unknown> = {}) {
+    return this.commandService.approveCodeExecutionGate(taskId, options);
   }
 
   saveDraft(taskId: string, input: {

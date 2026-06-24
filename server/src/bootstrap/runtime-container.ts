@@ -22,6 +22,7 @@ export interface RuntimeContainer {
   domainDependencies: {
     config: AppConfig;
     repo: Repository;
+    serverStartedAtUnixSeconds: number;
     slackClient: SlackClient;
     openaiClient: OpenAIClient;
     githubClient: GitHubClient;
@@ -36,6 +37,9 @@ export interface RuntimeContainer {
 
 export function createRuntimeContainer({ cwd = process.cwd() }: CreateRuntimeContainerOptions = {}): RuntimeContainer {
   const config = loadConfig({ cwd });
+  // 서버 프로세스가 열린 시점. 슬랙 수집은 이 시각 이후 데이터만 대상으로 하며,
+  // 서버가 닫혀 있던 동안 쌓인 메시지는 무시한다.
+  const serverStartedAtUnixSeconds = Math.floor(Date.now() / 1000);
   const repo = createRepository(config.app.databasePath) as Repository;
   const slackClient = new SlackClient(config);
   const openaiClient = new OpenAIClient(config);
@@ -61,6 +65,7 @@ export function createRuntimeContainer({ cwd = process.cwd() }: CreateRuntimeCon
     domainDependencies: {
       config,
       repo,
+      serverStartedAtUnixSeconds,
       slackClient,
       openaiClient,
       githubClient,

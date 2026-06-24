@@ -1,18 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  approveCodeTaskGate,
   createCodeTask,
   createPullRequest,
   deleteTask,
   resumeCodeTask,
-  runTask,
-  saveCodeTaskPlanSelections,
   updateCodeTaskStatus
 } from '../api';
 import type { MetaResponse, Task, TaskDetail } from '../types';
 import type {
   CollapsibleSectionId,
   CollapsibleState,
-  ExecutionProgress
+  ExecutionProgress,
+  RunnerGate
 } from '../task-view';
 import {
   formatDateTime,
@@ -26,40 +26,63 @@ import {
   EMPTY_CLASS,
   INPUT_CLASS,
   LABEL_CLASS,
-  modeButtonClass,
   PANEL_CLASS,
   StatusBadge,
   SUB_BUTTON_CLASS
 } from './common';
 import { TaskTimeline } from './TaskTimeline';
 
-type ReviewFindingView = {
+type MergeFindingView = {
   id: string;
   severity: string;
-  category: string;
   title: string;
   description: string;
   fileRefs: string[];
-  suggestedFix: string;
-  mustFix: boolean;
+  action: string;
 };
 
-type ReviewRoundView = {
-  round: number;
-  review: {
-    summary: string;
-    approval: string;
-    residualRisks: string[];
-    findings: ReviewFindingView[];
-  } | null;
-  patch: {
-    summary: string;
-    resolvedFindings: string[];
-    declinedFindings: string[];
-    testsRun: string[];
-    notes: string[];
-    newCommits: string[];
-  } | null;
+type ChunkView = {
+  id: string;
+  title: string;
+  status: string;
+  executorSummary: string;
+  testsRun: string[];
+  acceptanceCriteria: string[];
+  mustFix: MergeFindingView[];
+  shouldFix: MergeFindingView[];
+  advisory: MergeFindingView[];
+  patchCommits: string[];
+  remainingKnownIssues: MergeFindingView[];
+};
+
+type RequirementContractView = {
+  summary: string;
+  goals: string[];
+  nonGoals: string[];
+  constraints: string[];
+  acceptanceCriteria: string[];
+  edgeCases: string[];
+  openQuestions: string[];
+};
+
+type ImplementationPlanView = {
+  summary: string;
+  implementationSteps: string[];
+  filesLikelyToChange: string[];
+  architectureImpact: string[];
+  risks: string[];
+  rolloutConcerns: string[];
+  validationStrategy: string[];
+  chunkCommitBoundaries: string[];
+  taskBreakdown: Array<{ id: string; title: string; acceptanceCriteria: string[] }>;
+};
+
+type FinalValidationView = {
+  contractMet: boolean;
+  regression: string;
+  summary: string;
+  residualRisks: string[];
+  acceptanceResults: Array<{ criterion: string; status: string; evidence: string }>;
 };
 
 type CodeExecutionPanelProps = {
@@ -73,44 +96,24 @@ type CodeExecutionPanelProps = {
   baseBranch: string;
   branchName: string;
   agentProvider: string;
-  executionMode: 'full' | 'plan';
-  needsPlanning: boolean;
-  needsDesign: boolean;
   onToggleSection: (sectionId: CollapsibleSectionId) => void;
   onSetCommand: (value: string) => void;
   onSetProjectId: (value: string) => void;
   onSetBaseBranch: (value: string) => void;
   onSetBranchName: (value: string) => void;
   onSetAgentProvider: (value: string) => void;
-  onSetExecutionMode: (value: 'full' | 'plan') => void;
-  onSetNeedsPlanning: (value: boolean) => void;
-  onSetNeedsDesign: (value: boolean) => void;
   onRunAction: (label: string, action: () => Promise<string | string[] | void>) => void;
-};
-
-type PlanConfirmationOptionView = {
-  id: string;
-  label: string;
-  description: string;
-  recommended: boolean;
-};
-
-type PlanConfirmationRequestView = {
-  id: string;
-  title: string;
-  question: string;
-  options: PlanConfirmationOptionView[];
 };
 
 type ManualCodeTaskStatus = 'running' | 'awaiting_approval' | 'failed' | 'done';
 
 const EXECUTION_STEP_ITEMS = [
   { step: 1, label: '작업 환경 점검 + 브랜치 준비' },
-  { step: 2, label: '프롬프트/기획/디자인 계획 생성' },
-  { step: 3, label: '코딩 에이전트 실행' },
-  { step: 4, label: '리뷰/수정 라운드 1' },
-  { step: 5, label: 'PR 초안 정리' },
-  { step: 6, label: '코드 작업 완료' }
+  { step: 2, label: '요구사항 계약 작성 (Gate 1)' },
+  { step: 3, label: '구현 계획 수립 (Gate 2)' },
+  { step: 4, label: 'chunk 구현 · 리뷰 스웜 · 커밋' },
+  { step: 5, label: '최종 검증' },
+  { step: 6, label: 'runner 워크플로 완료' }
 ] as const;
 
 const CONTINUATION_SOURCE_STATUSES = new Set(['done', 'awaiting_approval', 'failed']);
@@ -122,8 +125,9 @@ const DEFAULT_PROGRESS: ExecutionProgress = {
   currentStep: 0,
   totalSteps: 6,
   percent: 0,
-  reviewRound: 0,
-  reviewTotalRounds: 1
+  gate: '',
+  chunkIndex: 0,
+  chunkTotal: 0
 };
 
 function stepState(currentStep: number, step: number): 'done' | 'current' | 'pending' {
@@ -163,14 +167,6 @@ function toText(value: unknown): string {
   return String(value).trim();
 }
 
-function toNumber(value: unknown, fallback = 0): number {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return fallback;
-  }
-  return numeric;
-}
-
 function toTextList(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -186,190 +182,187 @@ function normalizeManualCodeTaskStatus(value: unknown): ManualCodeTaskStatus {
   return 'running';
 }
 
-function parseReviewFinding(value: unknown): ReviewFindingView {
+function parseMergeFinding(value: unknown): MergeFindingView {
   const source = toRecord(value);
   return {
     id: toText(source.id),
     severity: toText(source.severity),
-    category: toText(source.category),
     title: toText(source.title),
     description: toText(source.description),
     fileRefs: toTextList(source.fileRefs),
-    suggestedFix: toText(source.suggestedFix),
-    mustFix: Boolean(source.mustFix)
+    action: toText(source.action)
   };
 }
 
-function parseReviewSection(value: unknown): ReviewRoundView['review'] {
-  const source = toRecord(value);
+function parseMergeFindingList(value: unknown): MergeFindingView[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry) => parseMergeFinding(entry)).filter((finding) => finding.title || finding.description);
+}
+
+function runnerState(task: Task): Record<string, unknown> {
+  return toRecord(toRecord(task.result).runner);
+}
+
+function resolveRequirementContract(task: Task): RequirementContractView | null {
+  const source = toRecord(runnerState(task).requirementContract);
   if (Object.keys(source).length === 0) {
     return null;
   }
-
-  const findings = Array.isArray(source.findings)
-    ? source.findings.map((finding) => parseReviewFinding(finding))
-    : [];
   return {
     summary: toText(source.summary),
-    approval: toText(source.approval),
-    residualRisks: toTextList(source.residualRisks),
-    findings
+    goals: toTextList(source.goals),
+    nonGoals: toTextList(source.nonGoals),
+    constraints: toTextList(source.constraints),
+    acceptanceCriteria: toTextList(source.acceptanceCriteria),
+    edgeCases: toTextList(source.edgeCases),
+    openQuestions: toTextList(source.openQuestions)
   };
 }
 
-function parsePatchSection(value: unknown): ReviewRoundView['patch'] {
-  const source = toRecord(value);
+function resolveImplementationPlan(task: Task): ImplementationPlanView | null {
+  const source = toRecord(runnerState(task).implementationPlan);
   if (Object.keys(source).length === 0) {
     return null;
   }
-
+  const taskBreakdown = Array.isArray(source.taskBreakdown)
+    ? source.taskBreakdown.map((entry) => {
+      const chunk = toRecord(entry);
+      return {
+        id: toText(chunk.id),
+        title: toText(chunk.title),
+        acceptanceCriteria: toTextList(chunk.acceptanceCriteria)
+      };
+    })
+    : [];
   return {
     summary: toText(source.summary),
-    resolvedFindings: toTextList(source.resolvedFindings),
-    declinedFindings: toTextList(source.declinedFindings),
-    testsRun: toTextList(source.testsRun),
-    notes: toTextList(source.notes),
-    newCommits: toTextList(source.newCommits)
+    implementationSteps: toTextList(source.implementationSteps),
+    filesLikelyToChange: toTextList(source.filesLikelyToChange),
+    architectureImpact: toTextList(source.architectureImpact),
+    risks: toTextList(source.risks),
+    rolloutConcerns: toTextList(source.rolloutConcerns),
+    validationStrategy: toTextList(source.validationStrategy),
+    chunkCommitBoundaries: toTextList(source.chunkCommitBoundaries),
+    taskBreakdown
   };
 }
 
-function parseRoundNumber(value: unknown): number {
-  const direct = toNumber(value, 0);
-  return direct > 0 ? Math.trunc(direct) : 0;
-}
-
-function normalizeIdentifier(value: unknown): string {
-  return toText(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-}
-
-function parsePlanConfirmationOption(value: unknown, requestId: string, index: number): PlanConfirmationOptionView {
-  const source = toRecord(value);
-  const optionId = normalizeIdentifier(source.id) || `${requestId}_option_${index + 1}`;
-  const label = toText(source.label) || `옵션 ${index + 1}`;
-  const description = toText(source.description) || label;
-  return {
-    id: optionId,
-    label,
-    description,
-    recommended: Boolean(source.recommended)
-  };
-}
-
-function parsePlanConfirmationRequest(value: unknown, index: number): PlanConfirmationRequestView | null {
-  const source = toRecord(value);
-  const requestId = normalizeIdentifier(source.id) || `confirm_${index + 1}`;
-  if (!requestId) {
-    return null;
+function resolveChunks(task: Task): ChunkView[] {
+  const chunks = runnerState(task).chunks;
+  if (!Array.isArray(chunks)) {
+    return [];
   }
-
-  const options = Array.isArray(source.options)
-    ? source.options.map((option, optionIndex) => parsePlanConfirmationOption(option, requestId, optionIndex))
-    : [];
-  if (options.length === 0) {
-    options.push({
-      id: `${requestId}_default`,
-      label: '기본안',
-      description: '기본 권장안으로 진행합니다.',
-      recommended: true
-    });
-  }
-
-  if (!options.some((option) => option.recommended)) {
-    options[0] = {
-      ...options[0],
-      recommended: true
+  return chunks.map((entry, index) => {
+    const source = toRecord(entry);
+    const merged = toRecord(source.mergedReview);
+    return {
+      id: toText(source.id) || `chunk_${index + 1}`,
+      title: toText(source.title) || `구현 단위 ${index + 1}`,
+      status: toText(source.status) || 'pending',
+      executorSummary: toText(source.executorSummary),
+      testsRun: toTextList(source.testsRun),
+      acceptanceCriteria: toTextList(source.acceptanceCriteria),
+      mustFix: parseMergeFindingList(merged.mustFix),
+      shouldFix: parseMergeFindingList(merged.shouldFix),
+      advisory: parseMergeFindingList(merged.advisory),
+      patchCommits: toTextList(source.patchCommits),
+      remainingKnownIssues: parseMergeFindingList(source.remainingKnownIssues)
     };
-  }
+  });
+}
 
+type RefinementView = {
+  iteration: number;
+  status: string;
+  rationale: string;
+  title: string;
+};
+
+const REFINEMENT_STATUS_LABEL: Record<string, string> = {
+  applied: '개선 반영됨',
+  no_improvement: '개선점 없음(종료)',
+  frame_exceeding: '프레임 초과 → 별도 작업 권장',
+  no_progress: '진행 없음(종료)'
+};
+
+function resolveRefinements(task: Task): RefinementView[] {
+  const refinements = runnerState(task).refinements;
+  if (!Array.isArray(refinements)) {
+    return [];
+  }
+  return refinements.map((entry, index) => {
+    const source = toRecord(entry);
+    return {
+      iteration: Number(source.iteration) || index + 1,
+      status: toText(source.status),
+      rationale: toText(source.rationale),
+      title: toText(source.title)
+    };
+  });
+}
+
+function resolveFinalValidation(task: Task): FinalValidationView | null {
+  const source = toRecord(runnerState(task).finalValidation);
+  if (Object.keys(source).length === 0) {
+    return null;
+  }
   return {
-    id: requestId,
-    title: toText(source.title) || `확인 항목 ${index + 1}`,
-    question: toText(source.question) || '작업 진행 전에 선택이 필요합니다.',
-    options
+    contractMet: Boolean(source.contractMet),
+    regression: toText(source.regression),
+    summary: toText(source.summary),
+    residualRisks: toTextList(source.residualRisks),
+    acceptanceResults: Array.isArray(source.acceptanceResults)
+      ? source.acceptanceResults.map((entry) => {
+        const record = toRecord(entry);
+        return {
+          criterion: toText(record.criterion),
+          status: toText(record.status),
+          evidence: toText(record.evidence)
+        };
+      })
+      : []
   };
 }
 
-function parsePlanSelections(value: unknown): Record<string, string> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-
-  return Object.entries(value as Record<string, unknown>).reduce((accumulator, [requestId, optionId]) => {
-    const normalizedRequestId = normalizeIdentifier(requestId);
-    const normalizedOptionId = normalizeIdentifier(optionId);
-    if (!normalizedRequestId || !normalizedOptionId) {
-      return accumulator;
-    }
-    accumulator[normalizedRequestId] = normalizedOptionId;
-    return accumulator;
-  }, {} as Record<string, string>);
+function resolveGate(task: Task): RunnerGate {
+  const progress = getExecutionProgress(task);
+  return progress?.gate || '';
 }
 
-function extractRoundFromTitle(value: unknown): number {
-  const text = toText(value);
-  if (!text) {
-    return 0;
+type RiskReviewView = {
+  deletions: string[];
+  dependencyChanges: string[];
+  envChanges: string[];
+};
+
+function resolveRiskReview(task: Task): RiskReviewView | null {
+  const source = toRecord(runnerState(task).riskReview);
+  if (Object.keys(source).length === 0) {
+    return null;
   }
-  const matched = text.match(/(\d+)/);
-  if (!matched) {
-    return 0;
-  }
-  return parseRoundNumber(matched[1]);
+  return {
+    deletions: toTextList(source.deletions),
+    dependencyChanges: toTextList(source.dependencyChanges),
+    envChanges: toTextList(source.envChanges)
+  };
 }
 
-function mergeReviewRoundList(detail: TaskDetail): ReviewRoundView[] {
-  const taskResult = toRecord(detail.task.result);
-  const map = new Map<number, ReviewRoundView>();
-  const roundsFromResult = Array.isArray(taskResult.reviewRounds) ? taskResult.reviewRounds : [];
+type PlanPatchView = {
+  reason: string;
+  proposedChange: string;
+};
 
-  roundsFromResult.forEach((round) => {
-    const source = toRecord(round);
-    const roundNumber = parseRoundNumber(source.round);
-    if (roundNumber <= 0) {
-      return;
-    }
-
-    map.set(roundNumber, {
-      round: roundNumber,
-      review: parseReviewSection(source.review),
-      patch: parsePatchSection(source.patch)
-    });
-  });
-
-  const reviewArtifacts = detail.artifacts.filter((artifact) => artifact.type === 'review_round');
-  reviewArtifacts.forEach((artifact) => {
-    const roundNumber = parseRoundNumber(artifact.metadata?.round) || extractRoundFromTitle(artifact.title);
-    if (roundNumber <= 0) {
-      return;
-    }
-
-    const current = map.get(roundNumber) || { round: roundNumber, review: null, patch: null };
-    const parsedReview = parseReviewSection(artifact.metadata);
-    map.set(roundNumber, {
-      ...current,
-      review: parsedReview || current.review
-    });
-  });
-
-  const patchArtifacts = detail.artifacts.filter((artifact) => artifact.type === 'patch_round');
-  patchArtifacts.forEach((artifact) => {
-    const roundNumber = parseRoundNumber(artifact.metadata?.round) || extractRoundFromTitle(artifact.title);
-    if (roundNumber <= 0) {
-      return;
-    }
-
-    const current = map.get(roundNumber) || { round: roundNumber, review: null, patch: null };
-    const parsedPatch = parsePatchSection(artifact.metadata);
-    map.set(roundNumber, {
-      ...current,
-      patch: parsedPatch || current.patch
-    });
-  });
-
-  return Array.from(map.values()).sort((left, right) => left.round - right.round);
+function resolvePlanPatchRequest(task: Task): PlanPatchView | null {
+  const source = toRecord(runnerState(task).planPatchRequest);
+  if (Object.keys(source).length === 0) {
+    return null;
+  }
+  return {
+    reason: toText(source.reason),
+    proposedChange: toText(source.proposedChange)
+  };
 }
 
 function resolveCommand(task: Task): string {
@@ -399,54 +392,6 @@ function resolveCanCreatePullRequest(task: Task): boolean {
   }
   const remoteUrl = toText(result.remoteUrl) || toText(payload.remoteUrl);
   return Boolean(remoteUrl);
-}
-
-function resolveExecutionMode(task: Task): 'full' | 'plan' {
-  const mode = toText(toRecord(task.payload).executionMode).toLowerCase();
-  if (mode === 'plan' || mode === 'plan_only') {
-    return 'plan';
-  }
-  return 'full';
-}
-
-function resolvePlanConfirmationRequests(task: Task, detail: TaskDetail | null): PlanConfirmationRequestView[] {
-  const result = toRecord(task.result);
-  const planMode = toRecord(result.planMode);
-  const requestsSource = Array.isArray(planMode.confirmationRequests)
-    ? planMode.confirmationRequests
-    : [];
-  if (requestsSource.length > 0) {
-    return requestsSource
-      .map((request, index) => parsePlanConfirmationRequest(request, index))
-      .filter((request): request is PlanConfirmationRequestView => Boolean(request));
-  }
-
-  const promptPlan = toRecord(result.promptPlan);
-  const fallbackSource = Array.isArray(promptPlan.confirmationRequests)
-    ? promptPlan.confirmationRequests
-    : detail?.artifacts
-      ?.filter((artifact) => artifact.type === 'plan_confirmation_requests')
-      .at(-1)
-      ?.metadata
-      ?.confirmationRequests;
-
-  if (!Array.isArray(fallbackSource)) {
-    return [];
-  }
-
-  return fallbackSource
-    .map((request, index) => parsePlanConfirmationRequest(request, index))
-    .filter((request): request is PlanConfirmationRequestView => Boolean(request));
-}
-
-function resolvePlanSelections(task: Task): Record<string, string> {
-  const payload = toRecord(task.payload);
-  const result = toRecord(task.result);
-  const planMode = toRecord(result.planMode);
-  return {
-    ...parsePlanSelections(payload.planSelections),
-    ...parsePlanSelections(planMode.selections)
-  };
 }
 
 type ContinuationHistoryItem = {
@@ -489,14 +434,14 @@ function resolveContinuationResultSummary(task: Task): string {
 
   const result = toRecord(task.result);
   const commitCount = Array.isArray(result.commits) ? result.commits.length : 0;
-  const reviewRoundCount = Array.isArray(result.reviewRounds) ? result.reviewRounds.length : 0;
+  const chunkCount = Array.isArray(runnerState(task).chunks) ? (runnerState(task).chunks as unknown[]).length : 0;
   const pullRequestUrl = toText(toRecord(result.pullRequest).url);
   const parts: string[] = [];
   if (commitCount > 0) {
     parts.push(`커밋 ${commitCount}건`);
   }
-  if (reviewRoundCount > 0) {
-    parts.push(`리뷰 ${reviewRoundCount}회`);
+  if (chunkCount > 0) {
+    parts.push(`chunk ${chunkCount}개`);
   }
   if (pullRequestUrl) {
     parts.push(`PR ${pullRequestUrl}`);
@@ -505,6 +450,49 @@ function resolveContinuationResultSummary(task: Task): string {
     return parts.join(' · ');
   }
   return '결과 요약이 없습니다.';
+}
+
+function TextBlock({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) {
+    return null;
+  }
+  return (
+    <div>
+      <p className="text-xs font-semibold text-slate-900">{title}</p>
+      <ul className="mt-1 list-disc pl-5 text-xs text-slate-700">
+        {items.map((item, index) => (
+          <li key={`${title}-${index}`} className="whitespace-pre-wrap break-words">{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function FindingList({ title, findings, tone }: { title: string; findings: MergeFindingView[]; tone: 'rose' | 'amber' | 'slate' }) {
+  if (findings.length === 0) {
+    return null;
+  }
+  const toneClass = tone === 'rose'
+    ? 'border-rose-200 bg-rose-50 text-rose-900'
+    : tone === 'amber'
+      ? 'border-amber-200 bg-amber-50 text-amber-900'
+      : 'border-slate-200 bg-slate-50 text-slate-700';
+  return (
+    <div className={`rounded-md border p-2 ${toneClass}`}>
+      <p className="text-xs font-semibold">{title} ({findings.length})</p>
+      <ul className="mt-1 list-disc pl-5 text-xs">
+        {findings.map((finding, index) => (
+          <li key={`${title}-${finding.id || index}`} className="whitespace-pre-wrap break-words">
+            <strong>{finding.severity || '-'}</strong>
+            {finding.title ? ` · ${finding.title}` : ''}
+            {finding.description ? ` — ${finding.description}` : ''}
+            {finding.fileRefs.length > 0 ? ` (${finding.fileRefs.join(', ')})` : ''}
+            {finding.action ? ` → ${finding.action}` : ''}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export function CodeExecutionPanel({
@@ -518,18 +506,12 @@ export function CodeExecutionPanel({
   baseBranch,
   branchName,
   agentProvider,
-  executionMode,
-  needsPlanning,
-  needsDesign,
   onToggleSection,
   onSetCommand,
   onSetProjectId,
   onSetBaseBranch,
   onSetBranchName,
   onSetAgentProvider,
-  onSetExecutionMode,
-  onSetNeedsPlanning,
-  onSetNeedsDesign,
   onRunAction
 }: CodeExecutionPanelProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -540,8 +522,11 @@ export function CodeExecutionPanel({
   const [resumeHistoryModalOpen, setResumeHistoryModalOpen] = useState(false);
   const [continueFromTaskId, setContinueFromTaskId] = useState('');
   const [continueCommand, setContinueCommand] = useState('');
-  const [planSelectionsByTaskId, setPlanSelectionsByTaskId] = useState<Record<string, Record<string, string>>>({});
   const [statusDraftByTaskId, setStatusDraftByTaskId] = useState<Record<string, ManualCodeTaskStatus>>({});
+  const [regenerateOpenByTaskId, setRegenerateOpenByTaskId] = useState<Record<string, boolean>>({});
+  const [regenerateDraftByTaskId, setRegenerateDraftByTaskId] = useState<Record<string, string>>({});
+  const [answerOpenByTaskId, setAnswerOpenByTaskId] = useState<Record<string, boolean>>({});
+  const [answerDraftByTaskId, setAnswerDraftByTaskId] = useState<Record<string, string[]>>({});
 
   const detailByTaskId = useMemo(() => {
     const next: Record<string, TaskDetail> = {};
@@ -551,28 +536,33 @@ export function CodeExecutionPanel({
     return next;
   }, [taskDetails]);
 
+  const gateTasks = useMemo(() => {
+    const list = tasks
+      .filter((task) => {
+        const status = String(task.status || '').toLowerCase();
+        const gate = resolveGate(task);
+        return status === 'awaiting_approval' && (gate === 'spec' || gate === 'plan' || gate === 'risk' || gate === 'plan_patch');
+      })
+      .slice();
+    list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
+    return list;
+  }, [tasks]);
+
   const runningTasks = useMemo(() => {
     const list = tasks
       .filter((task) => {
         const status = String(task.status || '').toLowerCase();
-        return resolveExecutionMode(task) === 'full'
-          && (status === 'running' || status === 'awaiting_approval' || status === 'failed');
+        const gate = resolveGate(task);
+        if (status === 'running' || status === 'failed') {
+          return true;
+        }
+        return status === 'awaiting_approval' && gate === '';
       })
       .slice();
     list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
     return list;
   }, [tasks]);
-  const planModeTasks = useMemo(() => {
-    const list = tasks
-      .filter((task) => {
-        const status = String(task.status || '').toLowerCase();
-        return resolveExecutionMode(task) === 'plan'
-          && (status === 'awaiting_approval' || status === 'running' || status === 'failed');
-      })
-      .slice();
-    list.sort((left, right) => String(right.updated_at || '').localeCompare(String(left.updated_at || '')));
-    return list;
-  }, [tasks]);
+
   const continuationCandidates = useMemo(() => {
     const list = tasks
       .filter((task) => CONTINUATION_SOURCE_STATUSES.has(String(task.status || '').toLowerCase()))
@@ -623,13 +613,29 @@ export function CodeExecutionPanel({
     }));
   }, [selectedContinuationTask, tasks]);
 
+  const gateTaskViews = useMemo(
+    () => gateTasks.map((task) => {
+      const detail = detailByTaskId[task.id] || null;
+      const sourceTask = detail?.task || task;
+      return {
+        task: sourceTask,
+        gate: resolveGate(sourceTask),
+        commandText: resolveCommand(sourceTask) || toText(sourceTask.title) || sourceTask.id,
+        contract: resolveRequirementContract(sourceTask),
+        plan: resolveImplementationPlan(sourceTask),
+        riskReview: resolveRiskReview(sourceTask),
+        planPatch: resolvePlanPatchRequest(sourceTask)
+      };
+    }),
+    [detailByTaskId, gateTasks]
+  );
+
   const runningTaskViews = useMemo(
     () => runningTasks.map((task) => {
       const detail = detailByTaskId[task.id] || null;
       const sourceTask = detail?.task || task;
       const progress = getExecutionProgress(sourceTask) || DEFAULT_PROGRESS;
       const currentStep = Math.max(0, Number(progress.currentStep || 0));
-      const reviewRoundList = detail ? mergeReviewRoundList(detail) : [];
       const commandText = resolveCommand(sourceTask);
       const taskMessage = toText(sourceTask.summary) || toText(sourceTask.title);
       const pullRequestUrl = resolvePullRequestUrl(sourceTask);
@@ -643,7 +649,9 @@ export function CodeExecutionPanel({
         currentStep,
         elapsedSeconds: getExecutionStepElapsedSeconds(sourceTask, progress, nowMs),
         summary: summarizeExecutionStep(progress),
-        reviewRoundList,
+        chunks: resolveChunks(sourceTask),
+        refinements: resolveRefinements(sourceTask),
+        finalValidation: resolveFinalValidation(sourceTask),
         commandText,
         taskMessage,
         pullRequestUrl,
@@ -657,35 +665,6 @@ export function CodeExecutionPanel({
       };
     }),
     [detailByTaskId, nowMs, runningTasks]
-  );
-  const planTaskViews = useMemo(
-    () => planModeTasks.map((task) => {
-      const detail = detailByTaskId[task.id] || null;
-      const sourceTask = detail?.task || task;
-      const requests = resolvePlanConfirmationRequests(sourceTask, detail);
-      const persistedSelections = resolvePlanSelections(sourceTask);
-      const localSelections = planSelectionsByTaskId[sourceTask.id] || {};
-      const selections = {
-        ...persistedSelections,
-        ...localSelections
-      };
-      const unresolvedRequestIds = requests
-        .map((request) => request.id)
-        .filter((requestId) => !selections[requestId]);
-      const status = String(sourceTask.status || '').toLowerCase();
-      return {
-        task: sourceTask,
-        detail,
-        commandText: resolveCommand(sourceTask) || toText(sourceTask.title) || sourceTask.id,
-        requests,
-        selections,
-        unresolvedRequestIds,
-        canSave: requests.length > 0,
-        canStart: status === 'awaiting_approval' && unresolvedRequestIds.length === 0,
-        canResume: status === 'failed'
-      };
-    }),
-    [detailByTaskId, planModeTasks, planSelectionsByTaskId]
   );
 
   const createPrTarget = useMemo(
@@ -775,33 +754,6 @@ export function CodeExecutionPanel({
   }, [createPrTaskId, runningTaskViews]);
 
   useEffect(() => {
-    if (planTaskViews.length === 0) {
-      return;
-    }
-    setPlanSelectionsByTaskId((current) => {
-      const next: Record<string, Record<string, string>> = {};
-      let changed = false;
-      for (const view of planTaskViews) {
-        const existing = current[view.task.id] || {};
-        next[view.task.id] = {
-          ...view.selections,
-          ...existing
-        };
-        const before = JSON.stringify(existing);
-        const after = JSON.stringify(next[view.task.id]);
-        if (before !== after) {
-          changed = true;
-        }
-      }
-      const hasRemoved = Object.keys(current).some((taskId) => !planTaskViews.some((view) => view.task.id === taskId));
-      if (!changed && !hasRemoved) {
-        return current;
-      }
-      return next;
-    });
-  }, [planTaskViews]);
-
-  useEffect(() => {
     if (!resumeHistoryModalOpen) {
       return;
     }
@@ -833,29 +785,109 @@ export function CodeExecutionPanel({
     }));
   }
 
-  function selectPlanOption(taskId: string, requestId: string, optionId: string) {
-    setPlanSelectionsByTaskId((current) => ({
-      ...current,
-      [taskId]: {
-        ...(current[taskId] || {}),
-        [requestId]: optionId
-      }
-    }));
-  }
-
-  function savePlanSelections(taskId: string) {
-    const selections = planSelectionsByTaskId[taskId] || {};
-    onRunAction('플랜 선택 저장', async () => {
-      await saveCodeTaskPlanSelections(taskId, selections);
+  function approveGate(taskId: string, gate: RunnerGate) {
+    if (gate !== 'spec' && gate !== 'plan') {
+      return;
+    }
+    onRunAction(gate === 'spec' ? '요구사항 계약 승인' : '구현 계획 승인', async () => {
+      await approveCodeTaskGate(taskId, { gate, decision: 'approve' });
       return taskId;
     });
   }
 
-  function startFromPlan(taskId: string) {
-    const selections = planSelectionsByTaskId[taskId] || {};
-    onRunAction('플랜 확정 후 코드 실행', async () => {
-      await saveCodeTaskPlanSelections(taskId, selections);
-      await runTask(taskId, { startFromPlan: true });
+  function approveRunnerGate(taskId: string, gate: RunnerGate) {
+    if (gate !== 'risk' && gate !== 'plan_patch') {
+      return;
+    }
+    onRunAction(gate === 'risk' ? '위험 변경 승인' : '계획 패치 승인', async () => {
+      await approveCodeTaskGate(taskId, { gate, decision: 'approve' });
+      return taskId;
+    });
+  }
+
+  function rejectRunnerGate(taskId: string, gate: RunnerGate) {
+    if (gate !== 'risk' && gate !== 'plan_patch') {
+      return;
+    }
+    const confirmed = window.confirm(gate === 'risk'
+      ? '위험 변경을 거부하고 작업을 중단할까요?'
+      : '계획 패치를 거부하고 작업을 중단할까요?');
+    if (!confirmed) {
+      return;
+    }
+    onRunAction(gate === 'risk' ? '위험 변경 거부' : '계획 패치 거부', async () => {
+      await approveCodeTaskGate(taskId, { gate, decision: 'reject' });
+      return taskId;
+    });
+  }
+
+  function openRegenerate(taskId: string) {
+    setRegenerateOpenByTaskId((current) => ({ ...current, [taskId]: true }));
+  }
+
+  function closeRegenerate(taskId: string) {
+    setRegenerateOpenByTaskId((current) => ({ ...current, [taskId]: false }));
+  }
+
+  function setRegenerateDraft(taskId: string, value: string) {
+    setRegenerateDraftByTaskId((current) => ({ ...current, [taskId]: value }));
+  }
+
+  function submitRegenerate(taskId: string, gate: RunnerGate) {
+    if (gate !== 'spec' && gate !== 'plan') {
+      return;
+    }
+    const feedback = (regenerateDraftByTaskId[taskId] || '').trim();
+    if (!feedback) {
+      return;
+    }
+    onRunAction(gate === 'spec' ? '요구사항 계약 재생성' : '구현 계획 재생성', async () => {
+      await approveCodeTaskGate(taskId, { gate, decision: 'regenerate', feedback });
+      setRegenerateOpenByTaskId((current) => ({ ...current, [taskId]: false }));
+      setRegenerateDraftByTaskId((current) => ({ ...current, [taskId]: '' }));
+      return taskId;
+    });
+  }
+
+  function openAnswers(taskId: string, questionCount: number) {
+    setAnswerDraftByTaskId((current) => ({
+      ...current,
+      [taskId]: (current[taskId] && current[taskId].length === questionCount)
+        ? current[taskId]
+        : Array.from({ length: questionCount }, () => '')
+    }));
+    setRegenerateOpenByTaskId((current) => ({ ...current, [taskId]: false }));
+    setAnswerOpenByTaskId((current) => ({ ...current, [taskId]: true }));
+  }
+
+  function closeAnswers(taskId: string) {
+    setAnswerOpenByTaskId((current) => ({ ...current, [taskId]: false }));
+  }
+
+  function setAnswer(taskId: string, index: number, value: string) {
+    setAnswerDraftByTaskId((current) => {
+      const next = (current[taskId] || []).slice();
+      next[index] = value;
+      return { ...current, [taskId]: next };
+    });
+  }
+
+  function submitAnswers(taskId: string, questions: string[]) {
+    const answers = answerDraftByTaskId[taskId] || [];
+    const pairs = questions
+      .map((question, index) => ({ question, answer: (answers[index] || '').trim() }))
+      .filter((pair) => pair.answer);
+    if (pairs.length === 0) {
+      return;
+    }
+    const feedback = [
+      '아래는 열린 질문(open questions)에 대한 답변입니다. 이 답변을 반영해 요구사항 계약을 갱신하고, 해결된 항목은 openQuestions에서 제거해 주세요.',
+      ...pairs.map((pair, index) => `${index + 1}. Q: ${pair.question}\n   A: ${pair.answer}`)
+    ].join('\n');
+    onRunAction('열린 질문 답변 반영', async () => {
+      await approveCodeTaskGate(taskId, { gate: 'spec', decision: 'regenerate', feedback });
+      setAnswerOpenByTaskId((current) => ({ ...current, [taskId]: false }));
+      setAnswerDraftByTaskId((current) => ({ ...current, [taskId]: [] }));
       return taskId;
     });
   }
@@ -916,10 +948,7 @@ export function CodeExecutionPanel({
         baseBranch,
         branchName,
         continueFromTaskId: selectedTask.id,
-        agentProvider,
-        executionMode,
-        needsPlanning,
-        needsDesign
+        agentProvider
       });
       return created.task.id;
     });
@@ -955,7 +984,7 @@ export function CodeExecutionPanel({
   return (
     <section className={`${PANEL_CLASS} border-amber-200 bg-amber-50/70`}>
       <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-100/80 px-3 py-2">
-        <h2 className="text-base font-semibold text-slate-800">코드 작업</h2>
+        <h2 className="text-base font-semibold text-slate-800">코드 작업 (runner 워크플로)</h2>
         <button type="button" className={SUB_BUTTON_CLASS} onClick={() => onToggleSection('panel_code')}>
           {collapsedSections.panel_code ? '펼치기' : '접기'}
         </button>
@@ -982,7 +1011,7 @@ export function CodeExecutionPanel({
             </div>
             {!collapsedSections.code_create && (
               <form
-                className="grid gap-3 md:grid-cols-5"
+                className="grid gap-3 md:grid-cols-4"
                 onSubmit={(event) => {
                   event.preventDefault();
                   onRunAction('코드 작업 생성', async () => {
@@ -991,10 +1020,7 @@ export function CodeExecutionPanel({
                       projectId,
                       baseBranch,
                       branchName,
-                      agentProvider,
-                      executionMode,
-                      needsPlanning,
-                      needsDesign
+                      agentProvider
                     });
                     return created.task.id;
                   });
@@ -1030,18 +1056,7 @@ export function CodeExecutionPanel({
                     <option value="claude">Claude</option>
                   </select>
                 </label>
-                <label className={LABEL_CLASS}>
-                  실행 모드
-                  <select
-                    className={INPUT_CLASS}
-                    value={executionMode}
-                    onChange={(event) => onSetExecutionMode(event.target.value === 'plan' ? 'plan' : 'full')}
-                  >
-                    <option value="full">전체 실행 (플랜+코딩)</option>
-                    <option value="plan">플랜 모드 (계획/확인 요청)</option>
-                  </select>
-                </label>
-                <label className={`${LABEL_CLASS} md:col-span-5`}>
+                <label className={`${LABEL_CLASS} md:col-span-4`}>
                   명령
                   <textarea
                     className={INPUT_CLASS}
@@ -1052,17 +1067,10 @@ export function CodeExecutionPanel({
                     required
                   />
                 </label>
-                <div className='flex gap-2 md:col-span-2'>
-                  <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" checked={needsPlanning} onChange={(event) => onSetNeedsPlanning(event.target.checked)} />
-                    기획 단계 실행
-                  </label>
-                  <label className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" checked={needsDesign} onChange={(event) => onSetNeedsDesign(event.target.checked)} />
-                    디자인 단계 실행
-                  </label>
-                </div>
-                <div className="md:col-span-3 flex justify-end">
+                <p className="md:col-span-4 text-xs text-slate-600">
+                  실행하면 요구사항 계약(Gate 1) → 구현 계획(Gate 2) 순으로 승인 게이트가 표시됩니다.
+                </p>
+                <div className="md:col-span-4 flex justify-end">
                   <button type="submit" className={BUTTON_CLASS} disabled={Boolean(busyAction)}>실행</button>
                 </div>
               </form>
@@ -1071,105 +1079,235 @@ export function CodeExecutionPanel({
 
           <section className="mt-4 border-t border-slate-200 pt-4">
             <div className="mb-4 flex items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold text-slate-900">플랜 모드 확인 요청 ({planTaskViews.length})</h3>
+              <h3 className="text-sm font-semibold text-slate-900">승인 게이트 ({gateTaskViews.length})</h3>
             </div>
-            {planTaskViews.length === 0 && (
-              <p className={EMPTY_CLASS}>선택 대기 중인 플랜 모드 작업이 없습니다.</p>
+            {gateTaskViews.length === 0 && (
+              <p className={EMPTY_CLASS}>승인 대기 중인 게이트가 없습니다.</p>
             )}
-            {planTaskViews.length > 0 && (
+            {gateTaskViews.length > 0 && (
               <div className="space-y-3">
-                {planTaskViews.map((view) => (
-                  <article key={`plan-task-${view.task.id}`} className="rounded-xl border border-slate-200 bg-white p-3">
+                {gateTaskViews.map((view) => (
+                  <article key={`gate-task-${view.task.id}`} className="rounded-xl border border-amber-300 bg-white p-3">
                     <header className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-900">{view.commandText}</p>
-                        <p className="mt-1 text-xs text-slate-600">{mapStatusLabel(view.task.status)}</p>
+                        <p className="mt-1 text-xs font-medium text-amber-800">
+                          {view.gate === 'spec' && 'Gate 1 · 요구사항 계약 승인 대기'}
+                          {view.gate === 'plan' && 'Gate 2 · 구현 계획 승인 대기'}
+                          {view.gate === 'risk' && 'Gate 3 · 위험 변경 승인 대기'}
+                          {view.gate === 'plan_patch' && '계획 패치 승인 대기'}
+                        </p>
                       </div>
                       <StatusBadge status={view.task.status} label={mapStatusLabel(view.task.status)} />
                     </header>
-                    <p className="mt-2 whitespace-pre-wrap break-words text-xs text-slate-700">
-                      {toText(view.task.summary) || '플랜 모드 설명이 아직 없습니다.'}
-                    </p>
 
-                    {view.requests.length === 0 ? (
-                      <p className="mt-3 text-xs text-slate-600">
-                        {view.canStart
-                          ? '추가 확인 항목이 없어 바로 코드 실행을 시작할 수 있습니다.'
-                          : '확인 요청 항목을 불러오는 중입니다.'}
-                      </p>
-                    ) : (
-                      <div className="mt-3 grid gap-2">
-                        {view.requests.map((request) => {
-                          const selectedOptionId = normalizeIdentifier(view.selections[request.id]);
-                          return (
-                            <section key={`${view.task.id}-${request.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-2">
-                              <p className="text-xs font-semibold text-slate-900">{request.title}</p>
-                              <p className="mt-1 text-xs text-slate-700">{request.question}</p>
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                {request.options.map((option) => {
-                                  const selected = selectedOptionId === option.id;
-                                  return (
-                                    <button
-                                      key={`${view.task.id}-${request.id}-${option.id}`}
-                                      type="button"
-                                      className={modeButtonClass(selected)}
-                                      onClick={() => selectPlanOption(view.task.id, request.id, option.id)}
-                                      disabled={Boolean(busyAction)}
-                                    >
-                                      {option.label}{option.recommended ? ' (권장)' : ''}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                              <p className="mt-1 text-[11px] text-slate-600">
-                                {request.options.find((option) => option.id === selectedOptionId)?.description
-                                  || '옵션을 선택해 주세요.'}
-                              </p>
-                            </section>
-                          );
-                        })}
+                    {view.gate === 'spec' && view.contract && (
+                      <div className="mt-3 grid gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        {view.contract.summary && (
+                          <p className="text-xs text-slate-700 whitespace-pre-wrap break-words">{view.contract.summary}</p>
+                        )}
+                        <TextBlock title="목표 (goals)" items={view.contract.goals} />
+                        <TextBlock title="비목표 (non-goals)" items={view.contract.nonGoals} />
+                        <TextBlock title="제약 (constraints)" items={view.contract.constraints} />
+                        <TextBlock title="수용 기준 (acceptance criteria)" items={view.contract.acceptanceCriteria} />
+                        <TextBlock title="엣지 케이스" items={view.contract.edgeCases} />
+                        <TextBlock title="열린 질문 (open questions)" items={view.contract.openQuestions} />
                       </div>
                     )}
 
-                    {view.unresolvedRequestIds.length > 0 && (
-                      <p className="mt-2 text-xs text-amber-700">
-                        미선택 항목: {view.unresolvedRequestIds.join(', ')}
-                      </p>
+                    {view.gate === 'plan' && view.plan && (
+                      <div className="mt-3 grid gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        {view.plan.summary && (
+                          <p className="text-xs text-slate-700 whitespace-pre-wrap break-words">{view.plan.summary}</p>
+                        )}
+                        <TextBlock title="구현 단계" items={view.plan.implementationSteps} />
+                        <TextBlock title="변경 예상 파일" items={view.plan.filesLikelyToChange} />
+                        <TextBlock title="아키텍처 영향" items={view.plan.architectureImpact} />
+                        <TextBlock title="리스크" items={view.plan.risks} />
+                        <TextBlock title="검증 전략" items={view.plan.validationStrategy} />
+                        {view.plan.taskBreakdown.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-slate-900">chunk 분해 ({view.plan.taskBreakdown.length})</p>
+                            <ol className="mt-1 grid gap-1">
+                              {view.plan.taskBreakdown.map((chunk, index) => (
+                                <li key={`${view.task.id}-plan-chunk-${chunk.id || index}`} className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700">
+                                  <strong>{index + 1}. {chunk.title}</strong>
+                                  {chunk.acceptanceCriteria.length > 0 && (
+                                    <ul className="mt-0.5 list-disc pl-4 text-[11px] text-slate-600">
+                                      {chunk.acceptanceCriteria.map((criterion, criterionIndex) => (
+                                        <li key={`${view.task.id}-plan-chunk-${index}-ac-${criterionIndex}`}>{criterion}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {view.gate === 'risk' && (
+                      <div className="mt-3 grid gap-2 rounded-lg border border-rose-200 bg-rose-50/60 p-3">
+                        <p className="text-xs text-slate-700">
+                          autopilot 중 위험 가능성이 있는 변경이 감지되었습니다. 검토 후 계속 진행할지 결정해 주세요.
+                        </p>
+                        <TextBlock title="파일 삭제" items={view.riskReview?.deletions ?? []} />
+                        <TextBlock title="의존성/lockfile 변경" items={view.riskReview?.dependencyChanges ?? []} />
+                        <TextBlock title=".env 변경" items={view.riskReview?.envChanges ?? []} />
+                      </div>
+                    )}
+
+                    {view.gate === 'plan_patch' && (
+                      <div className="mt-3 grid gap-2 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                        <p className="text-xs text-slate-700">
+                          실행 중 계획 불일치가 보고되었습니다. 승인하면 패치 요청을 반영해 구현 계획을 다시 수립합니다(Gate 2 재검토).
+                        </p>
+                        {view.planPatch?.reason && (
+                          <p className="text-xs text-slate-700 whitespace-pre-wrap break-words"><strong>불일치 사유:</strong> {view.planPatch.reason}</p>
+                        )}
+                        {view.planPatch?.proposedChange && (
+                          <p className="text-xs text-slate-700 whitespace-pre-wrap break-words"><strong>제안된 변경:</strong> {view.planPatch.proposedChange}</p>
+                        )}
+                      </div>
+                    )}
+
+                    {((view.gate === 'spec' && !view.contract) || (view.gate === 'plan' && !view.plan)) && (
+                      <p className="mt-3 text-xs text-slate-600">게이트 산출물을 불러오는 중입니다.</p>
+                    )}
+
+                    {view.gate === 'spec' && answerOpenByTaskId[view.task.id] && (view.contract?.openQuestions.length ?? 0) > 0 && (
+                      <section className="mt-3 rounded-lg border border-sky-200 bg-sky-50/60 p-3">
+                        <p className="text-xs font-semibold text-slate-900">열린 질문 답변</p>
+                        <p className="mt-1 text-[11px] text-slate-600">
+                          각 질문에 답하면, 답변을 반영해 요구사항 계약을 다시 생성합니다(답변한 항목만 전달).
+                        </p>
+                        <div className="mt-2 grid gap-2">
+                          {(view.contract?.openQuestions ?? []).map((question, index) => (
+                            <label key={`${view.task.id}-oq-${index}`} className="grid gap-1 text-xs text-slate-700">
+                              <span className="whitespace-pre-wrap break-words">{index + 1}. {question}</span>
+                              <textarea
+                                className={INPUT_CLASS}
+                                value={(answerDraftByTaskId[view.task.id] || [])[index] || ''}
+                                onChange={(event) => setAnswer(view.task.id, index, event.target.value)}
+                                rows={2}
+                                placeholder="이 질문에 대한 답변(비워두면 전달하지 않음)"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                        <div className="mt-2 flex flex-wrap justify-end gap-2">
+                          <button
+                            type="button"
+                            className={SUB_BUTTON_CLASS}
+                            onClick={() => closeAnswers(view.task.id)}
+                            disabled={Boolean(busyAction)}
+                          >
+                            취소
+                          </button>
+                          <button
+                            type="button"
+                            className={BUTTON_CLASS}
+                            onClick={() => submitAnswers(view.task.id, view.contract?.openQuestions ?? [])}
+                            disabled={Boolean(busyAction) || !(answerDraftByTaskId[view.task.id] || []).some((answer) => answer.trim())}
+                          >
+                            답변 반영해 재생성
+                          </button>
+                        </div>
+                      </section>
+                    )}
+
+                    {regenerateOpenByTaskId[view.task.id] && (
+                      <section className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+                        <label className={LABEL_CLASS}>
+                          재생성 요청 사항
+                          <textarea
+                            className={INPUT_CLASS}
+                            value={regenerateDraftByTaskId[view.task.id] || ''}
+                            onChange={(event) => setRegenerateDraft(view.task.id, event.target.value)}
+                            rows={3}
+                            placeholder={view.gate === 'spec'
+                              ? '예: 비목표에 SEO는 제외, 인증 토큰 만료 처리도 수용 기준에 추가해 주세요'
+                              : '예: chunk를 2개로 나누고, layout.tsx 신설 대신 page.tsx 서버화로 진행해 주세요'}
+                            autoFocus
+                          />
+                        </label>
+                        <p className="mt-1 text-[11px] text-slate-600">
+                          입력한 요청 사항을 반영해 {view.gate === 'spec' ? '요구사항 계약' : '구현 계획'}을 다시 생성합니다.
+                        </p>
+                        <div className="mt-2 flex flex-wrap justify-end gap-2">
+                          <button
+                            type="button"
+                            className={SUB_BUTTON_CLASS}
+                            onClick={() => closeRegenerate(view.task.id)}
+                            disabled={Boolean(busyAction)}
+                          >
+                            취소
+                          </button>
+                          <button
+                            type="button"
+                            className={BUTTON_CLASS}
+                            onClick={() => submitRegenerate(view.task.id, view.gate)}
+                            disabled={Boolean(busyAction) || !(regenerateDraftByTaskId[view.task.id] || '').trim()}
+                          >
+                            재생성 요청 제출
+                          </button>
+                        </div>
+                      </section>
                     )}
 
                     <section className="mt-3 flex flex-wrap justify-end gap-2">
-                      {view.canSave && (
-                        <button
-                          type="button"
-                          className={SUB_BUTTON_CLASS}
-                          onClick={() => savePlanSelections(view.task.id)}
-                          disabled={Boolean(busyAction)}
-                        >
-                          선택 저장
-                        </button>
+                      {(view.gate === 'spec' || view.gate === 'plan') && (
+                        <>
+                          {view.gate === 'spec' && (view.contract?.openQuestions.length ?? 0) > 0 && (
+                            <button
+                              type="button"
+                              className={SUB_BUTTON_CLASS}
+                              onClick={() => (answerOpenByTaskId[view.task.id]
+                                ? closeAnswers(view.task.id)
+                                : openAnswers(view.task.id, view.contract?.openQuestions.length ?? 0))}
+                              disabled={Boolean(busyAction)}
+                            >
+                              {answerOpenByTaskId[view.task.id] ? '답변 입력 닫기' : `열린 질문 답변 (${view.contract?.openQuestions.length ?? 0})`}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className={SUB_BUTTON_CLASS}
+                            onClick={() => (regenerateOpenByTaskId[view.task.id] ? closeRegenerate(view.task.id) : openRegenerate(view.task.id))}
+                            disabled={Boolean(busyAction)}
+                          >
+                            {regenerateOpenByTaskId[view.task.id] ? '재생성 입력 닫기' : '다시 생성'}
+                          </button>
+                          <button
+                            type="button"
+                            className={BUTTON_CLASS}
+                            onClick={() => approveGate(view.task.id, view.gate)}
+                            disabled={Boolean(busyAction)}
+                          >
+                            {view.gate === 'spec' ? '승인 · 구현 계획 수립' : '승인 · 구현 시작'}
+                          </button>
+                        </>
                       )}
-                      {view.canStart && (
-                        <button
-                          type="button"
-                          className={BUTTON_CLASS}
-                          onClick={() => startFromPlan(view.task.id)}
-                          disabled={Boolean(busyAction)}
-                        >
-                          플랜 확정 후 코드 실행
-                        </button>
-                      )}
-                      {view.canResume && (
-                        <button
-                          type="button"
-                          className={BUTTON_CLASS}
-                          onClick={() => onRunAction('코드 작업 재개', async () => {
-                            await resumeCodeTask(view.task.id);
-                            return view.task.id;
-                          })}
-                          disabled={Boolean(busyAction)}
-                        >
-                          플랜 모드 재개
-                        </button>
+                      {(view.gate === 'risk' || view.gate === 'plan_patch') && (
+                        <>
+                          <button
+                            type="button"
+                            className={SUB_BUTTON_CLASS}
+                            onClick={() => rejectRunnerGate(view.task.id, view.gate)}
+                            disabled={Boolean(busyAction)}
+                          >
+                            중단
+                          </button>
+                          <button
+                            type="button"
+                            className={BUTTON_CLASS}
+                            onClick={() => approveRunnerGate(view.task.id, view.gate)}
+                            disabled={Boolean(busyAction)}
+                          >
+                            {view.gate === 'risk' ? '승인 · 계속 진행' : '승인 · 계획 갱신'}
+                          </button>
+                        </>
                       )}
                     </section>
                   </article>
@@ -1225,13 +1363,6 @@ export function CodeExecutionPanel({
                           </section>
 
                           <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                            <h4 className="text-sm font-semibold text-slate-900">작업 요청 메시지</h4>
-                            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">
-                              {view.commandText || '작업 요청 메시지가 아직 없습니다.'}
-                            </p>
-                          </section>
-
-                          <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                             <div className="flex items-start justify-between gap-3">
                               <h4 className="text-sm font-semibold text-slate-900">세부 진행현황</h4>
                               {view.elapsedSeconds !== null && (
@@ -1240,7 +1371,7 @@ export function CodeExecutionPanel({
                             </div>
                             <p className="mt-1 text-xs text-slate-500">
                               {view.progress.currentStep}/{view.progress.totalSteps}
-                              {view.progress.reviewTotalRounds > 0 && ` · 리뷰 ${view.progress.reviewRound}/${view.progress.reviewTotalRounds}`}
+                              {view.progress.chunkTotal > 0 && ` · chunk ${view.progress.chunkIndex}/${view.progress.chunkTotal}`}
                               {view.progress.label ? ` · ${view.progress.label}` : ''}
                             </p>
                             <p className="mt-1 text-xs text-slate-700">{view.summary}</p>
@@ -1258,79 +1389,83 @@ export function CodeExecutionPanel({
 
                           <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                             <div className="mb-2 flex items-center justify-between gap-3">
-                              <h4 className="text-sm font-semibold text-slate-900">리뷰 라운드 내용</h4>
-                              <p className="text-xs text-slate-500">{view.reviewRoundList.length}건</p>
+                              <h4 className="text-sm font-semibold text-slate-900">chunk 진행 내역</h4>
+                              <p className="text-xs text-slate-500">{view.chunks.length}개</p>
                             </div>
-                            {view.reviewRoundList.length === 0 && (
+                            {view.chunks.length === 0 && (
                               <p className="text-xs text-slate-600">
-                                리뷰 라운드가 시작되면 검토 결과와 수정 내역이 여기에 표시됩니다.
+                                구현이 시작되면 chunk별 구현/리뷰/커밋 내역이 여기에 표시됩니다.
                               </p>
                             )}
                             <div className="grid gap-2">
-                              {view.reviewRoundList.map((round) => {
-                                const findings = round.review?.findings || [];
-                                return (
-                                  <details key={`${view.task.id}-round-${round.round}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2" open>
-                                    <summary className="cursor-pointer text-sm font-semibold text-slate-900">
-                                      라운드 {round.round}
-                                      {round.review?.approval ? ` · ${round.review.approval}` : ''}
-                                      {findings.length > 0 ? ` · 발견사항 ${findings.length}건` : ''}
-                                    </summary>
-                                    <div className="mt-2 grid gap-2 text-sm text-slate-700">
-                                      {round.review?.summary && (
-                                        <p>
-                                          <strong>리뷰 요약:</strong> {round.review.summary}
-                                        </p>
-                                      )}
-                                      {findings.length > 0 && (
-                                        <div className="rounded-md border border-amber-200 bg-amber-50 p-2">
-                                          <p className="text-xs font-semibold text-amber-900">발견사항</p>
-                                          <ul className="mt-1 list-disc pl-5 text-xs text-amber-900">
-                                            {findings.map((finding, index) => (
-                                              <li key={`${view.task.id}-round-${round.round}-${finding.id || finding.title || index}`}>
-                                                <strong>{finding.severity || '-'}</strong>
-                                                {finding.mustFix ? ' [Must Fix]' : ''}
-                                                {finding.title ? ` · ${finding.title}` : ''}
-                                                {finding.description ? ` — ${finding.description}` : ''}
-                                                {finding.fileRefs.length > 0 ? ` (${finding.fileRefs.join(', ')})` : ''}
-                                              </li>
-                                            ))}
-                                          </ul>
-                                        </div>
-                                      )}
-                                      {round.patch?.summary && (
-                                        <p>
-                                          <strong>수정 요약:</strong> {round.patch.summary}
-                                        </p>
-                                      )}
-                                      {round.patch && (
-                                        <div className="grid gap-1 text-xs text-slate-600">
-                                          {round.patch.resolvedFindings.length > 0 && (
-                                            <p>해결한 항목: {round.patch.resolvedFindings.join(', ')}</p>
-                                          )}
-                                          {round.patch.declinedFindings.length > 0 && (
-                                            <p>보류/미해결 항목: {round.patch.declinedFindings.join(', ')}</p>
-                                          )}
-                                          {round.patch.testsRun.length > 0 && (
-                                            <p>실행한 테스트: {round.patch.testsRun.join(', ')}</p>
-                                          )}
-                                          {round.patch.newCommits.length > 0 && (
-                                            <p>라운드 커밋: {round.patch.newCommits.join(', ')}</p>
-                                          )}
-                                          {round.patch.notes.length > 0 && (
-                                            <p>노트: {round.patch.notes.join(', ')}</p>
-                                          )}
-                                        </div>
-                                      )}
-                                      {round.review?.residualRisks.length ? (
-                                        <p className="text-xs text-rose-700">잔여 리스크: {round.review.residualRisks.join(', ')}</p>
-                                      ) : null}
-                                    </div>
-                                  </details>
-                                );
-                              })}
+                              {view.chunks.map((chunk, index) => (
+                                <details key={`${view.task.id}-chunk-${chunk.id || index}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2" open>
+                                  <summary className="cursor-pointer text-sm font-semibold text-slate-900">
+                                    {index + 1}. {chunk.title}
+                                    {chunk.status ? ` · ${chunk.status === 'committed' ? '커밋 완료' : chunk.status}` : ''}
+                                    {chunk.mustFix.length > 0 ? ` · must-fix ${chunk.mustFix.length}` : ''}
+                                  </summary>
+                                  <div className="mt-2 grid gap-2 text-sm text-slate-700">
+                                    {chunk.executorSummary && (
+                                      <p><strong>구현 요약:</strong> {chunk.executorSummary}</p>
+                                    )}
+                                    {chunk.testsRun.length > 0 && (
+                                      <p className="text-xs text-slate-600">실행한 검증: {chunk.testsRun.join(', ')}</p>
+                                    )}
+                                    <FindingList title="must-fix (P0/P1)" findings={chunk.mustFix} tone="rose" />
+                                    <FindingList title="should-fix (P2)" findings={chunk.shouldFix} tone="amber" />
+                                    <FindingList title="advisory (P3/P4)" findings={chunk.advisory} tone="slate" />
+                                    {chunk.patchCommits.length > 0 && (
+                                      <p className="text-xs text-slate-600">수정 커밋: {chunk.patchCommits.join(', ')}</p>
+                                    )}
+                                    {chunk.remainingKnownIssues.length > 0 && (
+                                      <FindingList title="남은 알려진 이슈" findings={chunk.remainingKnownIssues} tone="slate" />
+                                    )}
+                                  </div>
+                                </details>
+                              ))}
                             </div>
                           </section>
+
+                          {view.refinements.length > 0 && (
+                            <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                              <h4 className="text-sm font-semibold text-slate-900">완료 후 개선 루프 ({view.refinements.length})</h4>
+                              <ul className="mt-1 list-disc pl-5 text-xs text-slate-700">
+                                {view.refinements.map((refinement, index) => (
+                                  <li key={`${view.task.id}-refine-${index}`} className="whitespace-pre-wrap break-words">
+                                    <strong>{refinement.iteration}회차 · {REFINEMENT_STATUS_LABEL[refinement.status] || refinement.status}</strong>
+                                    {refinement.title ? ` · ${refinement.title}` : ''}
+                                    {refinement.rationale ? ` — ${refinement.rationale}` : ''}
+                                  </li>
+                                ))}
+                              </ul>
+                            </section>
+                          )}
+
+                          {view.finalValidation && (
+                            <section className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                              <h4 className="text-sm font-semibold text-slate-900">
+                                최종 검증 {view.finalValidation.contractMet ? '· 계약 충족' : '· 미충족 항목 있음'}
+                              </h4>
+                              {view.finalValidation.summary && (
+                                <p className="mt-1 text-xs text-slate-700 whitespace-pre-wrap break-words">{view.finalValidation.summary}</p>
+                              )}
+                              {view.finalValidation.acceptanceResults.length > 0 && (
+                                <ul className="mt-2 list-disc pl-5 text-xs text-slate-700">
+                                  {view.finalValidation.acceptanceResults.map((result, index) => (
+                                    <li key={`${view.task.id}-acceptance-${index}`} className="whitespace-pre-wrap break-words">
+                                      <strong>{result.status || '-'}</strong>
+                                      {result.criterion ? ` · ${result.criterion}` : ''}
+                                      {result.evidence ? ` — ${result.evidence}` : ''}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                              {view.finalValidation.residualRisks.length > 0 && (
+                                <p className="mt-1 text-xs text-rose-700">잔여 리스크: {view.finalValidation.residualRisks.join(', ')}</p>
+                              )}
+                            </section>
+                          )}
 
                           {view.detail ? (
                             <TaskTimeline

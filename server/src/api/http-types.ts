@@ -66,7 +66,7 @@ export interface TaskServiceApi {
     alreadyRunning: boolean;
     detail: TaskDetail;
   }>;
-  startCodeExecutionTask(taskId: string, input?: { startFromPlan?: boolean }): Promise<TaskDetail>;
+  startCodeExecutionTask(taskId: string, input?: Record<string, unknown>): Promise<TaskDetail>;
   resumeCodeExecutionTask(taskId: string): Promise<TaskDetail>;
   updateCodeExecutionTaskStatus(taskId: string, input: {
     status: string;
@@ -74,7 +74,7 @@ export interface TaskServiceApi {
     lastError?: string;
   }): Promise<TaskDetail>;
   deleteTask(taskId: string): void;
-  saveCodeExecutionPlanSelections(taskId: string, input: { selections?: Record<string, unknown> }): Promise<TaskDetail>;
+  approveCodeExecutionGate(taskId: string, input: { gate?: string; decision?: string; feedback?: string }): Promise<TaskDetail>;
   createCodeExecutionPullRequest(taskId: string, input: { branchName?: string }): Promise<TaskDetail>;
   pollSlackMentions(): Promise<unknown>;
   pollGitHubReviews(): Promise<unknown>;
